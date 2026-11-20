@@ -52,7 +52,7 @@ pub enum ThemeMode {
 impl ThemeMode {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Onyx => "Onyx",
+            Self::Onyx => "Onyx Ink",
             Self::Dark => "Crisp",
             Self::Ash => "Ash",
             Self::Light => "Light",
@@ -152,24 +152,24 @@ impl Palette {
             ThemeMode::Onyx => Self {
                 mode,
                 app_bg: 0x000000,
-                rail: 0x0c0e12,
-                sidebar: 0x0c0e12,
-                chat: 0x0c0e12,
-                members: 0x0c0e12,
-                elevated: 0x14171c,
-                input: 0x14171c,
-                hover: 0x161a20,
-                selected: 0x1c2128,
-                text: 0xedf0f8,
-                muted: 0x8592ad,
-                faint: 0x576175,
-                accent: 0x5865f2,
-                accent_text: 0xffffff,
-                danger: 0xf23f43,
-                line: 0x1a1e26,
+                rail: 0x000000,
+                sidebar: 0x000000,
+                chat: 0x000000,
+                members: 0x000000,
+                elevated: 0x0a0a14,
+                input: 0x000000,
+                hover: 0x0c1024,
+                selected: 0x080b1a,
+                text: 0xedeef7,
+                muted: 0x9aa0c0,
+                faint: 0x7a80a0,
+                accent: 0x4f6bff,
+                accent_text: 0x000000,
+                danger: 0xe05550,
+                line: 0x15152a,
                 code_bg: 0x000000,
-                link: 0x00a8fc,
-                ping: 0x161a28,
+                link: 0xa8b8ff,
+                ping: 0x101428,
             },
             ThemeMode::Ash | ThemeMode::Dark => Self {
                 mode,
@@ -264,7 +264,7 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            theme: ThemeMode::Dark,
+            theme: ThemeMode::Onyx,
             density: Density::Cozy,
             font_px: 15.0,
             layout: LayoutKind::Discord,
@@ -396,7 +396,10 @@ mod tests {
     fn amoled_is_true_black_and_themes_cycle() {
         let onyx = Palette::for_mode(ThemeMode::Onyx);
         assert_eq!(onyx.app_bg, 0x000000);
-        assert_eq!(onyx.chat, 0x0c0e12);
+        assert_eq!(onyx.chat, 0x000000);
+        assert_eq!(onyx.accent, 0x4f6bff);
+        assert_eq!(onyx.accent_text, 0x000000);
+        assert_eq!(onyx.link, 0xa8b8ff);
         assert_eq!(Palette::for_mode(ThemeMode::Dark).app_bg, 0x16181d);
         assert_eq!(Palette::for_mode(ThemeMode::Ash).chat, 0x1c1f26);
         assert_ne!(Palette::for_mode(ThemeMode::Light).text, onyx.text);

@@ -12,6 +12,7 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::label::Label;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use rencord_desktop::{Density, Palette, Shell, ThemeMode, MOTION_OVERLAY_MS};
 use rencord_markdown::{parse, Block, Inline};
@@ -62,6 +63,14 @@ fn main() {
             _ => None,
         });
     let start_voice = args.iter().any(|arg| arg == "--voice");
+    let reveal_hover = args.iter().any(|arg| arg == "--reveal-hover");
+    let frame = args
+        .windows(2)
+        .find(|pair| pair[0] == "--size")
+        .and_then(|pair| {
+            let (width, height) = pair[1].split_once('x')?;
+            Some((width.parse::<f32>().ok()?, height.parse::<f32>().ok()?))
+        });
     let app = gpui_kit::application().with_assets(Assets);
     app.run(move |cx| {
         gpui_kit::init(cx);
@@ -69,6 +78,10 @@ fn main() {
             Cow::Borrowed(include_bytes!("../assets/fonts/Figtree-Regular.ttf")),
             Cow::Borrowed(include_bytes!("../assets/fonts/Figtree-Medium.ttf")),
             Cow::Borrowed(include_bytes!("../assets/fonts/Figtree-SemiBold.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Regular.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/Inter-Medium.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/Inter-SemiBold.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf")),
         ]);
         cx.bind_keys([
             KeyBinding::new("ctrl-k", QuickSwitcher, None),
@@ -91,15 +104,26 @@ fn main() {
             KeyBinding::new("cmd-/", ShowHelp, None),
             KeyBinding::new("enter", SendMessage, None),
         ]);
+        let (frame_w, frame_h) = frame.unwrap_or((1180., 760.));
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
+            window_bounds: Some(WindowBounds::centered(size(px(frame_w), px(frame_h)), cx)),
             // Client decorations drop the desktop app-menu button. Settings stays in the dock.
             window_decorations: Some(WindowDecorations::Client),
             ..Default::default()
         };
         gpui_kit::open_window(options, cx, move |window, cx| {
             cx.new(|cx| {
-                RencordWindow::new(demo, bench, theme, layout, density, start_voice, window, cx)
+                RencordWindow::new(
+                    demo,
+                    bench,
+                    theme,
+                    layout,
+                    density,
+                    start_voice,
+                    reveal_hover,
+                    window,
+                    cx,
+                )
             })
         })
         .expect("open Rencord window");
@@ -121,6 +145,7 @@ struct RencordWindow {
     frame_us: Vec<u128>,
     collapsed: HashSet<&'static str>,
     pinned_top: bool,
+    reveal_hover: bool,
 }
 
 impl RencordWindow {
@@ -132,6 +157,7 @@ impl RencordWindow {
         layout: Option<rencord_desktop::LayoutKind>,
         density: Option<rencord_desktop::Density>,
         start_voice: bool,
+        reveal_hover: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -185,6 +211,7 @@ impl RencordWindow {
             frame_us: Vec::new(),
             collapsed: HashSet::new(),
             pinned_top: false,
+            reveal_hover,
         }
     }
 
@@ -489,7 +516,11 @@ impl Render for RencordWindow {
             .track_focus(&self.focus)
             .size_full()
             .bg(rgb(palette.app_bg))
-            .font_family("Figtree")
+            .font_family(if matches!(palette.mode, ThemeMode::Onyx) {
+                "Inter"
+            } else {
+                "Figtree"
+            })
             .text_color(rgb(palette.text))
             .text_size(px(self.shell.prefs.font_px))
             .on_action(cx.listener(|this, _: &QuickSwitcher, _, cx| {
@@ -638,18 +669,41 @@ impl RencordWindow {
             .map(|guild| guild.name.clone())
             .unwrap_or_else(|| "Direct Messages".into());
         let home_active = selected.is_some_and(|id| dms.iter().any(|channel| channel.id == id));
-        let pill_ink = if matches!(palette.mode, ThemeMode::Light) {
+        let ink = matches!(palette.mode, ThemeMode::Onyx);
+        let rail_w = if ink { 68. } else { 72. };
+        let tile = if ink { 44. } else { 48. };
+        let tile_radius = if ink { 8. } else { 12. };
+        let side_w = if ink { 216. } else { 240. };
+        let member_w = if ink { 200. } else { 240. };
+        let shell_gap = if ink { 8. } else { 12. };
+        let pill_ink = if ink {
+            palette.accent
+        } else if matches!(palette.mode, ThemeMode::Light) {
             0x060607
         } else {
             0xffffff
         };
+        let home_fill = if ink {
+            0x000000
+        } else if home_active {
+            0x5865f2
+        } else {
+            0x2a2e38
+        };
+        let home_ink = if ink {
+            palette.accent
+        } else if home_active {
+            0xffffff
+        } else {
+            palette.text
+        };
         let mut rail = v_flex()
-            .w(px(72.))
+            .w(px(rail_w))
             .h_full()
             .bg(rgb(palette.rail))
             .items_center()
             .gap(px(8.))
-            .py(px(12.));
+            .py(px(if ink { 10. } else { 12. }));
         {
             let view = this.clone();
             rail = rail.child(rail_slot(
@@ -660,14 +714,14 @@ impl RencordWindow {
                 } else {
                     Pill::None
                 },
-                if home_active { 0x5865f2 } else { 0x2a2e38 },
-                if home_active { 0x5865f2 } else { 0x343844 },
+                home_fill,
+                home_fill,
                 pill_ink,
-                icon(
-                    "home",
-                    22.,
-                    if home_active { 0xffffff } else { palette.text },
-                ),
+                if ink { palette.line } else { home_fill },
+                rail_w,
+                tile,
+                tile_radius,
+                icon("home", 20., home_ink),
                 move |_, _, cx| {
                     view.update(cx, |this, cx| {
                         this.shell
@@ -677,13 +731,35 @@ impl RencordWindow {
                 },
             ));
         }
-        rail = rail.child(rail_rule());
+        if !ink {
+            rail = rail.child(rail_rule(rail_w, palette.line));
+        }
         for guild in guilds {
             let id = guild.id;
             let mark = guild_mark(&guild.name);
             let active = selected_guild == Some(id);
             let view = this.clone();
-            let fill = guild_fill(&guild.name);
+            let fill = if ink {
+                if guild.name == "Analytical Engines" {
+                    0x0a0a16
+                } else {
+                    0x000000
+                }
+            } else {
+                guild_fill(&guild.name)
+            };
+            let border = if ink && active {
+                palette.accent
+            } else if ink {
+                palette.line
+            } else {
+                fill
+            };
+            let letter = if ink && !active {
+                0xc5c8de
+            } else {
+                palette.text
+            };
             rail = rail.child(rail_slot(
                 format!("guild-{id}").into(),
                 active,
@@ -697,7 +773,11 @@ impl RencordWindow {
                 fill,
                 fill,
                 pill_ink,
-                tile_initial(&mark, 0xffffff),
+                border,
+                rail_w,
+                tile,
+                tile_radius,
+                tile_initial(&mark, letter),
                 move |_, _, cx| {
                     view.update(cx, |this, cx| {
                         this.shell.session.select_guild(id);
@@ -706,15 +786,30 @@ impl RencordWindow {
                 },
             ));
         }
-        rail = rail.child(rail_rule());
-        rail = rail.child(rail_action(this.clone(), "rail-add", "plus", |view, cx| {
-            view.shell.note("Creating a server is not in this build.");
-            cx.notify();
-        }));
+        rail = rail.child(rail_rule(rail_w, if ink { 0x1c1c38 } else { palette.line }));
+        rail = rail.child(rail_action(
+            this.clone(),
+            "rail-add",
+            "plus",
+            true,
+            palette,
+            rail_w,
+            tile,
+            tile_radius,
+            |view, cx| {
+                view.shell.note("Creating a server is not in this build.");
+                cx.notify();
+            },
+        ));
         rail = rail.child(rail_action(
             this.clone(),
             "rail-explore",
             "compass",
+            false,
+            palette,
+            rail_w,
+            tile,
+            tile_radius,
             |view, cx| {
                 view.shell.note("Server discovery is not in this build.");
                 cx.notify();
@@ -722,33 +817,66 @@ impl RencordWindow {
         ));
 
         let mut sidebar = v_flex()
-            .w(px(240.))
+            .w(px(side_w))
             .h_full()
             .bg(rgb(palette.sidebar))
-            .border_r_1()
-            .border_color(rgb(palette.line))
             .child(
                 div()
-                    .px(px(12.))
-                    .py(px(10.))
+                    .h(px(if ink { 42. } else { 48. }))
+                    .px(px(if ink { 14. } else { 12. }))
+                    .flex()
+                    .items_center()
                     .border_b_1()
                     .border_color(rgb(palette.line))
-                    .child(paint(guild_name, palette.text, 16.)),
+                    .text_size(px(if ink { 15. } else { 16. }))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(palette.text))
+                    .child(guild_name.clone()),
             )
-            .child(
-                div().px(px(8.)).py(px(8.)).child(
-                    Input::new(&self.search_input)
-                        .bg(rgb(palette.input))
-                        .text_color(rgb(palette.text))
-                        .border_color(rgb(palette.input)),
-                ),
-            );
+            .child(if ink {
+                h_flex()
+                    .mx(px(10.))
+                    .mt(px(8.))
+                    .mb(px(4.))
+                    .h(px(30.))
+                    .px(px(8.))
+                    .gap(px(6.))
+                    .items_center()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgb(palette.line))
+                    .bg(rgb(palette.input))
+                    .child(icon("search", 13., palette.faint))
+                    .child(
+                        div().flex_1().overflow_hidden().child(
+                            Input::new(&self.search_input)
+                                .bg(rgb(palette.input))
+                                .text_color(rgb(palette.faint))
+                                .border_color(rgb(palette.input)),
+                        ),
+                    )
+                    .into_any_element()
+            } else {
+                div()
+                    .px(px(8.))
+                    .py(px(8.))
+                    .child(
+                        Input::new(&self.search_input)
+                            .bg(rgb(palette.input))
+                            .text_color(rgb(palette.text))
+                            .border_color(rgb(palette.input)),
+                    )
+                    .into_any_element()
+            });
         let row_px = density.channel_row_px();
         let favorites_open = !self.collapsed.contains("favorites");
         let text_open = !self.collapsed.contains("text");
         let voice_open = !self.collapsed.contains("voice");
         let dm_open = !self.collapsed.contains("dms");
-        sidebar = sidebar.child(category_header(
+        let favorite_ids = self.shell.favorites.clone();
+        let in_voice = voice.is_some();
+        let mut nav = v_flex().flex_1().overflow_hidden();
+        nav = nav.child(category_header(
             this.clone(),
             "favorites",
             "FAVORITES",
@@ -756,10 +884,9 @@ impl RencordWindow {
             palette,
         ));
         if favorites_open {
-            let favorite_ids = self.shell.favorites.clone();
-            for id in favorite_ids {
-                if let Some(channel) = self.shell.session.channels.get(&id) {
-                    sidebar = sidebar.child(channel_row(
+            for id in &favorite_ids {
+                if let Some(channel) = self.shell.session.channels.get(id) {
+                    nav = nav.child(channel_row(
                         this.clone(),
                         channel.id,
                         format!("* {}", channel.name),
@@ -768,11 +895,12 @@ impl RencordWindow {
                         None,
                         false,
                         row_px,
+                        false,
                     ));
                 }
             }
         }
-        sidebar = sidebar.child(category_header(
+        nav = nav.child(category_header(
             this.clone(),
             "text",
             "TEXT CHANNELS",
@@ -786,19 +914,21 @@ impl RencordWindow {
                 } else {
                     None
                 };
-                sidebar = sidebar.child(channel_row(
+                let shown_as_favorite = favorites_open && favorite_ids.contains(&channel.id);
+                nav = nav.child(channel_row(
                     this.clone(),
                     channel.id,
                     format!("# {}", channel.name),
-                    selected == Some(channel.id),
+                    selected == Some(channel.id) && !shown_as_favorite,
                     palette,
                     badge,
                     false,
                     row_px,
+                    false,
                 ));
             }
         }
-        sidebar = sidebar.child(category_header(
+        nav = nav.child(category_header(
             this.clone(),
             "voice",
             "VOICE CHANNELS",
@@ -807,7 +937,7 @@ impl RencordWindow {
         ));
         if voice_open {
             for channel in channels.iter().filter(|channel| channel.kind.is_voice()) {
-                sidebar = sidebar.child(channel_row(
+                nav = nav.child(channel_row(
                     this.clone(),
                     channel.id,
                     format!(")) {}", channel.name),
@@ -816,10 +946,11 @@ impl RencordWindow {
                     None,
                     true,
                     row_px,
+                    in_voice,
                 ));
             }
         }
-        sidebar = sidebar.child(category_header(
+        nav = nav.child(category_header(
             this.clone(),
             "dms",
             "DIRECT MESSAGES",
@@ -828,7 +959,7 @@ impl RencordWindow {
         ));
         if dm_open {
             for channel in &dms {
-                sidebar = sidebar.child(channel_row(
+                nav = nav.child(channel_row(
                     this.clone(),
                     channel.id,
                     format!("dm {}", channel.name),
@@ -837,10 +968,11 @@ impl RencordWindow {
                     None,
                     false,
                     row_px,
+                    false,
                 ));
             }
         }
-        sidebar = sidebar.child(div().flex_1());
+        sidebar = sidebar.child(nav);
 
         let count = messages.len();
         if self.timeline.item_count() != count {
@@ -861,6 +993,7 @@ impl RencordWindow {
         let list_palette = palette;
         let list_entity = this.clone();
         let list_reactions = reactions.clone();
+        let reveal_hover = self.reveal_hover;
         let _density = density;
         let timeline = list(timeline_state, move |index, _window, _cx| {
             let Some(message) = list_messages.get(index).cloned() else {
@@ -880,6 +1013,7 @@ impl RencordWindow {
                     .unwrap_or_default(),
                 list_palette,
                 font_px,
+                reveal_hover && message.content.contains("Mention"),
             )
             .into_any_element()
         })
@@ -892,7 +1026,7 @@ impl RencordWindow {
             .bg(rgb(palette.chat))
             .child(
                 h_flex()
-                    .h(px(48.))
+                    .h(px(if ink { 42. } else { 48. }))
                     .px(px(12.))
                     .items_center()
                     .justify_between()
@@ -900,28 +1034,43 @@ impl RencordWindow {
                     .border_color(rgb(palette.line))
                     .child(
                         h_flex()
+                            .flex_1()
+                            .min_w(px(0.))
                             .gap(px(8.))
                             .items_center()
                             .overflow_hidden()
-                            .child(icon("hash", 20., palette.muted))
-                            .child(paint(channel_name.clone(), palette.text, 16.))
-                            .child(div().w(px(1.)).h(px(16.)).bg(rgb(palette.line)))
+                            .child(icon("hash", if ink { 16. } else { 20. }, palette.muted))
+                            .child(
+                                div()
+                                    .text_size(px(if ink { 15. } else { 16. }))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(palette.text))
+                                    .child(channel_name.clone()),
+                            )
+                            .child(div().w(px(1.)).h(px(16.)).bg(rgb(if ink {
+                                0x1c1c38
+                            } else {
+                                palette.line
+                            })))
                             .child(paint("Voice, notes, and no upsells", palette.muted, 13.)),
                     )
                     .child(
                         h_flex()
                             .gap(px(2.))
+                            .flex_shrink_0()
                             .items_center()
-                            .child(header_icon(
-                                this.clone(),
-                                "hdr-threads",
-                                "threads",
-                                palette,
-                                |view, cx| {
-                                    view.shell.note("Threads are not in this build.");
-                                    cx.notify();
-                                },
-                            ))
+                            .when(!ink, |tools| {
+                                tools.child(header_icon(
+                                    this.clone(),
+                                    "hdr-threads",
+                                    "threads",
+                                    palette,
+                                    |view, cx| {
+                                        view.shell.note("Threads are not in this build.");
+                                        cx.notify();
+                                    },
+                                ))
+                            })
                             .child(header_icon(
                                 this.clone(),
                                 "hdr-pin",
@@ -982,10 +1131,14 @@ impl RencordWindow {
                 .mx(px(12.))
                 .mb(px(12.))
                 .px(px(4.))
-                .h(px(47.))
+                .h(px(if matches!(palette.mode, ThemeMode::Onyx) {
+                    38.
+                } else {
+                    47.
+                }))
                 .items_center()
                 .gap(px(2.))
-                .rounded(px(12.))
+                .rounded(px(8.))
                 .border_1()
                 .border_color(rgb(palette.line))
                 .bg(rgb(palette.input))
@@ -1045,7 +1198,7 @@ impl RencordWindow {
         }
 
         let mut people = v_flex()
-            .w(px(240.))
+            .w(px(member_w))
             .h_full()
             .bg(rgb(palette.members))
             .child(section_label("ONLINE — 3", palette.muted));
@@ -1055,33 +1208,57 @@ impl RencordWindow {
                 .map(|(name, activity)| (name.to_owned(), activity.to_owned()))
                 .unwrap_or_else(|| (member.clone(), "Online".into()));
             let role = role_color(&name, palette);
-            let dot = match activity.as_str() {
-                "Idle" => 0xf0b232,
-                "Offline" => 0x80848e,
-                _ => 0x23a559,
+            let dot = if matches!(palette.mode, ThemeMode::Onyx) {
+                match activity.as_str() {
+                    "Idle" => 0xd4c05a,
+                    "Offline" => 0x80848e,
+                    _ => 0x5abb72,
+                }
+            } else {
+                match activity.as_str() {
+                    "Idle" => 0xf0b232,
+                    "Offline" => 0x80848e,
+                    _ => 0x23a559,
+                }
             };
+            let speaking = activity == "In voice" && matches!(palette.mode, ThemeMode::Onyx);
             people = people.child(
                 h_flex()
                     .mx(px(8.))
-                    .px(px(8.))
-                    .h(px(44.))
-                    .gap(px(10.))
+                    .px(px(6.))
+                    .h(px(if speaking || matches!(palette.mode, ThemeMode::Onyx) {
+                        38.
+                    } else {
+                        44.
+                    }))
+                    .gap(px(8.))
                     .items_center()
                     .rounded(px(6.))
                     .hover(|style| style.bg(rgb(palette.hover)))
-                    .child(portrait_status(&name, 32., dot, palette.members))
+                    .child(if speaking {
+                        div()
+                            .p(px(2.))
+                            .rounded(px(20.))
+                            .border_2()
+                            .border_color(rgb(palette.accent))
+                            .child(portrait_status(&name, 32., dot, palette.members))
+                            .into_any_element()
+                    } else {
+                        portrait_status(&name, 32., dot, palette.members).into_any_element()
+                    })
                     .child(
                         v_flex()
                             .gap(px(0.))
                             .child(paint(name, role, 14.))
-                            .child(paint(activity, palette.muted, 12.)),
+                            .child(meta(activity, palette.muted, 11., palette)),
                     ),
             );
         }
 
         let voice_panel = self.voice_card(cx, palette, &user_name, voice.as_ref(), muted, deafened);
         let layout_kind = self.shell.prefs.layout;
-        let hide_members = !self.shell.prefs.show_members || viewport < px(1100.);
+        let hide_members =
+            !self.shell.prefs.show_members || viewport < px(if ink { 900. } else { 1100. });
         let hide_sidebar = !self.shell.prefs.show_sidebar || viewport < px(760.);
         let sidebar = if hide_sidebar { div() } else { sidebar };
         let people = if hide_members { div() } else { people };
@@ -1089,19 +1266,23 @@ impl RencordWindow {
             rencord_desktop::LayoutKind::Discord => div()
                 .size_full()
                 .bg(rgb(palette.app_bg))
-                .p(px(12.))
+                .p(px(shell_gap))
                 .child(
                     h_flex()
                         .size_full()
-                        .gap(px(12.))
-                        .child(panel(palette, palette.rail).w(px(72.)).child(rail))
+                        .gap(px(shell_gap))
+                        .child(panel(palette, palette.rail).w(px(rail_w)).child(rail))
                         .child(
                             panel(palette, palette.sidebar)
-                                .w(px(240.))
+                                .w(px(side_w))
                                 .child(sidebar.child(voice_panel)),
                         )
                         .child(panel(palette, palette.chat).flex_1().child(chat))
-                        .child(panel(palette, palette.members).w(px(240.)).child(people)),
+                        .child(
+                            panel(palette, palette.members)
+                                .w(px(member_w))
+                                .child(people),
+                        ),
                 )
                 .into_any_element(),
             rencord_desktop::LayoutKind::Keyboard => v_flex()
@@ -1275,84 +1456,120 @@ impl RencordWindow {
         } else {
             "Online"
         };
+        let onyx = matches!(palette.mode, ThemeMode::Onyx);
         let dot = if muted || deafened {
             0xf23f43
+        } else if onyx {
+            0x5abb72
         } else {
             0x23a559
         };
         let mut column = v_flex().w_full().flex_shrink_0().bg(rgb(palette.sidebar));
         if let Some(report) = voice {
             let view = this.clone();
+            let label_color = if onyx { palette.link } else { 0x23a559 };
             column = column.child(
                 v_flex()
-                    .px(px(8.))
+                    .mx(px(if onyx { 8. } else { 0. }))
+                    .mt(px(if onyx { 6. } else { 0. }))
+                    .px(px(if onyx { 10. } else { 8. }))
                     .py(px(8.))
                     .gap(px(2.))
-                    .bg(rgb(palette.elevated))
+                    .rounded(px(if onyx { 6. } else { 0. }))
+                    .border_1()
+                    .border_color(rgb(if onyx { palette.line } else { palette.elevated }))
+                    .bg(rgb(if onyx { palette.chat } else { palette.elevated }))
                     .child(
                         h_flex()
                             .items_center()
                             .justify_between()
-                            .child(paint("Voice Connected", 0x23a559, 12.))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(rgb(label_color))
+                                    .font_family(if onyx { "JetBrains Mono" } else { "Figtree" })
+                                    .child("Voice Connected"),
+                            )
                             .child(hang_up_button(view)),
                     )
-                    .child(paint("voice", palette.text, 14.))
                     .child(paint(
-                        format!("Loopback · target {} ms", report.target_ms),
-                        palette.muted,
+                        "voice",
+                        if onyx { 0xc5c8de } else { palette.muted },
                         12.,
+                    ))
+                    .child(waveform(if onyx { palette.accent } else { palette.link }))
+                    .child(meta(
+                        format!("{} ms  ·  0.2% plc", report.target_ms),
+                        palette.muted,
+                        11.,
+                        palette,
                     )),
             );
         }
         column.child(
             h_flex()
                 .h(px(52.))
-                .px(px(8.))
-                .gap(px(8.))
+                .pl(px(if onyx { 10. } else { 8. }))
+                .pr(px(if onyx { 6. } else { 8. }))
+                .gap(px(6.))
                 .items_center()
+                .border_t_1()
+                .border_color(rgb(if onyx { palette.line } else { palette.sidebar }))
                 .bg(rgb(palette.sidebar))
                 .child(portrait_status(user_name, 32., dot, palette.sidebar))
                 .child(
                     v_flex()
                         .flex_1()
                         .overflow_hidden()
-                        .child(paint(user_name.to_owned(), palette.text, 14.))
-                        .child(paint(status, palette.muted, 12.)),
+                        .child(
+                            div()
+                                .text_size(px(if onyx { 13. } else { 14. }))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(palette.text))
+                                .child(user_name.to_owned()),
+                        )
+                        .child(meta(status, palette.muted, 11., palette)),
                 )
-                .child(dock_circle(
-                    this.clone(),
-                    "mic-btn",
-                    "Mic",
-                    palette,
-                    muted,
-                    |view, cx| {
-                        view.shell.toggle_mute();
-                        cx.notify();
-                    },
-                ))
-                .child(dock_circle(
-                    this.clone(),
-                    "deaf-btn",
-                    "Deaf",
-                    palette,
-                    deafened,
-                    |view, cx| {
-                        view.shell.toggle_deaf();
-                        cx.notify();
-                    },
-                ))
-                .child(dock_circle(
-                    this,
-                    "gear-btn",
-                    "Set",
-                    palette,
-                    false,
-                    |view, cx| {
-                        view.shell.toggle_settings();
-                        view.reopen_audio();
-                        cx.notify();
-                    },
-                )),
+                .child(
+                    h_flex()
+                        .gap(px(1.))
+                        .flex_shrink_0()
+                        .child(dock_circle(
+                            this.clone(),
+                            "mic-btn",
+                            "Mic",
+                            palette,
+                            muted,
+                            |view, cx| {
+                                view.shell.toggle_mute();
+                                cx.notify();
+                            },
+                        ))
+                        .child(dock_circle(
+                            this.clone(),
+                            "deaf-btn",
+                            "Deaf",
+                            palette,
+                            deafened,
+                            |view, cx| {
+                                view.shell.toggle_deaf();
+                                cx.notify();
+                            },
+                        ))
+                        .child(dock_circle(
+                            this,
+                            "gear-btn",
+                            "Set",
+                            palette,
+                            false,
+                            |view, cx| {
+                                view.shell.toggle_settings();
+                                view.reopen_audio();
+                                cx.notify();
+                            },
+                        )),
+                ),
         )
     }
 
@@ -1542,10 +1759,11 @@ fn category_header(
     palette: Palette,
 ) -> impl IntoElement {
     let mark = if open { "⌄" } else { "›" };
+    let onyx = matches!(palette.mode, ThemeMode::Onyx);
     div()
         .id(SharedString::from(format!("cat-{key}")))
         .px(px(8.))
-        .pt(px(14.))
+        .pt(px(if onyx { 8. } else { 14. }))
         .pb(px(2.))
         .cursor_pointer()
         .on_click(move |_, _, cx| {
@@ -1560,8 +1778,8 @@ fn category_header(
             h_flex()
                 .gap(px(4.))
                 .items_center()
-                .child(paint(mark, palette.muted, 12.))
-                .child(paint(title, palette.muted, 12.)),
+                .child(paint(mark, palette.muted, if onyx { 11. } else { 12. }))
+                .child(paint(title, palette.muted, if onyx { 11. } else { 12. })),
         )
 }
 
@@ -1584,6 +1802,7 @@ fn channel_row(
     badge: Option<u32>,
     joins_voice: bool,
     row_px: f32,
+    live_dot: bool,
 ) -> impl IntoElement {
     let hover = palette.hover;
     let bg = if active {
@@ -1602,11 +1821,30 @@ fn channel_row(
     } else {
         ("hash", label.clone())
     };
-    let color = if active { palette.text } else { palette.muted };
+    let onyx = matches!(palette.mode, ThemeMode::Onyx);
+    let color = if active {
+        palette.text
+    } else if onyx {
+        0xc5c8de
+    } else {
+        palette.muted
+    };
+    let icon_color = if active && onyx && kind != "speaker" && kind != "dm" {
+        palette.accent
+    } else {
+        color
+    };
+    let label_px = if onyx { 14. } else { 16. };
+    let glyph_px = if onyx { 15. } else { 20. };
     let height = if kind == "dm" {
         row_px.max(32.)
     } else {
         row_px
+    };
+    let (badge_bg, badge_fg) = if onyx {
+        (palette.accent, palette.accent_text)
+    } else {
+        (0xb91c1c, 0xffffff)
     };
     div()
         .id(SharedString::from(format!("channel-{id}")))
@@ -1616,6 +1854,12 @@ fn channel_row(
         .rounded(px(6.))
         .overflow_hidden()
         .bg(rgb(bg))
+        .border_l_3()
+        .border_color(rgb(if active && matches!(palette.mode, ThemeMode::Onyx) {
+            palette.accent
+        } else {
+            bg
+        }))
         .cursor_pointer()
         .hover(move |style| style.bg(rgb(if active { bg } else { hover })))
         .child(
@@ -1628,34 +1872,54 @@ fn channel_row(
                         .gap(px(6.))
                         .items_center()
                         .child(if kind == "dm" {
-                            portrait_status(&title, 24., 0x23a559, palette.sidebar)
-                                .into_any_element()
+                            portrait_status(
+                                &title,
+                                if onyx { 20. } else { 24. },
+                                if onyx { 0x5abb72 } else { 0x23a559 },
+                                palette.sidebar,
+                            )
+                            .into_any_element()
                         } else {
                             icon(
                                 if kind == "speaker" { "speaker" } else { "hash" },
-                                20.,
-                                color,
+                                glyph_px,
+                                icon_color,
                             )
                             .into_any_element()
                         })
-                        .child(paint(title.clone(), color, 16.))
-                        .children(if kind == "star" {
-                            Some(icon("star", 12., palette.muted))
-                        } else {
-                            None
-                        }),
+                        .child(paint(title.clone(), color, label_px)),
                 )
-                .children(badge.map(|count| {
-                    div()
-                        .min_w(px(16.))
-                        .h(px(16.))
-                        .px(px(4.))
-                        .rounded(px(8.))
-                        .items_center()
-                        .justify_center()
-                        .bg(rgb(0xb91c1c))
-                        .child(paint(count.to_string(), 0xffffff, 11.))
-                })),
+                .children(if kind == "star" {
+                    Some(
+                        icon(
+                            "star",
+                            12.,
+                            if onyx { palette.accent } else { palette.muted },
+                        )
+                        .into_any_element(),
+                    )
+                } else if live_dot {
+                    Some(
+                        div()
+                            .size(px(6.))
+                            .rounded(px(3.))
+                            .bg(rgb(if onyx { 0x5abb72 } else { 0x23a559 }))
+                            .into_any_element(),
+                    )
+                } else {
+                    badge.map(|count| {
+                        h_flex()
+                            .min_w(px(16.))
+                            .h(px(16.))
+                            .px(px(4.))
+                            .rounded(px(8.))
+                            .items_center()
+                            .justify_center()
+                            .bg(rgb(badge_bg))
+                            .child(paint(count.to_string(), badge_fg, 10.))
+                            .into_any_element()
+                    })
+                }),
         )
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| {
@@ -1680,37 +1944,16 @@ fn hint_bar(palette: Palette, text: String) -> impl IntoElement {
 }
 
 fn hang_up_button(view: Entity<RencordWindow>) -> impl IntoElement {
-    let group = SharedString::from("voice-leave-group");
-    let hide = group.clone();
-    let show = group.clone();
     h_flex()
-        .group(group)
         .id("voice-leave")
-        .relative()
-        .size(px(32.))
+        .size(px(28.))
         .flex_shrink_0()
-        .rounded(px(6.))
+        .rounded(px(14.))
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .hover(|style| style.bg(rgb(0xf23f43)))
-        .child(
-            div()
-                .group_hover(hide, |style| style.opacity(0.))
-                .child(icon("phone", 20., 0xf23f43)),
-        )
-        .child(
-            h_flex()
-                .absolute()
-                .top(px(0.))
-                .left(px(0.))
-                .size(px(32.))
-                .items_center()
-                .justify_center()
-                .opacity(0.)
-                .group_hover(show, |style| style.opacity(1.))
-                .child(icon("phone", 20., 0xffffff)),
-        )
+        .bg(rgba(0xc8463c29))
+        .child(icon("phone", 14., 0xe05550))
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| {
                 this.shell.leave_voice();
@@ -1749,7 +1992,7 @@ fn dock_circle(
         .justify_center()
         .cursor_pointer()
         .hover(|style| style.bg(rgb(palette.hover)))
-        .child(icon(glyph, 20., ink))
+        .child(icon(glyph, 16., ink))
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| action(this, cx));
         })
@@ -1832,13 +2075,13 @@ fn channel_title(
         .unwrap_or_else(|| "Select a channel".into())
 }
 
-fn rail_rule() -> impl IntoElement {
+fn rail_rule(width: f32, color: u32) -> impl IntoElement {
     h_flex()
-        .w(px(72.))
+        .w(px(width))
         .h(px(8.))
         .items_center()
         .justify_center()
-        .child(div().w(px(32.)).h(px(2.)).rounded(px(1.)).bg(rgb(0x4e5058)))
+        .child(div().w(px(28.)).h(px(1.)).bg(rgb(color)))
 }
 
 #[derive(Clone, Copy)]
@@ -1858,7 +2101,6 @@ fn guild_fill(name: &str) -> u32 {
 
 fn tile_initial(letter: &str, color: u32) -> impl IntoElement {
     div()
-        .font_family("Figtree")
         .font_weight(FontWeight::SEMIBOLD)
         .text_size(px(16.))
         .line_height(px(16.))
@@ -1874,19 +2116,22 @@ fn rail_slot(
     fill: u32,
     hover: u32,
     pill_ink: u32,
+    border: u32,
+    rail_w: f32,
+    tile: f32,
+    radius: f32,
     mark: impl IntoElement,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let radius = 12.;
-    let pill_h = match pill {
-        Pill::Selected => 36.,
-        Pill::Unread => 8.,
-        Pill::None => 0.,
+    let (pill_w, pill_h) = match pill {
+        Pill::Selected => (4., 22.),
+        Pill::Unread => (8., 8.),
+        Pill::None => (0., 0.),
     };
     let mut slot = h_flex()
         .relative()
-        .w(px(72.))
-        .h(px(48.))
+        .w(px(rail_w))
+        .h(px(tile))
         .flex_shrink_0()
         .items_center()
         .justify_center();
@@ -1894,23 +2139,25 @@ fn rail_slot(
         slot = slot.child(
             div()
                 .absolute()
-                .left(px(0.))
-                .top(px((48. - pill_h) / 2.))
-                .w(px(4.))
+                .left(px(2.))
+                .top(px((tile - pill_h) / 2.))
+                .w(px(pill_w))
                 .h(px(pill_h))
-                .rounded(px(2.))
+                .rounded(px(pill_h / 2.))
                 .bg(rgb(pill_ink)),
         );
     }
     slot.child(
         h_flex()
             .id(id)
-            .size(px(48.))
+            .size(px(tile))
             .flex_shrink_0()
             .rounded(px(radius))
             .items_center()
             .justify_center()
             .bg(rgb(fill))
+            .border_1()
+            .border_color(rgb(border))
             .cursor_pointer()
             .overflow_hidden()
             .hover(move |style| style.bg(rgb(hover)))
@@ -1919,35 +2166,49 @@ fn rail_slot(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rail_action(
     view: Entity<RencordWindow>,
     id: &'static str,
     glyph: &'static str,
+    dashed: bool,
+    palette: Palette,
+    rail_w: f32,
+    tile: f32,
+    radius: f32,
     action: impl Fn(&mut RencordWindow, &mut Context<RencordWindow>) + 'static,
 ) -> impl IntoElement {
-    h_flex()
-        .w(px(72.))
-        .h(px(48.))
+    let ink = matches!(palette.mode, ThemeMode::Onyx);
+    let border = if ink { 0x1c1c38 } else { 0x23a55a };
+    let glyph_color = if ink { palette.muted } else { 0x23a55a };
+    let tile_el = h_flex()
+        .size(px(tile))
+        .flex_shrink_0()
+        .rounded(px(radius))
         .items_center()
         .justify_center()
-        .child(
-            h_flex()
-                .id(id)
-                .size(px(48.))
-                .flex_shrink_0()
-                .rounded(px(12.))
-                .items_center()
-                .justify_center()
-                .bg(rgb(0x1c1f26))
-                .border_2()
-                .border_color(rgb(0x23a55a))
-                .cursor_pointer()
-                .hover(|style| style.bg(rgb(0x243028)))
-                .child(icon(glyph, 22., 0x23a55a))
-                .on_click(move |_, _, cx| {
-                    view.update(cx, |this, cx| action(this, cx));
-                }),
-        )
+        .bg(rgb(if ink { 0x000000 } else { 0x1c1f26 }))
+        .border_1()
+        .border_color(rgb(border));
+    let tile_el = if dashed {
+        tile_el.border_dashed()
+    } else {
+        tile_el
+    };
+    let tile_el = tile_el
+        .id(id)
+        .cursor_pointer()
+        .hover(|style| style.border_color(rgb(palette.text)))
+        .child(icon(glyph, 18., glyph_color))
+        .on_click(move |_, _, cx| {
+            view.update(cx, |this, cx| action(this, cx));
+        });
+    h_flex()
+        .w(px(rail_w))
+        .h(px(tile))
+        .items_center()
+        .justify_center()
+        .child(tile_el)
 }
 
 fn header_icon(
@@ -1988,8 +2249,10 @@ fn message_row(
     reactions: Vec<rencord_desktop::Reaction>,
     palette: Palette,
     font_px: f32,
+    pin_actions: bool,
 ) -> impl IntoElement {
     let id = message.id;
+    let onyx = matches!(palette.mode, ThemeMode::Onyx);
     let name = message.author.display_name().to_string();
     let role = role_color(&name, palette);
     let body_source = message.content.clone();
@@ -2012,7 +2275,7 @@ fn message_row(
         .join("\n");
     let group = SharedString::from(format!("row-{id}"));
     let hover = palette.hover;
-    let mut body = v_flex().flex_1().gap_1();
+    let mut body = v_flex().flex_1().min_w(px(0.)).gap_1();
     if !grouped {
         body = body.child(
             h_flex()
@@ -2020,16 +2283,19 @@ fn message_row(
                 .items_baseline()
                 .child(
                     div()
-                        .font_family("Figtree")
-                        .text_size(px(16.))
+                        .text_size(px(14.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(role))
                         .child(name.clone()),
                 )
                 .child(
                     div()
-                        .font_family("Figtree")
-                        .text_size(px(12.))
+                        .font_family(if matches!(palette.mode, ThemeMode::Onyx) {
+                            "JetBrains Mono"
+                        } else {
+                            "Figtree"
+                        })
+                        .text_size(px(11.))
                         .text_color(rgb(palette.muted))
                         .child(message.timestamp.clone()),
                 ),
@@ -2081,7 +2347,33 @@ fn message_row(
         body = body.child(pills);
     }
     if message.content.contains("](") {
-        body = body.child(
+        let embed = v_flex()
+            .gap(px(2.))
+            .child(paint("example.com", palette.muted, 11.))
+            .child(paint("Jitter notes", palette.link, 14.))
+            .child(paint(
+                "How the adaptive buffer stays under the idle budget.",
+                if onyx { 0xc5c8de } else { palette.text },
+                13.,
+            ));
+        body = body.child(if onyx {
+            div()
+                .mt(px(7.))
+                .max_w(px(380.))
+                .rounded(px(6.))
+                .bg(rgb(palette.chat))
+                .border_1()
+                .border_color(rgb(palette.line))
+                .child(
+                    div()
+                        .border_l_3()
+                        .border_color(rgb(palette.accent))
+                        .px(px(14.))
+                        .py(px(8.))
+                        .child(embed),
+                )
+                .into_any_element()
+        } else {
             v_flex()
                 .mt(px(4.))
                 .max_w(px(432.))
@@ -2091,39 +2383,47 @@ fn message_row(
                 .bg(rgb(palette.elevated))
                 .border_l_4()
                 .border_color(rgb(palette.link))
-                .child(paint("example.com", palette.muted, 12.))
-                .child(paint("Jitter notes", palette.link, 16.))
-                .child(paint(
-                    "How the adaptive buffer stays under the idle budget.",
-                    palette.text,
-                    14.,
-                )),
-        );
+                .child(embed)
+                .into_any_element()
+        });
     }
     if message.content.contains("attachment:bench.png") {
         body = body.child(
             v_flex()
-                .mt(px(4.))
+                .mt(px(7.))
                 .gap_1()
                 .child(
                     div()
-                        .w(px(400.))
-                        .h(px(96.))
-                        .rounded(px(12.))
+                        .w(px(320.))
+                        .h(px(76.))
+                        .rounded(px(if onyx { 6. } else { 12. }))
                         .overflow_hidden()
+                        .border_1()
+                        .border_color(rgb(palette.line))
                         .child(bench_photo()),
                 )
-                .child(paint("voice-bench.jpg", palette.muted, 12.)),
+                .child(if onyx {
+                    meta("voice-bench.jpg", palette.muted, 11., palette).into_any_element()
+                } else {
+                    paint("voice-bench.jpg", palette.muted, 12.).into_any_element()
+                }),
         );
     }
+    let avatar = if onyx { 32. } else { 40. };
     h_flex()
         .id(group.clone())
         .group(group.clone())
         .relative()
         .w_full()
         .px(px(16.))
-        .py(px(if grouped { 2. } else { 8. }))
-        .border_l_4()
+        .py(px(if grouped {
+            2.
+        } else if onyx {
+            4.
+        } else {
+            8.
+        }))
+        .border_l_3()
         .border_color(rgb(if message.content.contains("Mention") {
             palette.accent
         } else {
@@ -2134,13 +2434,13 @@ fn message_row(
         } else {
             palette.chat
         }))
-        .gap(px(16.))
+        .gap(px(if onyx { 10. } else { 16. }))
         .items_start()
         .hover(move |style| style.bg(rgb(hover)))
         .child(if grouped {
-            div().w(px(40.)).h(px(8.)).into_any_element()
+            div().w(px(avatar)).h(px(8.)).into_any_element()
         } else {
-            portrait(&name, 40.).into_any_element()
+            portrait(&name, avatar).into_any_element()
         })
         .child(body)
         .child(
@@ -2152,12 +2452,13 @@ fn message_row(
                 .px(px(4.))
                 .h(px(32.))
                 .items_center()
-                .rounded(px(6.))
-                .bg(rgb(0x111214))
+                .rounded(px(8.))
+                .bg(rgb(palette.elevated))
                 .border_1()
-                .border_color(rgb(palette.line))
-                .opacity(0.)
+                .border_color(rgb(if onyx { 0x1c1c38 } else { palette.line }))
+                .opacity(if pin_actions { 1. } else { 0. })
                 .group_hover(group, |style| style.opacity(1.))
+                .child(react_action(view.clone(), id, palette))
                 .child(icon_action(
                     view.clone(),
                     format!("reply-{id}"),
@@ -2166,16 +2467,51 @@ fn message_row(
                     true,
                     palette,
                 ))
-                .child(icon_action(
-                    view.clone(),
-                    format!("edit-{id}"),
-                    "Edit",
-                    id,
-                    false,
-                    palette,
-                ))
+                .child(link_action(view.clone(), id, palette))
+                .child(div().w(px(1.)).h(px(16.)).bg(rgb(0x1c1c38)))
                 .child(delete_action(view, id, palette)),
         )
+}
+
+fn react_action(view: Entity<RencordWindow>, id: Snowflake, palette: Palette) -> impl IntoElement {
+    let hover = palette.hover;
+    div()
+        .id(SharedString::from(format!("react-bar-{id}")))
+        .size(px(28.))
+        .rounded(px(6.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(move |style| style.bg(rgb(hover)))
+        .child(icon("emoji", 16., palette.muted))
+        .on_click(move |_, _, cx| {
+            view.update(cx, |this, cx| {
+                let mutation = this.shell.toggle_reaction(id.get(), "wave");
+                this.dispatch_mutation(mutation, cx);
+                cx.notify();
+            });
+        })
+}
+
+fn link_action(view: Entity<RencordWindow>, id: Snowflake, palette: Palette) -> impl IntoElement {
+    let hover = palette.hover;
+    div()
+        .id(SharedString::from(format!("link-{id}")))
+        .size(px(28.))
+        .rounded(px(6.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(move |style| style.bg(rgb(hover)))
+        .child(icon("link", 16., palette.muted))
+        .on_click(move |_, _, cx| {
+            view.update(cx, |this, cx| {
+                this.shell.note(format!("Message {id} link stays local."));
+                cx.notify();
+            });
+        })
 }
 
 fn icon_action(
@@ -2190,14 +2526,15 @@ fn icon_action(
     let hover = palette.hover;
     div()
         .id(SharedString::from(element_id))
-        .size(px(32.))
-        .rounded(px(4.))
+        .size(px(28.))
+        .rounded(px(6.))
+        .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
         .aria_label(label)
         .hover(move |style| style.bg(rgb(hover)))
-        .child(icon(glyph, 18., palette.text))
+        .child(icon(glyph, 15., palette.muted))
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| {
                 if reply {
@@ -2219,6 +2556,14 @@ fn role_color(name: &str, palette: Palette) -> u32 {
             _ => palette.text,
         };
     }
+    if matches!(palette.mode, ThemeMode::Onyx) {
+        return match name {
+            "Ada" => 0xa8b0e0,
+            "Charles" => 0x7ecca0,
+            "Lovelace" => 0xc4a6f0,
+            _ => palette.text,
+        };
+    }
     match name {
         "Ada" => 0xa8b0d4,
         "Charles" => 0x8fb89a,
@@ -2231,14 +2576,23 @@ fn delete_action(view: Entity<RencordWindow>, id: Snowflake, palette: Palette) -
     let hover = palette.hover;
     div()
         .id(SharedString::from(format!("delete-{id}")))
-        .size(px(32.))
+        .size(px(28.))
         .rounded(px(6.))
+        .flex()
         .items_center()
         .justify_center()
         .cursor_pointer()
         .aria_label("Delete")
         .hover(move |style| style.bg(rgb(hover)))
-        .child(icon("trash", 18., palette.danger))
+        .child(icon(
+            "trash",
+            15.,
+            if matches!(palette.mode, ThemeMode::Onyx) {
+                0xd46a5c
+            } else {
+                palette.danger
+            },
+        ))
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| {
                 if let Some(message) = this.shell.delete_local(id) {
@@ -2286,8 +2640,13 @@ fn code_block(
     let copy_text = text.clone();
     let copy_group = SharedString::from(format!("code-copy-{id}-{index}"));
     let copy_hover = copy_group.clone();
+    let onyx = matches!(palette.mode, ThemeMode::Onyx);
+    let mut source: Vec<&str> = text.split('\n').collect();
+    if source.last().is_some_and(|line| line.is_empty()) {
+        source.pop();
+    }
     let mut lines = v_flex().w_full().overflow_hidden();
-    for (line_index, line) in text.split('\n').enumerate() {
+    for (line_index, line) in source.iter().enumerate() {
         lines = lines.child(
             div()
                 .id(SharedString::from(format!(
@@ -2295,7 +2654,14 @@ fn code_block(
                 )))
                 .whitespace_nowrap()
                 .font_family("JetBrains Mono")
-                .text_size(px((font_px - 1.0).max(12.0)))
+                .text_size(px(if onyx {
+                    12.5
+                } else {
+                    (font_px - 1.0).max(12.0)
+                }))
+                .line_height(px(if onyx { 16. } else { 22. }))
+                .h(px(if onyx { 16. } else { 22. }))
+                .overflow_hidden()
                 .child(highlight_code_line(line, palette)),
         );
     }
@@ -2303,19 +2669,23 @@ fn code_block(
         .group(copy_group)
         .w_full()
         .bg(rgb(palette.code_bg))
-        .rounded(px(12.))
+        .rounded(px(if onyx { 6. } else { 12. }))
         .border_1()
         .border_color(rgb(palette.line))
-        .p(px(16.))
-        .gap_1()
+        .overflow_hidden()
+        .when(!onyx, |block| block.p(px(16.)).gap_1())
         .child(
             h_flex()
+                .h(px(if onyx { 22. } else { 24. }))
+                .px(px(if onyx { 10. } else { 0. }))
                 .justify_between()
                 .items_center()
-                .child(paint(
+                .when(onyx, |bar| bar.border_b_1().border_color(rgb(palette.line)))
+                .child(meta(
                     language.unwrap_or_else(|| "text".into()),
                     palette.muted,
-                    12.,
+                    11.,
+                    palette,
                 ))
                 .child(
                     h_flex()
@@ -2334,7 +2704,12 @@ fn code_block(
                         }),
                 ),
         )
-        .child(lines)
+        .child(
+            div()
+                .px(px(if onyx { 12. } else { 0. }))
+                .py(px(if onyx { 7. } else { 0. }))
+                .child(lines),
+        )
 }
 
 fn highlight_code_line(line: &str, palette: Palette) -> StyledText {
@@ -2351,15 +2726,23 @@ fn highlight_code_line(line: &str, palette: Palette) -> StyledText {
     while !rest.is_empty() {
         let (token, next) = split_token(rest);
         let keyword = KEYWORDS.contains(&token);
+        let numeric = !token.is_empty() && token.chars().all(|ch| ch.is_ascii_digit());
         text.push_str(token);
         let mut font = font("JetBrains Mono");
         if keyword {
             font.weight = FontWeight::BOLD;
         }
+        let color = if keyword {
+            palette.link
+        } else if numeric && matches!(palette.mode, ThemeMode::Onyx) {
+            0xc4a6f0
+        } else {
+            palette.text
+        };
         runs.push(TextRun {
             len: token.len(),
             font,
-            color: rgb(if keyword { palette.link } else { palette.text }).into(),
+            color: rgb(color).into(),
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -2546,7 +2929,11 @@ fn apply_kit_theme(palette: &Palette, cx: &mut App) {
     let value = serde_json::json!({
         "name": "Rencord",
         "mode": mode,
-        "font.family": "Figtree",
+            "font.family": if matches!(palette.mode, ThemeMode::Onyx) {
+                "Inter"
+            } else {
+                "Figtree"
+            },
         "font.size": 15,
         "colors": {
             "background": hex(palette.chat),
@@ -2591,6 +2978,7 @@ fn icon(name: &str, size: f32, color: u32) -> Svg {
         "phone" => include_str!("../../../docs/design/icons/phone.svg"),
         "send" => include_str!("../../../docs/design/icons/send.svg"),
         "copy" => include_str!("../../../docs/design/icons/copy.svg"),
+        "link" => include_str!("../../../docs/design/icons/link.svg"),
         "star" => include_str!("../../../docs/design/icons/star.svg"),
         "mic-off" => include_str!("../../../docs/design/icons/mic-off.svg"),
         "deafen-off" => include_str!("../../../docs/design/icons/deafen-off.svg"),
@@ -2640,29 +3028,42 @@ fn portrait_status(name: &str, size: f32, dot: u32, ring: u32) -> impl IntoEleme
 fn panel(palette: Palette, fill: u32) -> gpui_kit::Div {
     div()
         .h_full()
-        .rounded(px(12.))
+        .rounded(px(if matches!(palette.mode, ThemeMode::Onyx) {
+            8.
+        } else {
+            12.
+        }))
         .overflow_hidden()
         .bg(rgb(fill))
         .border_1()
         .border_color(rgb(palette.line))
 }
 
-fn new_messages_banner(_palette: Palette) -> impl IntoElement {
+fn new_messages_banner(palette: Palette) -> impl IntoElement {
     h_flex()
         .mx(px(12.))
-        .mt(px(8.))
-        .h(px(32.))
+        .mt(px(6.))
+        .h(px(28.))
         .px(px(12.))
         .rounded(px(6.))
         .items_center()
         .justify_between()
-        .bg(rgba(0x5865f2cc))
-        .child(paint("4 new messages", 0xffffff, 13.))
-        .child(paint("Mark as read", 0xffffff, 12.))
+        .bg(rgb(palette.accent))
+        .child(banner_ink("4 new messages", palette.accent_text, 13.))
+        .child(banner_ink("Mark as read", palette.accent_text, 12.))
+}
+
+fn banner_ink(text: &str, color: u32, size: f32) -> impl IntoElement {
+    div()
+        .text_size(px(size))
+        .text_color(rgb(color))
+        .font_weight(FontWeight::SEMIBOLD)
+        .line_height(px(size + 2.))
+        .child(text.to_owned())
 }
 
 fn date_pill(label: &str, palette: Palette) -> impl IntoElement {
-    h_flex().justify_center().py(px(8.)).child(
+    h_flex().justify_center().py(px(4.)).child(
         h_flex()
             .px(px(10.))
             .h(px(20.))
@@ -2670,8 +3071,42 @@ fn date_pill(label: &str, palette: Palette) -> impl IntoElement {
             .items_center()
             .justify_center()
             .bg(rgb(palette.input))
-            .child(paint(label, palette.muted, 11.)),
+            .border_1()
+            .border_color(rgb(palette.line))
+            .child(meta(label, palette.muted, 11., palette)),
     )
+}
+
+fn meta(text: impl Into<String>, color: u32, size: f32, palette: Palette) -> impl IntoElement {
+    div()
+        .text_size(px(size))
+        .text_color(rgb(color))
+        .line_height(px(size + 3.))
+        .font_family(if matches!(palette.mode, ThemeMode::Onyx) {
+            "JetBrains Mono"
+        } else {
+            "Figtree"
+        })
+        .child(text.into())
+}
+
+fn waveform(color: u32) -> impl IntoElement {
+    let percents = [
+        18, 28, 46, 70, 88, 64, 90, 72, 40, 22, 36, 68, 92, 76, 50, 28, 20, 44, 80, 96, 70, 42, 24,
+        38, 62, 84, 58, 30, 18, 26, 48, 66, 40, 22,
+    ];
+    let mut row = h_flex().h(px(26.)).items_center().gap(px(2.));
+    for (index, percent) in percents.iter().enumerate() {
+        row = row.child(
+            div()
+                .id(SharedString::from(format!("wave-{index}")))
+                .w(px(3.))
+                .h(px(((*percent as f32) * 0.26).max(2.)))
+                .rounded(px(2.))
+                .bg(rgb(color)),
+        );
+    }
+    row
 }
 
 fn paint(text: impl Into<String>, color: u32, size: f32) -> impl IntoElement {
@@ -2679,7 +3114,6 @@ fn paint(text: impl Into<String>, color: u32, size: f32) -> impl IntoElement {
         .text_size(px(size))
         .text_color(rgb(color))
         .line_height(px(size + 4.))
-        .font_family("Figtree")
         .font_weight(FontWeight::NORMAL)
         .child(text.into())
 }
@@ -2730,8 +3164,13 @@ fn rich_inlines(inlines: &[Inline], palette: Palette, font_px: f32) -> impl Into
             strikethrough: None,
         });
     }
+    let onyx = matches!(palette.mode, ThemeMode::Onyx);
     div()
-        .text_size(px(font_px))
+        .w_full()
+        .min_w(px(0.))
+        .whitespace_normal()
+        .text_size(px(if onyx { 14. } else { font_px }))
+        .line_height(px(if onyx { 20. } else { font_px + 4. }))
         .child(StyledText::new(text).with_runs(runs))
 }
 
@@ -2752,12 +3191,14 @@ fn walk_inlines(
             Inline::Link { text, .. } => push(text, palette.link, weight, None),
             Inline::Mention { id } => {
                 let label = mention_label(id);
-                let foreground = if matches!(palette.mode, ThemeMode::Light) {
-                    0x1d4ed8
+                let (foreground, wash) = if matches!(palette.mode, ThemeMode::Onyx) {
+                    (palette.link, 0x101533)
+                } else if matches!(palette.mode, ThemeMode::Light) {
+                    (0x1d4ed8, palette.ping)
                 } else {
-                    0xffffff
+                    (0xffffff, palette.ping)
                 };
-                push(&label, foreground, FontWeight::SEMIBOLD, Some(palette.ping));
+                push(&label, foreground, FontWeight::SEMIBOLD, Some(wash));
             }
         }
     }

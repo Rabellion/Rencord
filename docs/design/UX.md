@@ -7,31 +7,33 @@ The window should feel quieter than Discord and cheaper to run. This document is
 1. **One job per region.** The rail is servers. The sidebar is channels. The center is the conversation. The right column is people. Voice sits in a card, not across the whole window.
 2. **No upsells.** There is no Nitro shop, gift button, quest, boost banner, or "upgrade" row. Stream presets stay in code until capture exists, and the settings screen says Go Live is absent.
 3. **Keyboard first.** Ctrl/Cmd+K opens the quick switcher. Alt+Up/Down moves channels. Ctrl/Cmd+Alt+Up/Down moves servers. Esc closes the switcher and settings. Ctrl/Cmd+, opens settings.
-4. **The list does not draw what is off screen.** Messages use GPUI's uniform list. Rows share one height so scrolling does not remeasure the whole history.
-5. **Themes are data.** AMOLED, dark, and light are token sets. Switching them does not rebuild the session.
+4. **The list does not draw what is off screen.** Messages use GPUI's virtual list. A row can grow for a code block, an embed, or an attachment.
+5. **Themes are data.** Onyx Ink, dark, ash, and light are token sets. Switching them does not rebuild the session.
 
 ## Design system
 
 ### Color
 
-The default theme is Crisp Minimal. The window canvas is `#16181D`. Rail, channel list, chat, and members are `#1C1F26` panels separated by a 12 px gap. Inputs are `#23272F`. Onyx keeps that structure on a `#000000` canvas with `#0C0E12` panels. Light uses `#E6E9F0` behind `#F7F8FB` panels. Accent is blurple `#5865F2`, used for the new-messages banner, mentions, and links. Body text is `#EDF0F8`. Meta text is `#8592AD`.
+The default theme is Onyx Ink. The window canvas, rail, channel list, chat, members, dock, inputs, and code blocks are `#000000`. Columns are 8 px-gapped panels drawn with a 1 px `#15152A` hairline. The accent is `#4F6BFF`. The new-messages banner, the unread badge, and the server pill use that blue with `#000000` text. Links, mentions, and syntax keywords use `#A8B8FF`, which stays above WCAG AA on black. Dark (Crisp Minimal) keeps a `#16181D` canvas and `#1C1F26` panels with a 12 px gap. Light uses `#E6E9F0` behind `#F7F8FB` panels.
 
-| Token | Crisp | Onyx | Light |
+| Token | Onyx Ink | Crisp | Light |
 | --- | --- | --- | --- |
-| Canvas | `#16181D` | `#000000` | `#E6E9F0` |
-| Panels | `#1C1F26` | `#0C0E12` | `#F7F8FB` |
-| Input | `#23272F` | `#14171C` | `#FFFFFF` |
-| Text | `#EDF0F8` | `#EDF0F8` | `#1A1D26` |
-| Muted | `#8592AD` | `#8592AD` | `#4E5870` |
-| Accent | `#5865F2` | `#5865F2` | `#5865F2` |
+| Canvas and panels | `#000000` | `#16181D` / `#1C1F26` | `#E6E9F0` / `#F7F8FB` |
+| Hairline | `#15152A` | `#2E3440` | `#D5DAE6` |
+| Input | `#000000` | `#23272F` | `#FFFFFF` |
+| Text | `#EDEEF7` | `#EDF0F8` | `#1A1D26` |
+| Muted | `#9AA0C0` | `#8592AD` | `#4E5870` |
+| Accent | `#4F6BFF` | `#5865F2` | `#5865F2` |
+| Text on accent | `#000000` | `#FFFFFF` | `#FFFFFF` |
+| Link | `#A8B8FF` | `#00A8FC` | `#0068E0` |
 
 ### Type
 
-The UI face is Figtree, bundled under the SIL Open Font License. Message body is 16 px. Names are 16 px semibold in a muted role tint. Timestamps, topics, and activity are 12 px muted. Code is JetBrains Mono at 13–14 px. The settings control still steps the window size through 13, 15, and 17 px.
+Onyx Ink uses Inter for the UI and JetBrains Mono for timestamps, the date pill, member and dock status, the voice readout, and code. Crisp and Light keep Figtree for the UI. Message body is 14 px on Onyx and 16 px otherwise. Names are semibold in a role tint. Code is JetBrains Mono at about 12.5 px. The settings control still steps the window size through 13, 15, and 17 px. Both families are bundled.
 
 ### Space, radius, motion
 
-Spacing steps are 4, 8, 12, 16, 24, and 32 px. Controls use a 6 px radius. Panels, the composer, code, embeds, and media use 12 px. Avatars and the date pill are fully round. Columns do not use drop shadows. A 1 px hairline separates a panel from the canvas. Hover feedback is 80 ms. Overlays fade in over 140 ms. `reduce motion` in GPUI skips the overlay fade.
+Spacing steps are 4, 8, 12, 16, 24, and 32 px. Onyx panels use an 8 px gap and an 8 px corner. Controls use a 6 px radius. Crisp panels, the composer, code, embeds, and media use 12 px. Avatars and the date pill are fully round. Columns do not use drop shadows. A 1 px hairline separates a panel from the canvas. Hover feedback is 80 ms. Overlays fade in over 140 ms. `reduce motion` in GPUI skips the overlay fade. The Onyx speaking ring is a tight accent stroke and does not pulse.
 
 ### Density
 
@@ -39,7 +41,7 @@ Cozy channel rows are 32 px. Compact rows are 28 px. Spacious rows are 36 px. Gr
 
 ### Iconography
 
-One clean-room set, 24 px viewBox, 1.5 px stroke, `currentColor`. People in the demo use photographs. Servers without art fall back to a muted tile and a centered initial. There is no shop icon and no Send button on the desktop composer.
+One clean-room set, 24 px viewBox, 1.75 px stroke, `currentColor`. People in the demo use illustrated avatars, not photographs. Servers without art fall back to a black tile, a hairline, and a centered initial. The active server tile's hairline is the accent. Add Server is a dashed squircle. There is no shop icon and no Send button on the desktop composer.
 
 ## What Discord gets wrong, and what this window does
 
@@ -91,10 +93,10 @@ Layout presets A, B, and C are compared in [DIRECTIONS.md](DIRECTIONS.md). They 
 
 ## What is still rough
 
-- Rows are one height, so a fenced code block is flattened onto the message line instead of growing the row.
+- A fenced code block keeps its lines, a monospace face, and a Copy control that appears when the block is hovered.
 - Reply and edit are local. Edit replaces the cached string. Reply prefixes the next send. Neither is a Discord API call.
 - Reactions are local counts (`wave`, `plus`), not custom emoji.
 - The device row records a name. Capture and playback still open cpal's default devices.
 - Search does not cross channels, and it does not query Discord.
-- Light theme exists and switches live. The captures in the README are dark and AMOLED.
+- Light, Dark, and Ash switch live. The captures in the README are Onyx Ink.
 - Keyboard bindings need the window focused. They are not a screen-reader pass.

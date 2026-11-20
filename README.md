@@ -44,7 +44,7 @@ Several native Rust clients already exist. Rencord is aimed at the gaps that sho
 | | What you get today | What is still ahead |
 | --- | --- | --- |
 | **Voice cut-outs** | Adaptive jitter target from 40&nbsp;ms to 120&nbsp;ms, Opus PLC and in-band FEC, and a one-frame time-stretch instead of a hard skip. A loss simulation beats a fixed 40&nbsp;ms / 8-slot window at 1.5% and 5% loss. | Not measured on a live Discord call. Acoustic echo cancellation and noise suppression are not included. |
-| **Interface** | GPUI Kit 0.10. Direction A layout with the Crisp Minimal look: 12 px gaps, rounded panels, Figtree, photo avatars, and a flush user panel. Onyx is the same look on a black canvas. Light is included. Ctrl/Cmd+K, density, and type size are in settings. No Nitro surface. | Not a screen-reader pass. Plugins are still out. Layouts B and C remain behind `--layout`. |
+| **Interface** | GPUI Kit 0.10. Direction A layout. The default theme is Onyx Ink: a true-black canvas, `#15152A` hairlines, 8 px gaps, a `#4F6BFF` accent with black ink on the banner, Inter for the UI, and JetBrains Mono for timestamps and status. Dark (Crisp Minimal), Ash, and Light stay selectable. Ctrl/Cmd+K, density, and type size are in settings. No Nitro surface. | Not a screen-reader pass. Plugins are still out. Layouts B and C remain behind `--layout`. |
 | **Streaming** | Quality presets up to 2160p120 are defined and are not hidden behind a Nitro check. The UI must not promise that Discord will accept them. | No capture, no encoder, no Go Live socket. An out-of-process worker is a typed protocol only. |
 | **HDR** | Policy code tone-maps HDR to SDR unless both peers are Rencord and an SFU passthrough test has succeeded. That test has not been run. | No HDR capture. |
 
@@ -52,17 +52,15 @@ Serein, Concord, and Yapfast are further along as daily drivers. Milestone 1 is 
 
 ## Screenshots
 
-Captured from `rencord --demo --layout a` on Linux (X11, software GL). The default look is Crisp Minimal: a `#16181D` canvas, 12 px gaps, 12 px rounded panels, bundled Figtree, and photo avatars. The window uses client-side decorations, so the desktop app-menu button is not part of the chrome. Settings stays in the user dock. Onyx (`--theme amoled`) uses the same panels on a `#000000` canvas. `--voice` opens the loopback call. `--density compact` tightens the channel rows. **Join voice** runs the in-memory loopback and then tries to open the default cpal devices. It does not open a Discord UDP session.
+Captured from `rencord --demo --voice` on Linux (X11, software GL). The default theme is Onyx Ink. Every surface is `#000000`, separated by 8 px gaps and a 1 px `#15152A` hairline. The accent is `#4F6BFF`, and the new-messages banner uses black text on that blue. Links and mentions use `#A8B8FF`. The UI face is Inter. Timestamps, the date pill, member and dock status, and the voice readout are JetBrains Mono. Avatars in the demo are illustrated. The window uses client-side decorations, so the desktop app-menu button is not part of the chrome. Settings stays in the user dock. `--theme dark` is Crisp Minimal, `--theme ash` and `--theme light` are the other palettes, and `--theme amoled` is Onyx Ink. `--density compact` tightens the channel rows. **Join voice** runs the in-memory loopback and then tries to open the default cpal devices. It does not open a Discord UDP session. The millisecond figure in the voice card is the loopback target, not a fixed mock value.
 
-| Crisp | Voice |
+| Onyx Ink | Voice |
 | :---: | :---: |
-| <img src="docs/design/style-c/main.png" alt="Rencord in Crisp Minimal: gapped rounded panels, photo avatars, new-messages banner, code block, and a photo attachment" width="480" /> | <img src="docs/design/style-c/voice.png" alt="Crisp Minimal with the Voice Connected panel above the user dock" width="480" /> |
+| <img src="docs/design/onyx/main.png" alt="Rencord in Onyx Ink: black panels, blue banner with black text, code block, and illustrated avatars" width="480" /> | <img src="docs/design/onyx/voice.png" alt="Onyx Ink with the Voice Connected waveform, hang-up control, and mono latency readout" width="480" /> |
 
-| Compact | Onyx |
+| Compact | Hover |
 | :---: | :---: |
-| <img src="docs/design/style-c/compact.png" alt="Crisp Minimal at compact density" width="480" /> | <img src="docs/design/style-c/amoled.png" alt="Crisp Minimal on a true-black canvas" width="480" /> |
-
-Hover actions: [docs/design/style-c/hover.png](docs/design/style-c/hover.png).
+| <img src="docs/design/onyx/compact.png" alt="Onyx Ink at compact density" width="480" /> | <img src="docs/design/onyx/hover.png" alt="Onyx Ink message hover bar with react, reply, link, and delete" width="480" /> |
 
 ## Feature status
 
@@ -83,7 +81,7 @@ Honest status for this repository. "Implemented" means the code path and tests e
 | Screen share / camera / Go Live | Not implemented | Presets and the worker command enum only. |
 | HDR | Policy only | Tone-map to SDR by default. |
 | Notifications, keyring, tray, hotkeys | Stub | In-process notification sink. OS keyring is the intended next store; Milestone 1 uses the private file. |
-| Themes, density, quick switcher | Implemented | Onyx, Dark, Ash, and Light. Compact, Cozy, and Spacious. Direction A is the default; B and C stay behind `--layout`. Ctrl/Cmd+K. Alt+arrows move channels. |
+| Themes, density, quick switcher | Implemented | Onyx Ink is the default. Dark, Ash, and Light remain. Compact, Cozy, and Spacious. Direction A is the default; B and C stay behind `--layout`. Ctrl/Cmd+K. Alt+arrows move channels. |
 | Search | Implemented locally | `from:`, `in:`, `has:`, `before:`, and `after:` across cached channels, plus the guild search URL. A hit jumps to that message. Not verified against Discord's search service. |
 | Reactions, reply, edit | Implemented locally; REST client tested against a mock | Optimistic update with rollback. Demo mode does not call Discord. |
 | Threads, forums, uploads | Not implemented | |
@@ -104,7 +102,7 @@ cargo test --workspace
 cargo run -p rencord-desktop -- --demo
 ```
 
-`--demo` opens the GPUI window on local fixture data. It does not contact Discord. `--theme amoled`, `--theme dark`, `--theme ash`, or `--theme light` picks the starting palette. `--layout a` is the default; `b` and `c` are the other presets. `--density compact` tightens the channel list. `--voice` starts the loopback call. `--bench` prints startup, RSS, and frame gaps, then quits. Omit `--demo` to paste a token.
+`--demo` opens the GPUI window on local fixture data. It does not contact Discord. The starting palette is Onyx Ink. `--theme dark`, `--theme ash`, `--theme light`, or `--theme amoled` (an alias of Onyx) picks another palette. `--layout a` is the default; `b` and `c` are the other presets. `--density compact` tightens the channel list. `--voice` starts the loopback call. `--bench` prints startup, RSS, and frame gaps, then quits. Omit `--demo` to paste a token.
 
 ```sh
 cargo run -p rencord-desktop --bin rencord-measure -- --offline
@@ -119,7 +117,7 @@ cargo run -p rencord-desktop --bin rencord-measure -- --offline
 | Next / previous server | Ctrl+Alt+Down / Ctrl+Alt+Up |
 | Settings | Ctrl+, or Cmd+, or the Settings button |
 
-Settings switches theme (AMOLED, dark, light), density (compact 44 px rows, cozy 68 px), and type size (13, 15, or 17 px). It lists cpal input and output names, shows the last loopback jitter line, and states that Go Live is not in this build. There is no Nitro row.
+Settings switches theme (Onyx Ink, dark, ash, light), density (compact 28 px rows, cozy 32 px, spacious 36 px), and type size (13, 15, or 17 px). It lists cpal input and output names, shows the last loopback jitter line, and states that Go Live is not in this build. There is no Nitro row.
 
 ## Measured on this machine
 

@@ -145,6 +145,7 @@ impl Shell {
             discriminator: None,
             bot: false,
         };
+        self.reactions.remove(&1000);
         self.session.messages.insert(
             channel,
             vec![
@@ -152,15 +153,8 @@ impl Shell {
                     id: Snowflake::new(1000),
                     channel_id: channel,
                     author: ada.clone(),
-                    content: "Pushed the jitter notes. **Rencord** should stay under 200 MiB idle.".into(),
-                    timestamp: "Today at 3:41 PM".into(),
-                },
-                Message {
-                    id: Snowflake::new(1001),
-                    channel_id: channel,
-                    author: ada.clone(),
                     content: "```rust\nfn main() {\n    let answer = 42;\n}\n```".into(),
-                    timestamp: "Today at 3:41 PM".into(),
+                    timestamp: "Today at 3:38 PM".into(),
                 },
                 Message {
                     id: Snowflake::new(1002),
@@ -184,14 +178,6 @@ impl Shell {
                     timestamp: "Today at 4:02 PM".into(),
                 },
             ],
-        );
-        self.reactions.insert(
-            1000,
-            vec![Reaction {
-                emoji: "wave".into(),
-                count: 3,
-                mine: true,
-            }],
         );
         self.members = vec![
             "Ada · Online".into(),
@@ -793,7 +779,7 @@ mod tests {
         assert!(outline.contains("#general"));
         assert!(outline.contains("#voice"));
         assert!(outline.contains("Charles"));
-        assert!(outline.contains("**Rencord**"));
+        assert!(outline.contains("fn main()"));
     }
 
     #[test]
@@ -840,10 +826,10 @@ mod tests {
             .messages_for(Snowflake::new(100))
             .iter()
             .any(
-                |message| message.id == Snowflake::new(1000) && message.content.contains("Rencord")
+                |message| message.id == Snowflake::new(1000) && message.content.contains("fn main")
             ));
         shell.cycle_theme();
-        assert_eq!(shell.prefs.theme, ThemeMode::Ash);
+        assert_eq!(shell.prefs.theme, ThemeMode::Dark);
         shell.begin_reply(Snowflake::new(1000));
         shell.send_local("noted");
         assert!(shell.outline().contains("replying to 1000"));
