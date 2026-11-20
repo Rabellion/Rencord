@@ -2,12 +2,13 @@
 //!
 //! Creating a stream emits a gateway voice-state update with `self_stream`.
 //! Watching someone else emits a stream-watch message for the separate video
-//! connection. Volume is per stream, from 0 to 200 percent. Nothing here
-//! opens a Discord socket.
+//! connection. Volume is per stream, from 0 to 200 percent. The video UDP
+//! path is [`connect_stream`], the same discovery and keepalive as voice.
 
 use rencord_model::Snowflake;
 use rencord_protocol::{stream_watch, voice_state_go_live};
 use rencord_voice::dave::{DaveEngine, DaveOps};
+use rencord_voice::{LiveCall, VoiceLinkError, VoiceTarget};
 use serde_json::Value;
 
 use crate::encode::{active_encoder, encode_software};
@@ -53,6 +54,15 @@ impl Default for GoLive {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Open the Go Live media server. Discovery, retries, and UDP keepalives are
+/// the voice implementation with the stream role, so the two cannot drift.
+pub async fn connect_stream(
+    target: VoiceTarget,
+    dave: DaveEngine,
+) -> Result<LiveCall, VoiceLinkError> {
+    LiveCall::connect_stream(target, dave).await
 }
 
 impl GoLive {

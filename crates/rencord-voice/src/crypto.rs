@@ -128,6 +128,21 @@ pub fn discovery_request(ssrc: u32) -> [u8; 74] {
     packet
 }
 
+/// A discovery reply is type `0x0002`, length field 70, and the SSRC we sent.
+/// Anything else is a stray packet, not a failed discovery.
+pub fn valid_discovery_response(packet: &[u8], ssrc: u32) -> Option<(String, u16)> {
+    if packet.len() < 74 {
+        return None;
+    }
+    let kind = u16::from_be_bytes([packet[0], packet[1]]);
+    let length = u16::from_be_bytes([packet[2], packet[3]]);
+    let echoed = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+    if kind != 0x0002 || length != 70 || echoed != ssrc {
+        return None;
+    }
+    parse_discovery_response(packet)
+}
+
 pub fn parse_discovery_response(packet: &[u8]) -> Option<(String, u16)> {
     if packet.len() < 74 {
         return None;
@@ -167,11 +182,15 @@ mod tests {
     #[test]
     fn discovery_response_parses_ip_and_port() {
         let mut packet = discovery_request(99);
+        packet[1] = 2;
         let ip = b"203.0.113.10";
         packet[8..8 + ip.len()].copy_from_slice(ip);
         packet[72..74].copy_from_slice(&40000u16.to_be_bytes());
-        let (address, port) = parse_discovery_response(&packet).unwrap();
+        let (address, port) = valid_discovery_response(&packet, 99).unwrap();
         assert_eq!(address, "203.0.113.10");
         assert_eq!(port, 40000);
+        assert!(valid_discovery_response(&packet, 100).is_none());
+        packet[1] = 1;
+        assert!(valid_discovery_response(&packet, 99).is_none());
     }
 }
