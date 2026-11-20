@@ -5,6 +5,19 @@
 
 use std::path::PathBuf;
 
+pub fn icon_pack_dir() -> PathBuf {
+    if let Ok(config) = std::env::var("XDG_CONFIG_HOME") {
+        return PathBuf::from(config).join("rencord").join("icon-pack");
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home)
+            .join(".config")
+            .join("rencord")
+            .join("icon-pack");
+    }
+    PathBuf::from(".config/rencord/icon-pack")
+}
+
 pub fn discord_install_icon_dir() -> Option<PathBuf> {
     let candidates = [
         "/usr/share/discord/resources",
@@ -24,5 +37,7 @@ mod tests {
     #[test]
     fn icon_lookup_does_not_panic() {
         let _ = discord_install_icon_dir();
+        let pack = icon_pack_dir();
+        assert!(pack.ends_with("icon-pack"));
     }
 }

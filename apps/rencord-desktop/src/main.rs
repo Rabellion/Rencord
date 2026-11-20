@@ -25,6 +25,12 @@ gpui_kit::actions!(
         NextGuild,
         PrevGuild,
         OpenSettings,
+        OpenInbox,
+        ToggleSidebar,
+        ToggleMembers,
+        ToggleSplit,
+        TogglePip,
+        ShowHelp,
     ]
 );
 
@@ -56,6 +62,15 @@ fn main() {
             KeyBinding::new("ctrl-alt-up", PrevGuild, None),
             KeyBinding::new("ctrl-,", OpenSettings, None),
             KeyBinding::new("cmd-,", OpenSettings, None),
+            KeyBinding::new("ctrl-i", OpenInbox, None),
+            KeyBinding::new("cmd-i", OpenInbox, None),
+            KeyBinding::new("ctrl-b", ToggleSidebar, None),
+            KeyBinding::new("cmd-b", ToggleSidebar, None),
+            KeyBinding::new("ctrl-m", ToggleMembers, None),
+            KeyBinding::new("cmd-m", ToggleMembers, None),
+            KeyBinding::new("ctrl-\\", ToggleSplit, None),
+            KeyBinding::new("ctrl-/", ShowHelp, None),
+            KeyBinding::new("cmd-/", ShowHelp, None),
         ]);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
@@ -457,12 +472,37 @@ impl Render for RencordWindow {
             }))
             .on_action(cx.listener(|this, _: &OpenSettings, _, cx| {
                 this.shell.toggle_settings();
+                this.reopen_audio();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &OpenInbox, _, cx| {
+                this.shell.inbox_open = !this.shell.inbox_open;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
+                this.shell.prefs.show_sidebar = !this.shell.prefs.show_sidebar;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleMembers, _, cx| {
+                this.shell.prefs.show_members = !this.shell.prefs.show_members;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleSplit, _, cx| {
+                this.shell.prefs.split_pane = !this.shell.prefs.split_pane;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &TogglePip, _, cx| {
+                this.shell.prefs.pip = !this.shell.prefs.pip;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ShowHelp, _, cx| {
+                this.shell.help_open = !this.shell.help_open;
                 cx.notify();
             }));
         if !signed_in {
             return root.child(self.login(cx)).into_any_element();
         }
-        root.child(self.shell_view(cx)).into_any_element()
+        root.child(self.shell_view(window, cx)).into_any_element()
     }
 }
 
@@ -491,7 +531,8 @@ impl RencordWindow {
             )
     }
 
-    fn shell_view(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn shell_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let viewport = window.viewport_size().width;
         let palette = self.shell.prefs.palette();
         let density = self.shell.prefs.density;
         let this = cx.entity();
@@ -560,7 +601,7 @@ impl RencordWindow {
             rail = rail.child(
                 div()
                     .id(SharedString::from(format!("guild-{id}")))
-                    .size(px(42.))
+                    .size(px(self.shell.prefs.server_icon_px().min(56.)))
                     .rounded(px(if active { 12. } else { 21. }))
                     .items_center()
                     .justify_center()
@@ -603,6 +644,19 @@ impl RencordWindow {
                     .py(px(8.))
                     .child(Input::new(&self.search_input)),
             );
+        sidebar = sidebar.child(section_label("Favorites", palette.faint));
+        let favorite_ids = self.shell.favorites.clone();
+        for id in favorite_ids {
+            if let Some(channel) = self.shell.session.channels.get(&id) {
+                sidebar = sidebar.child(channel_row(
+                    this.clone(),
+                    channel.id,
+                    format!("* {}", channel.name),
+                    selected == Some(channel.id),
+                    palette,
+                ));
+            }
+        }
         sidebar = sidebar.child(section_label("Text", palette.faint));
         for channel in channels.iter().filter(|channel| channel.kind.is_text()) {
             sidebar = sidebar.child(channel_row(
@@ -675,42 +729,6 @@ impl RencordWindow {
             .flex_1()
             .h_full()
             .bg(rgb(palette.chat))
-            .child(
-                h_flex()
-                    .px(px(16.))
-                    .h(px(48.))
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(rgb(palette.line))
-                    .child(Label::new(channel_title(selected, &channels, &dms)))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child({
-                                let view = this.clone();
-                                Button::new("settings").label("Settings").on_click(
-                                    move |_, _, cx| {
-                                        view.update(cx, |this, cx| {
-                                            this.shell.toggle_settings();
-                                            cx.notify();
-                                        });
-                                    },
-                                )
-                            })
-                            .child({
-                                let view = this.clone();
-                                Button::new("palette")
-                                    .label("Ctrl K")
-                                    .on_click(move |_, _, cx| {
-                                        view.update(cx, |this, cx| {
-                                            this.shell.toggle_palette();
-                                            cx.notify();
-                                        });
-                                    })
-                            }),
-                    ),
-            )
             .child(div().flex_1().overflow_hidden().px(px(8.)).child(timeline));
         let hits = self.shell.search_hits();
         if !self.shell.search.trim().is_empty() {
@@ -745,7 +763,8 @@ impl RencordWindow {
                 .text_color(rgb(palette.faint))
                 .text_size(px(12.))
                 .child(Label::new(format!(
-                    "{status}  ·  {theme_label}  ·  {}  ·  switch {switch_us} µs  ·  no upsells",
+                    "{status}  ·  {}  ·  {theme_label}  ·  {}  ·  switch {switch_us} µs  ·  no upsells",
+                    channel_title(selected, &channels, &dms),
                     self.shell.prefs.layout.label()
                 ))),
         );
@@ -774,6 +793,10 @@ impl RencordWindow {
         let voice_panel =
             self.voice_card(cx, palette, &status, voice.as_ref(), muted, deafened, gain);
         let layout_kind = self.shell.prefs.layout;
+        let hide_members = !self.shell.prefs.show_members || viewport < px(1100.);
+        let hide_sidebar = !self.shell.prefs.show_sidebar || viewport < px(760.);
+        let sidebar = if hide_sidebar { div() } else { sidebar };
+        let people = if hide_members { div() } else { people };
         let body = match layout_kind {
             rencord_desktop::LayoutKind::Discord => h_flex()
                 .size_full()
@@ -849,6 +872,15 @@ impl RencordWindow {
         if palette_open {
             layer = layer.child(self.palette_layer(cx, palette, &commands));
         }
+        if self.shell.inbox_open {
+            layer = layer.child(self.inbox_layer(cx, palette));
+        }
+        if self.shell.help_open {
+            layer = layer.child(hint_bar(
+                palette,
+                "Ctrl+K palette, Tab secondary, Ctrl+I inbox, Ctrl+B sidebar, Ctrl+M members, Ctrl+\\ split, Ctrl+/ this list".into(),
+            ));
+        }
         if settings {
             layer = layer.child(self.settings_layer(
                 cx,
@@ -862,6 +894,65 @@ impl RencordWindow {
             ));
         }
         layer
+    }
+
+    fn inbox_layer(&mut self, cx: &mut Context<Self>, palette: Palette) -> impl IntoElement {
+        let this = cx.entity();
+        let hits = self.shell.mentions();
+        let mut list = v_flex().gap_1();
+        for hit in hits.iter().take(8) {
+            let channel_id = hit.channel_id;
+            let message_id = hit.message.id;
+            let label = format!(
+                "#{} {}",
+                hit.channel_name,
+                hit.message.content.replace('\n', " ")
+            );
+            let view = this.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("inbox-{message_id}")))
+                    .cursor_pointer()
+                    .px(px(8.))
+                    .py(px(4.))
+                    .rounded(px(6.))
+                    .bg(rgb(if self.shell.prefs.soft_ping {
+                        palette.ping
+                    } else {
+                        palette.elevated
+                    }))
+                    .child(Label::new(label))
+                    .on_click(move |_, _, cx| {
+                        view.update(cx, |this, cx| {
+                            this.shell.jump_to(channel_id, message_id);
+                            this.shell.inbox_open = false;
+                            cx.notify();
+                        });
+                    }),
+            );
+        }
+        overlay(
+            palette,
+            v_flex()
+                .w(px(480.))
+                .p(px(12.))
+                .gap_2()
+                .rounded(px(12.))
+                .bg(rgb(palette.elevated))
+                .border_1()
+                .border_color(rgb(palette.line))
+                .child(Label::new("Mentions"))
+                .child(list)
+                .child(small_button(
+                    this,
+                    "mark-read",
+                    "Mark all read",
+                    |view, cx| {
+                        view.shell.mark_mentions_read();
+                        cx.notify();
+                    },
+                )),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -884,12 +975,15 @@ impl RencordWindow {
                 )
             })
             .unwrap_or_else(|| "Not in a call".into());
-        v_flex()
-            .m(px(8.))
-            .p(px(8.))
-            .gap_1()
-            .rounded(px(12.))
+        h_flex()
+            .w_full()
+            .h(px(52.))
+            .px(px(8.))
+            .gap_2()
+            .items_center()
             .bg(rgb(palette.elevated))
+            .border_t_1()
+            .border_color(rgb(palette.line))
             .child(Label::new(status.to_owned()))
             .child(
                 div()
@@ -903,31 +997,47 @@ impl RencordWindow {
                 if deafened { "deaf" } else { "listening" },
                 gain * 100.0
             )))
-            .child(
-                h_flex()
-                    .gap_1()
-                    .child(small_button(this.clone(), "mute", "Mute", |view, cx| {
-                        view.shell.toggle_mute();
-                        cx.notify();
-                    }))
-                    .child(small_button(
-                        this.clone(),
-                        "deafen",
-                        "Deafen",
-                        |view, cx| {
-                            view.shell.toggle_deaf();
-                            cx.notify();
-                        },
-                    ))
-                    .child(small_button(this.clone(), "quieter", "Vol-", |view, cx| {
-                        view.shell.set_speaker_gain(view.shell.speaker_gain - 0.1);
-                        cx.notify();
-                    }))
-                    .child(small_button(this, "join-voice", "Join", |view, cx| {
-                        view.join_voice();
-                        cx.notify();
-                    })),
-            )
+            .child(dock_circle(
+                this.clone(),
+                "mic-btn",
+                "Mic",
+                palette,
+                |view, cx| {
+                    view.shell.toggle_mute();
+                    cx.notify();
+                },
+            ))
+            .child(dock_circle(
+                this.clone(),
+                "deaf-btn",
+                "Deaf",
+                palette,
+                |view, cx| {
+                    view.shell.toggle_deaf();
+                    cx.notify();
+                },
+            ))
+            .child(dock_circle(
+                this.clone(),
+                "gear-btn",
+                "Set",
+                palette,
+                |view, cx| {
+                    view.shell.toggle_settings();
+                    view.reopen_audio();
+                    cx.notify();
+                },
+            ))
+            .child(dock_circle(
+                this,
+                "join-btn",
+                "Join",
+                palette,
+                |view, cx| {
+                    view.join_voice();
+                    cx.notify();
+                },
+            ))
     }
 
     fn palette_layer(
@@ -1178,6 +1288,31 @@ fn avatar(palette: Palette, initial: &str) -> gpui_kit::Div {
         .justify_center()
         .text_size(px(12.))
         .child(Label::new(initial.to_owned()))
+}
+
+fn dock_circle(
+    view: Entity<RencordWindow>,
+    id: &'static str,
+    label: &'static str,
+    palette: Palette,
+    action: impl Fn(&mut RencordWindow, &mut Context<RencordWindow>) + 'static,
+) -> impl IntoElement {
+    div()
+        .id(id)
+        .size(px(32.))
+        .rounded(px(16.))
+        .items_center()
+        .justify_center()
+        .bg(rgb(palette.chat))
+        .border_1()
+        .border_color(rgb(palette.line))
+        .text_size(px(11.))
+        .cursor_pointer()
+        .focus(|style| style.border_color(rgb(palette.accent)))
+        .child(Label::new(label))
+        .on_click(move |_, _, cx| {
+            view.update(cx, |this, cx| action(this, cx));
+        })
 }
 
 fn small_button(

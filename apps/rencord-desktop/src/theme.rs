@@ -43,32 +43,36 @@ impl LayoutKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemeMode {
-    Amoled,
+    Onyx,
     Dark,
+    Ash,
     Light,
 }
 
 impl ThemeMode {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Amoled => "AMOLED",
+            Self::Onyx => "Onyx",
             Self::Dark => "Dark",
+            Self::Ash => "Ash",
             Self::Light => "Light",
         }
     }
 
     pub fn cycle(self) -> Self {
         match self {
-            Self::Amoled => Self::Dark,
-            Self::Dark => Self::Light,
-            Self::Light => Self::Amoled,
+            Self::Onyx => Self::Dark,
+            Self::Dark => Self::Ash,
+            Self::Ash => Self::Light,
+            Self::Light => Self::Onyx,
         }
     }
 
     pub fn parse(value: &str) -> Option<Self> {
         match value {
-            "amoled" => Some(Self::Amoled),
+            "onyx" | "amoled" => Some(Self::Onyx),
             "dark" => Some(Self::Dark),
+            "ash" => Some(Self::Ash),
             "light" => Some(Self::Light),
             _ => None,
         }
@@ -79,6 +83,7 @@ impl ThemeMode {
 pub enum Density {
     Compact,
     Cozy,
+    Spacious,
 }
 
 impl Density {
@@ -86,21 +91,31 @@ impl Density {
         match self {
             Self::Compact => "Compact",
             Self::Cozy => "Cozy",
+            Self::Spacious => "Spacious",
         }
     }
 
-    pub fn toggle(self) -> Self {
+    pub fn cycle(self) -> Self {
         match self {
             Self::Compact => Self::Cozy,
-            Self::Cozy => Self::Compact,
+            Self::Cozy => Self::Spacious,
+            Self::Spacious => Self::Compact,
         }
     }
 
-    /// Uniform virtual-row height. One height keeps the list on the fast path.
-    pub fn row_px(self) -> f32 {
+    pub fn channel_row_px(self) -> f32 {
         match self {
-            Self::Compact => 44.0,
-            Self::Cozy => 68.0,
+            Self::Compact => 24.0,
+            Self::Cozy => 32.0,
+            Self::Spacious => 38.0,
+        }
+    }
+
+    pub fn server_icon_px(self) -> f32 {
+        match self {
+            Self::Compact => 40.0,
+            Self::Cozy => 48.0,
+            Self::Spacious => 54.0,
         }
     }
 }
@@ -125,30 +140,54 @@ pub struct Palette {
     pub line: u32,
     pub code_bg: u32,
     pub link: u32,
+    /// Soft mention wash. Not the harsh yellow Discord uses.
+    pub ping: u32,
 }
 
 impl Palette {
     pub fn for_mode(mode: ThemeMode) -> Self {
         match mode {
-            ThemeMode::Amoled => Self {
+            ThemeMode::Onyx => Self {
                 mode,
                 app_bg: 0x000000,
                 rail: 0x000000,
-                sidebar: 0x050505,
-                chat: 0x000000,
-                members: 0x050505,
-                elevated: 0x101010,
-                hover: 0x161616,
-                selected: 0x1c1c1c,
+                sidebar: 0x0b0b0c,
+                chat: 0x070709,
+                members: 0x0b0b0c,
+                elevated: 0x141416,
+                hover: 0x1a1a1c,
+                selected: 0x222226,
                 text: 0xf2f3f5,
-                muted: 0xa0a2a8,
-                faint: 0x6d6f76,
+                muted: 0xb5bac1,
+                faint: 0x8e9297,
                 accent: 0x1d4ed8,
                 accent_text: 0xffffff,
-                danger: 0xed4245,
-                line: 0x1a1a1a,
-                code_bg: 0x121212,
-                link: 0x7aa2ff,
+                danger: 0xf23f43,
+                line: 0x1a1a1c,
+                code_bg: 0x000000,
+                link: 0x8eb4ff,
+                ping: 0x1e293b,
+            },
+            ThemeMode::Ash => Self {
+                mode,
+                app_bg: 0x111214,
+                rail: 0x1e1f22,
+                sidebar: 0x2b2d31,
+                chat: 0x313338,
+                members: 0x2b2d31,
+                elevated: 0x232428,
+                hover: 0x3a3c41,
+                selected: 0x404249,
+                text: 0xf2f3f5,
+                muted: 0xdbdee1,
+                faint: 0x949ba4,
+                accent: 0x1d4ed8,
+                accent_text: 0xffffff,
+                danger: 0xf23f43,
+                line: 0x3f4147,
+                code_bg: 0x2b2d31,
+                link: 0x00a8fc,
+                ping: 0x3b4252,
             },
             ThemeMode::Dark => Self {
                 mode,
@@ -169,6 +208,7 @@ impl Palette {
                 line: 0x2e3035,
                 code_bg: 0x111214,
                 link: 0x00a8fc,
+                ping: 0x1e293b,
             },
             ThemeMode::Light => Self {
                 mode,
@@ -189,6 +229,7 @@ impl Palette {
                 line: 0xe1e2e4,
                 code_bg: 0xf2f3f5,
                 link: 0x0068e0,
+                ping: 0xdbe4f0,
             },
         }
     }
@@ -223,6 +264,15 @@ pub struct Preferences {
     pub density: Density,
     pub font_px: f32,
     pub layout: LayoutKind,
+    pub ui_scale: f32,
+    pub icon_px: f32,
+    pub saturation: f32,
+    pub soft_ping: bool,
+    pub show_members: bool,
+    pub show_sidebar: bool,
+    pub split_pane: bool,
+    pub pip: bool,
+    pub stats_hud: bool,
     pub input_device: Option<String>,
     pub output_device: Option<String>,
 }
@@ -234,6 +284,15 @@ impl Default for Preferences {
             density: Density::Cozy,
             font_px: 15.0,
             layout: LayoutKind::Discord,
+            ui_scale: 1.0,
+            icon_px: 48.0,
+            saturation: 1.0,
+            soft_ping: true,
+            show_members: true,
+            show_sidebar: true,
+            split_pane: false,
+            pip: false,
+            stats_hud: false,
             input_device: None,
             output_device: None,
         }
@@ -242,7 +301,35 @@ impl Default for Preferences {
 
 impl Preferences {
     pub fn palette(&self) -> Palette {
-        Palette::for_mode(self.theme)
+        let mut palette = Palette::for_mode(self.theme);
+        if self.saturation < 0.99 {
+            palette = desaturate(palette, self.saturation.clamp(0.5, 1.0));
+        }
+        palette
+    }
+
+    pub fn server_icon_px(&self) -> f32 {
+        self.icon_px * self.ui_scale
+    }
+
+    pub fn bump_scale(&mut self, direction: i32) {
+        let steps = [0.85_f32, 1.0, 1.15, 1.3];
+        let index = steps
+            .iter()
+            .position(|step| (*step - self.ui_scale).abs() < 0.02)
+            .unwrap_or(1);
+        let next = (index as i32 + direction).clamp(0, steps.len() as i32 - 1) as usize;
+        self.ui_scale = steps[next];
+    }
+
+    pub fn bump_icon(&mut self, direction: i32) {
+        let steps = [36.0_f32, 40.0, 48.0, 54.0];
+        let index = steps
+            .iter()
+            .position(|step| (*step - self.icon_px).abs() < 0.5)
+            .unwrap_or(2);
+        let next = (index as i32 + direction).clamp(0, steps.len() as i32 - 1) as usize;
+        self.icon_px = steps[next];
     }
 
     pub fn bump_font(&mut self, direction: i32) {
@@ -254,6 +341,43 @@ impl Preferences {
         let next = next.clamp(0, FONT_STEPS.len() as i32 - 1) as usize;
         self.font_px = FONT_STEPS[next];
     }
+}
+
+fn desaturate(palette: Palette, saturation: f32) -> Palette {
+    let mut palette = palette;
+    let fields = [
+        &mut palette.app_bg,
+        &mut palette.rail,
+        &mut palette.sidebar,
+        &mut palette.chat,
+        &mut palette.members,
+        &mut palette.elevated,
+        &mut palette.hover,
+        &mut palette.selected,
+        &mut palette.text,
+        &mut palette.muted,
+        &mut palette.faint,
+        &mut palette.accent,
+        &mut palette.link,
+        &mut palette.ping,
+        &mut palette.code_bg,
+        &mut palette.line,
+    ];
+    for field in fields {
+        *field = mix_gray(*field, saturation);
+    }
+    palette
+}
+
+fn mix_gray(hex: u32, saturation: f32) -> u32 {
+    let r = (hex >> 16) & 0xff;
+    let g = (hex >> 8) & 0xff;
+    let b = hex & 0xff;
+    let gray = (r + g + b) / 3;
+    let mix = |channel: u32| -> u32 {
+        (gray as f32 + (channel as f32 - gray as f32) * saturation).round() as u32
+    };
+    (mix(r) << 16) | (mix(g) << 8) | mix(b)
 }
 
 #[cfg(test)]
@@ -285,17 +409,25 @@ mod tests {
 
     #[test]
     fn amoled_is_true_black_and_themes_cycle() {
-        let amoled = Palette::for_mode(ThemeMode::Amoled);
-        assert_eq!(amoled.app_bg, 0x000000);
-        assert_eq!(amoled.chat, 0x000000);
-        assert_ne!(Palette::for_mode(ThemeMode::Dark).chat, 0x000000);
-        assert_ne!(Palette::for_mode(ThemeMode::Light).text, amoled.text);
-        assert_eq!(ThemeMode::Amoled.cycle().cycle().cycle(), ThemeMode::Amoled);
+        let onyx = Palette::for_mode(ThemeMode::Onyx);
+        assert_eq!(onyx.rail, 0x000000);
+        assert_eq!(onyx.chat, 0x070709);
+        assert_eq!(Palette::for_mode(ThemeMode::Ash).chat, 0x313338);
+        assert_ne!(Palette::for_mode(ThemeMode::Light).text, onyx.text);
+        assert_eq!(
+            ThemeMode::Onyx.cycle().cycle().cycle().cycle(),
+            ThemeMode::Onyx
+        );
     }
 
     #[test]
     fn body_text_meets_wcag_aa_on_every_theme() {
-        for mode in [ThemeMode::Amoled, ThemeMode::Dark, ThemeMode::Light] {
+        for mode in [
+            ThemeMode::Onyx,
+            ThemeMode::Dark,
+            ThemeMode::Ash,
+            ThemeMode::Light,
+        ] {
             let palette = Palette::for_mode(mode);
             let text = contrast_ratio(palette.text, palette.chat);
             let muted = contrast_ratio(palette.muted, palette.chat);

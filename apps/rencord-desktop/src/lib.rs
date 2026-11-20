@@ -12,7 +12,7 @@ use rencord_voice::{backend_name, loopback_call, LoopbackReport};
 use std::collections::HashMap;
 use std::time::Instant;
 
-pub use icons::discord_install_icon_dir;
+pub use icons::{discord_install_icon_dir, icon_pack_dir};
 pub use search::{guild_search_path, local_search, parse_message_query, MessageQuery, SearchHit};
 pub use theme::{
     token_summary, Density, LayoutKind, Palette, Preferences, ThemeMode, MOTION_OVERLAY_MS,
@@ -72,6 +72,11 @@ pub struct Shell {
     /// Last cached channel switch, in microseconds.
     pub last_switch_us: u128,
     pub jump_index: Option<usize>,
+    pub favorites: Vec<Snowflake>,
+    pub read_mentions: Vec<u64>,
+    pub inbox_open: bool,
+    pub help_open: bool,
+    pub secondary_action: bool,
 }
 
 impl Shell {
@@ -96,6 +101,11 @@ impl Shell {
             members: vec!["Ada".into(), "Charles".into(), "Lovelace".into()],
             last_switch_us: 0,
             jump_index: None,
+            favorites: vec![Snowflake::new(100)],
+            read_mentions: Vec::new(),
+            inbox_open: false,
+            help_open: false,
+            secondary_action: false,
         };
         shell.reactions.insert(
             1000,
@@ -343,12 +353,51 @@ impl Shell {
         self.prefs.layout = self.prefs.layout.cycle();
     }
 
+    pub fn toggle_favorite(&mut self, id: Snowflake) {
+        if let Some(index) = self.favorites.iter().position(|item| *item == id) {
+            self.favorites.remove(index);
+        } else {
+            self.favorites.push(id);
+        }
+    }
+
+    pub fn mentions(&self) -> Vec<SearchHit> {
+        let mut hits = Vec::new();
+        for channel in self.session.channels.values() {
+            for message in self.session.messages_for(channel.id) {
+                if self.read_mentions.contains(&message.id.get()) {
+                    continue;
+                }
+                let text = message.content.to_ascii_lowercase();
+                if text.contains("<@") || text.contains('@') || text.contains("mention") {
+                    hits.push(SearchHit {
+                        channel_id: channel.id,
+                        channel_name: channel.name.clone(),
+                        message: message.clone(),
+                    });
+                }
+            }
+        }
+        hits
+    }
+
+    pub fn mark_mentions_read(&mut self) {
+        for message in self.session.messages.values().flatten() {
+            let text = message.content.to_ascii_lowercase();
+            if text.contains("<@") || text.contains('@') || text.contains("mention") {
+                self.read_mentions.push(message.id.get());
+            }
+        }
+        self.inbox_open = false;
+        self.note("Marked mentions read");
+    }
+
     pub fn set_theme(&mut self, mode: ThemeMode) {
         self.prefs.theme = mode;
     }
 
     pub fn toggle_density(&mut self) {
-        self.prefs.density = self.prefs.density.toggle();
+        self.prefs.density = self.prefs.density.cycle();
     }
 
     pub fn bump_font(&mut self, direction: i32) {
@@ -647,6 +696,7 @@ impl Shell {
             self.prefs.font_px
         ));
         lines.push(token_summary());
+        lines.push(format!("icon-pack {}", discord_install_icon_dir().map(|path| path.display().to_string()).unwrap_or_else(|| icon_pack_dir().display().to_string())));
         lines.join("\n")
     }
 }
@@ -713,7 +763,7 @@ mod tests {
                 |message| message.id == Snowflake::new(1000) && message.content.contains("Rencord")
             ));
         shell.cycle_theme();
-        assert_eq!(shell.prefs.theme, ThemeMode::Light);
+        assert_eq!(shell.prefs.theme, ThemeMode::Ash);
         shell.begin_reply(Snowflake::new(1000));
         shell.send_local("noted");
         assert!(shell.outline().contains("replying to 1000"));

@@ -219,7 +219,8 @@ The UI does not embed egui. Protocol crates do not depend on GPUI.
 | --- | --- | --- |
 | 1. Shell and adaptive jitter | On `main` | GPUI window, token login, guild and DM lists, markdown history, local send, gateway identify against a local socket, jitter simulation. |
 | 2. Live voice path | On `main` | Gateway resume, voice websocket + UDP discovery, transport cipher, speaking, DAVE control frames, mute, deafen, per-SSRC gain, default cpal devices. Local stubs only. |
-| 3. UI | In progress, not on `main` | Variable-height code blocks, REST reply/edit/delete/reactions, device switching, search, accessibility, and refresh reporting. Three layout presets (`--layout a\|b\|c`) are compared in [docs/design/DIRECTIONS.md](docs/design/DIRECTIONS.md). Not merged until one is chosen. |
+| 3. UI fixes | Ready to land | Variable-height code blocks, REST reply/edit/delete/reactions, named audio devices, cross-channel search, AccessKit labels, WCAG AA themes (Onyx, Dark, Ash, Light), and refresh reporting. Shared chrome from the research note: flush circular dock, no second server-name bar, Compact/Cozy/Spacious, Ctrl+I inbox, local favorites. |
+| 3b. Layout directions | Open pull request, not merged | `--layout a` Discord-like, `b` keyboard-first, `c` unified sidebar with a floating voice card. Comparison and screenshots: [docs/design/DIRECTIONS.md](docs/design/DIRECTIONS.md). |
 | 4. Threads, search, uploads, notifications | Not started | OS keyring behind the existing `SecretStore` trait. |
 | 5. Voice against Discord | Not started | Point `LiveCall` at a real voice server and keep DAVE rekeys without dropping the call. |
 | 6. Go Live | Not started | Per-OS capture, H.264, out-of-process worker, presets up to 2160p120 with no Nitro checkbox. The UI will show Discord's documented caps and require an explicit acknowledgement before requesting more. 120 fps only when the display reports that refresh. |

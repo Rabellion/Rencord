@@ -1,6 +1,8 @@
 # Layout directions
 
-Three presets share one session, one theme system, and one message list. Switch them with Settings > Layout or `--layout a|b|c`. Nothing here is merged to `main`. The research note was not in the tree when these were built, so they follow the briefs below and can be revised when that note arrives.
+Three presets share one session, the Onyx / Dark / Ash / Light themes, and one message list. Switch them with Settings > Layout or `--layout a|b|c`. This pull request is not merged until one direction is chosen.
+
+The November 2026 research note is reflected in the shared chrome: no second server-name bar, a flush dock of separate circular mic, deafen, and settings buttons, Compact / Cozy / Spacious plus independent font, UI scale, and server-icon size, a soft ping wash instead of harsh yellow, Ctrl+K with a Ctrl+/ cheat sheet, Ctrl+I mentions with Mark all read, local favorites, member list hidden under 1100 px and the channel column under 760 px, and a split-pane toggle (Ctrl+\\). Icons in `docs/design/icons/` are original 24 px `currentColor` strokes. A runtime pack can live in `~/.config/rencord/icon-pack/`. No Discord asset files are in the repo.
 
 Icons in `docs/design/icons/` are original 24 px strokes (hash, speaker, pin, inbox, search). They are not Discord's files. `discord_install_icon_dir()` only reports a local install path if one exists. It does not copy those assets into the repo.
 
