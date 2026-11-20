@@ -674,7 +674,9 @@ impl RencordWindow {
         let tile = if ink { 44. } else { 48. };
         let tile_radius = if ink { 8. } else { 12. };
         let side_w = if ink { 216. } else { 240. };
-        let member_w = if ink { 200. } else { 240. };
+        // Inter is a little wider than the mock's face, so the chat takes
+        // the extra from the member list and both body lines stay on one row.
+        let member_w = if ink { 176. } else { 240. };
         let shell_gap = if ink { 8. } else { 12. };
         let pill_ink = if ink {
             palette.accent
@@ -2998,12 +3000,12 @@ fn portrait(name: &str, size: f32) -> impl IntoElement {
         _ => include_bytes!("../assets/avatars/ada.png"),
     };
     let image = Image::from_bytes(ImageFormat::Png, bytes.to_vec());
-    div()
+    // The image paints its own corners. A parent radius does not clip it.
+    img(std::sync::Arc::new(image))
         .size(px(size))
-        .rounded(px(size / 2.))
-        .overflow_hidden()
         .flex_shrink_0()
-        .child(img(std::sync::Arc::new(image)).size(px(size)))
+        .rounded(px(size / 2.))
+        .object_fit(ObjectFit::Cover)
 }
 
 fn portrait_status(name: &str, size: f32, dot: u32, ring: u32) -> impl IntoElement {
