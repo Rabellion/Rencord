@@ -1,0 +1,22 @@
+[package]
+name = "rencord-gateway"
+version = "0.1.0"
+description = "Discord gateway session for Rencord"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rencord-model.workspace = true
+rencord-protocol.workspace = true
+flate2.workspace = true
+futures-util.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

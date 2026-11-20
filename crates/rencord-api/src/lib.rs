@@ -1,0 +1,267 @@
+//! Minimal Discord REST client for Milestone 1.
+//!
+//! User tokens are sent as the raw `Authorization` value. Routes that Milestone
+//! 1 calls: current user, guild list, private channels, guild channels, message
+//! history, and message create. A per-route bucket honors `Retry-After`.
+
+use rencord_model::{Channel, Guild, Message, Snowflake, Token, User};
+use rencord_protocol::{OutgoingMessage, WireChannel, WireMessage};
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+const USER_AGENT: &str = "Rencord (https://github.com/Rabellion/Rencord, 0.1.0)";
+
+#[derive(Debug, thiserror::Error)]
+pub enum ApiError {
+    #[error("http error: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("discord returned {status}: {body}")]
+    Status { status: u16, body: String },
+    #[error("rate limited on {route} for {retry_after:?}")]
+    RateLimited {
+        route: String,
+        retry_after: Duration,
+    },
+    #[error("response JSON did not match {what}: {source}")]
+    Decode {
+        what: &'static str,
+        source: serde_json::Error,
+    },
+}
+
+#[derive(Debug)]
+struct Bucket {
+    remaining: u32,
+    reset_at: Instant,
+}
+
+pub struct DiscordApi {
+    http: reqwest::Client,
+    base: String,
+    token: Token,
+    buckets: Mutex<HashMap<String, Bucket>>,
+}
+
+impl DiscordApi {
+    pub fn new(token: Token) -> Self {
+        Self::with_base(token, "https://discord.com/api/v10".to_owned())
+    }
+
+    pub fn with_base(token: Token, base: String) -> Self {
+        let http = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .build()
+            .expect("reqwest client builds with rustls");
+        Self {
+            http,
+            base,
+            token,
+            buckets: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub async fn current_user(&self) -> Result<User, ApiError> {
+        self.get_json("/users/@me", "user").await
+    }
+
+    pub async fn guilds(&self) -> Result<Vec<Guild>, ApiError> {
+        self.get_json("/users/@me/guilds", "guild list").await
+    }
+
+    pub async fn private_channels(&self) -> Result<Vec<Channel>, ApiError> {
+        let wires: Vec<WireChannel> = self
+            .get_json("/users/@me/channels", "private channels")
+            .await?;
+        Ok(wires.into_iter().map(WireChannel::into_channel).collect())
+    }
+
+    pub async fn guild_channels(&self, guild_id: Snowflake) -> Result<Vec<Channel>, ApiError> {
+        let path = format!("/guilds/{guild_id}/channels");
+        let wires: Vec<WireChannel> = self.get_json(&path, "guild channels").await?;
+        Ok(wires.into_iter().map(WireChannel::into_channel).collect())
+    }
+
+    pub async fn messages(
+        &self,
+        channel_id: Snowflake,
+        limit: u32,
+    ) -> Result<Vec<Message>, ApiError> {
+        let path = format!("/channels/{channel_id}/messages?limit={limit}");
+        let wires: Vec<WireMessage> = self.get_json(&path, "messages").await?;
+        Ok(wires.into_iter().map(Message::from).collect())
+    }
+
+    pub async fn send_message(
+        &self,
+        channel_id: Snowflake,
+        content: &str,
+    ) -> Result<Message, ApiError> {
+        let path = format!("/channels/{channel_id}/messages");
+        let body = OutgoingMessage {
+            content: content.to_owned(),
+        };
+        let response = self.send("POST", &path, Some(&body)).await?;
+        decode_message(response)
+    }
+
+    async fn get_json<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        what: &'static str,
+    ) -> Result<T, ApiError> {
+        let response = self.send("GET", path, None::<&()>).await?;
+        serde_json::from_slice(&response).map_err(|source| ApiError::Decode { what, source })
+    }
+
+    async fn send(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&(impl serde::Serialize + ?Sized)>,
+    ) -> Result<Vec<u8>, ApiError> {
+        let route = route_key(method, path);
+        self.wait_for_bucket(&route)?;
+        let url = format!("{}{path}", self.base.trim_end_matches('/'));
+        let mut request = self
+            .http
+            .request(method.parse().expect("method"), url)
+            .header("Authorization", self.token.expose())
+            .header("User-Agent", USER_AGENT);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        self.observe_limits(&route, &response);
+        if status.as_u16() == 429 {
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<f64>().ok())
+                .map(Duration::from_secs_f64)
+                .unwrap_or(Duration::from_secs(1));
+            return Err(ApiError::RateLimited { route, retry_after });
+        }
+        let bytes = response.bytes().await?.to_vec();
+        if !status.is_success() {
+            return Err(ApiError::Status {
+                status: status.as_u16(),
+                body: String::from_utf8_lossy(&bytes).into_owned(),
+            });
+        }
+        Ok(bytes)
+    }
+
+    fn wait_for_bucket(&self, route: &str) -> Result<(), ApiError> {
+        let buckets = self.buckets.lock().expect("bucket lock");
+        if let Some(bucket) = buckets.get(route) {
+            if bucket.remaining == 0 && Instant::now() < bucket.reset_at {
+                return Err(ApiError::RateLimited {
+                    route: route.to_owned(),
+                    retry_after: bucket.reset_at.saturating_duration_since(Instant::now()),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn observe_limits(&self, route: &str, response: &reqwest::Response) {
+        let headers = response.headers();
+        let remaining = headers
+            .get("x-ratelimit-remaining")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u32>().ok());
+        let reset_after = headers
+            .get("x-ratelimit-reset-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<f64>().ok())
+            .map(Duration::from_secs_f64);
+        if let (Some(remaining), Some(reset_after)) = (remaining, reset_after) {
+            let mut buckets = self.buckets.lock().expect("bucket lock");
+            buckets.insert(
+                route.to_owned(),
+                Bucket {
+                    remaining,
+                    reset_at: Instant::now() + reset_after,
+                },
+            );
+        }
+    }
+}
+
+fn route_key(method: &str, path: &str) -> String {
+    let path = path.split('?').next().unwrap_or(path);
+    format!("{method} {path}")
+}
+
+fn decode_message(bytes: Vec<u8>) -> Result<Message, ApiError> {
+    let wire: WireMessage = serde_json::from_slice(&bytes).map_err(|source| ApiError::Decode {
+        what: "message",
+        source,
+    })?;
+    Ok(Message::from(wire))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn serve_once(body: &'static str, status: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = socket.read(&mut buf).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nx-ratelimit-remaining: 1\r\nx-ratelimit-reset-after: 1\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn current_user_and_send_message() {
+        let base = serve_once(
+            r#"{"id":"42","username":"ada","global_name":"Ada Lovelace"}"#,
+            "200 OK",
+        )
+        .await;
+        let api = DiscordApi::with_base(Token::new("test-token"), base);
+        let user = api.current_user().await.unwrap();
+        assert_eq!(user.display_name(), "Ada Lovelace");
+        assert_eq!(user.id.get(), 42);
+    }
+
+    #[tokio::test]
+    async fn message_create_decodes() {
+        let base = serve_once(
+            r#"{"id":"7","channel_id":"3","content":"hello **world**","timestamp":"t","author":{"id":"1","username":"ada"}}"#,
+            "200 OK",
+        )
+        .await;
+        let api = Arc::new(DiscordApi::with_base(Token::new("test-token"), base));
+        let message = api
+            .send_message(Snowflake::new(3), "hello **world**")
+            .await
+            .unwrap();
+        assert_eq!(message.content, "hello **world**");
+        assert_eq!(message.channel_id.get(), 3);
+    }
+
+    #[test]
+    fn route_key_strips_query() {
+        assert_eq!(
+            route_key("GET", "/channels/1/messages?limit=50"),
+            "GET /channels/1/messages"
+        );
+    }
+}

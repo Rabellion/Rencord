@@ -1,0 +1,30 @@
+[package]
+name = "rencord-desktop"
+version = "0.1.0"
+description = "GPUI desktop shell for Rencord"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "rencord"
+path = "src/main.rs"
+
+[dependencies]
+async-channel.workspace = true
+gpui-kit.workspace = true
+rencord-api.workspace = true
+rencord-gateway.workspace = true
+rencord-markdown.workspace = true
+rencord-media.workspace = true
+rencord-model.workspace = true
+rencord-platform.workspace = true
+rencord-store.workspace = true
+rencord-voice = { workspace = true, features = ["cpal"] }
+tokio.workspace = true
+tracing.workspace = true
