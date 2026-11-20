@@ -696,7 +696,12 @@ impl Shell {
             self.prefs.font_px
         ));
         lines.push(token_summary());
-        lines.push(format!("icon-pack {}", discord_install_icon_dir().map(|path| path.display().to_string()).unwrap_or_else(|| icon_pack_dir().display().to_string())));
+        lines.push(format!(
+            "icon-pack {}",
+            discord_install_icon_dir()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| icon_pack_dir().display().to_string())
+        ));
         lines.join("\n")
     }
 }
