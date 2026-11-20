@@ -7,7 +7,9 @@
 
 mod bench;
 mod capture;
+mod capture_os;
 mod encode;
+mod encoder;
 mod frame;
 mod golive;
 mod hdr;
@@ -16,6 +18,7 @@ mod hw;
 mod ipc;
 mod loopback;
 mod platform;
+mod portal;
 mod preset;
 mod rtp;
 mod shm;
@@ -34,6 +37,9 @@ pub use encode::{
     active_encoder, annex_b, decode_software, encode_software, probe_encoders, AccessUnit,
     EncoderKind,
 };
+pub use encoder::{
+    EncodeError, EncodeFrame, EncodedBitstream, HardwareEncoder, OpenH264Encoder, VideoEncoder,
+};
 pub use frame::{encode_png, Frame, HdrFlags};
 pub use golive::{GoLive, StreamPhase, StreamStats};
 pub use hdr::{
@@ -49,6 +55,7 @@ pub use loopback::loopback_frame;
 pub use platform::{
     capture_backends, connect_session_bus, probe_linux_portal, BackendSpec, LinuxPortalProbe,
 };
+pub use portal::{pipewire_linked, request_screencast_blocking};
 pub use preset::{
     clamp_bitrate, fps_available, nitro_gate_in_ui, safe_preset, select_pixel_path, stream_presets,
     PixelPath, StreamPreset, ViewerKind,
