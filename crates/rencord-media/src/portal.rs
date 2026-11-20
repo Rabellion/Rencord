@@ -9,7 +9,7 @@ use ashpd::desktop::PersistMode;
 
 pub fn pipewire_linked() -> bool {
     // Constructing a main loop loads libpipewire. Drop it immediately.
-    pipewire::main_loop::MainLoop::new(None).is_ok()
+    pipewire::main_loop::MainLoopBox::new(None).is_ok()
 }
 
 pub async fn request_screencast() -> Result<String, String> {
@@ -71,9 +71,9 @@ pub fn pull_remote(
     use std::sync::Arc;
 
     pipewire::init();
-    let mainloop = pipewire::main_loop::MainLoop::new(None)
+    let mainloop = pipewire::main_loop::MainLoopBox::new(None)
         .map_err(|err| format!("PipeWire main loop failed: {err}"))?;
-    let context = pipewire::context::Context::new(&mainloop)
+    let context = pipewire::context::ContextBox::new(mainloop.loop_(), None)
         .map_err(|err| format!("PipeWire context failed: {err}"))?;
     let core = match fd {
         Some(fd) => context.connect_fd(fd, None),
@@ -83,7 +83,7 @@ pub fn pull_remote(
 
     let video_bytes = Arc::new(AtomicUsize::new(0));
     let audio_samples = Arc::new(AtomicU32::new(0));
-    let video = pipewire::stream::Stream::new(
+    let video = pipewire::stream::StreamBox::new(
         &core,
         "rencord-screen",
         properties! {
@@ -128,7 +128,7 @@ pub fn pull_remote(
     if capture_sink {
         audio_props.insert(*pipewire::keys::STREAM_CAPTURE_SINK, "true");
     }
-    let audio = pipewire::stream::Stream::new(&core, "rencord-audio", audio_props)
+    let audio = pipewire::stream::StreamBox::new(&core, "rencord-audio", audio_props)
         .map_err(|err| err.to_string())?;
     let samples = Arc::clone(&audio_samples);
     let _audio_listener = audio
@@ -169,9 +169,9 @@ pub fn pull_remote(
         .map_err(|err| format!("PipeWire monitor audio failed: {err}"))?;
 
     for _ in 0..4 {
-        let _ = mainloop
-            .loop_()
-            .iterate(std::time::Duration::from_millis(20));
+        let _ = mainloop.loop_().iterate(pipewire::loop_::Timeout::Finite(
+            std::time::Duration::from_millis(20),
+        ));
     }
     let video_len = video_bytes.load(Ordering::Relaxed);
     let audio_len = audio_samples.load(Ordering::Relaxed);

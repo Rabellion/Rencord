@@ -16,7 +16,7 @@ path = "src/bin/rencord-stream.rs"
 ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
 memmap2 = "0.9"
 openh264 = "0.8"
-pipewire = "0.8"
+pipewire = "0.10"
 rencord-hdr.workspace = true
 rencord-model.workspace = true
 rencord-protocol.workspace = true
