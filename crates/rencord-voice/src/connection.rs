@@ -5,7 +5,7 @@
 //! address. Tests point it at a local stub. A real Discord voice server was
 //! not used.
 
-use crate::dave::{DaveEngine, ScriptedDave};
+use crate::dave::{DaveEngine, DaveOps, ScriptedDave};
 use crate::discovery::{
     bind_for, discover, server_addr, DiscoveryError, DiscoverySchedule, MediaRole, PathWatch,
 };
@@ -31,6 +31,12 @@ type VoiceSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 struct FailedOpen {
     error: VoiceLinkError,
     dave: DaveEngine,
+}
+
+enum Wake {
+    Tick,
+    Socket(Option<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>),
+    Udp(Result<Vec<u8>, std::io::Error>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -73,7 +79,14 @@ pub struct CallAudio {
 
 impl CallAudio {
     pub fn new(ssrc: u32, key: &[u8]) -> Result<Self, PipelineError> {
-        let mut pipeline = VoicePipeline::new(ssrc)?;
+        Self::from_pipeline(VoicePipeline::new(ssrc)?, key)
+    }
+
+    pub fn new_stereo(ssrc: u32, key: &[u8]) -> Result<Self, PipelineError> {
+        Self::from_pipeline(VoicePipeline::new_stereo(ssrc)?, key)
+    }
+
+    fn from_pipeline(mut pipeline: VoicePipeline, key: &[u8]) -> Result<Self, PipelineError> {
         pipeline.install_key(key)?;
         Ok(Self {
             pipeline,
@@ -116,6 +129,7 @@ pub struct LiveCall {
     pub rx_packets: u64,
     pub role: MediaRole,
     pub probes: u32,
+    speaking: bool,
     target: VoiceTarget,
     write: futures_util::stream::SplitSink<VoiceSocket, WsMessage>,
     read: futures_util::stream::SplitStream<VoiceSocket>,
@@ -203,14 +217,14 @@ impl LiveCall {
         target: &VoiceTarget,
         dave: DaveEngine,
         schedule: DiscoverySchedule,
-    ) -> Result<Self, FailedOpen> {
+    ) -> Result<Self, Box<FailedOpen>> {
         let opened = match connect_async(&target.ws_url).await {
             Ok(opened) => opened,
             Err(err) => {
-                return Err(FailedOpen {
+                return Err(Box::new(FailedOpen {
                     error: err.into(),
                     dave,
-                })
+                }))
             }
         };
         let (socket, _) = opened;
@@ -218,19 +232,19 @@ impl LiveCall {
         let udp = match UdpSocket::bind("127.0.0.1:0").await {
             Ok(udp) => udp,
             Err(err) => {
-                return Err(FailedOpen {
+                return Err(Box::new(FailedOpen {
                     error: err.into(),
                     dave,
-                })
+                }))
             }
         };
         let audio = match CallAudio::new(1, &[7; 32]) {
             Ok(audio) => audio,
             Err(err) => {
-                return Err(FailedOpen {
+                return Err(Box::new(FailedOpen {
                     error: err.into(),
                     dave,
-                })
+                }))
             }
         };
         let mut call = Self {
@@ -243,6 +257,7 @@ impl LiveCall {
             rx_packets: 0,
             role,
             probes: 0,
+            speaking: false,
             session: VoiceSession::new(
                 target.server_id.clone(),
                 target.user_id.clone(),
@@ -264,10 +279,10 @@ impl LiveCall {
             awaiting_ack: false,
         };
         if let Err(error) = call.finish_handshake().await {
-            return Err(FailedOpen {
+            return Err(Box::new(FailedOpen {
                 error,
                 dave: call.take_dave(),
-            });
+            }));
         }
         Ok(call)
     }
@@ -297,11 +312,46 @@ impl LiveCall {
         &mut self.audio
     }
 
-    pub async fn send_microphone(&mut self, pcm: &[i16]) -> Result<(), VoiceLinkError> {
-        let Some(packet) = self.audio.on_microphone(pcm)? else {
-            return Ok(());
-        };
+    pub fn dave_ready(&self) -> bool {
+        self.session.dave.can_encrypt()
+    }
+
+    /// Opus-encode, DAVE-encrypt when the epoch is ready, seal, and send.
+    /// Returns whether a packet went out. Five silence frames follow a stop.
+    pub async fn send_microphone(&mut self, pcm: &[i16]) -> Result<bool, VoiceLinkError> {
+        if self.muted || pcm.is_empty() {
+            return Ok(false);
+        }
+        if !self.speaking {
+            if let Some(message) = self.session.speaking_message(true) {
+                self.send_json(message).await?;
+            }
+            self.speaking = true;
+        }
+        let packet = self
+            .audio
+            .pipeline
+            .send_frame(pcm, Some(&mut self.session.dave))?;
         self.udp.send(&packet).await?;
+        Ok(true)
+    }
+
+    /// Discord asks for five silence frames before speaking stops.
+    pub async fn stop_speaking(&mut self) -> Result<(), VoiceLinkError> {
+        if !self.speaking {
+            return Ok(());
+        }
+        for _ in 0..5 {
+            let packet = self
+                .audio
+                .pipeline
+                .send_opus(crate::opus::SILENCE_OPUS, Some(&mut self.session.dave))?;
+            self.udp.send(&packet).await?;
+        }
+        if let Some(message) = self.session.speaking_message(false) {
+            self.send_json(message).await?;
+        }
+        self.speaking = false;
         Ok(())
     }
 
@@ -324,10 +374,18 @@ impl LiveCall {
                 return Ok(vec![0; FRAME_SAMPLES]);
             }
             self.rx_packets = self.rx_packets.wrapping_add(1);
-            return self
-                .audio
-                .on_rtp(&buf[..read], self.rx_packets.saturating_mul(20), self.ssrc)
-                .map_err(VoiceLinkError::from);
+            let arrival = self.rx_packets.saturating_mul(20);
+            let ssrc = self.ssrc;
+            self.audio.pipeline.recv_packet(
+                &buf[..read],
+                arrival,
+                u64::from(ssrc),
+                Some(&mut self.session.dave),
+                false,
+            )?;
+            let mut pcm = self.audio.pipeline.pull_pcm()?;
+            self.audio.mixer.apply(ssrc, &mut pcm);
+            return Ok(pcm);
         }
     }
 
@@ -451,7 +509,7 @@ impl LiveCall {
             .secret_key
             .clone()
             .ok_or_else(|| VoiceLinkError::Protocol("missing secret key".into()))?;
-        self.audio = CallAudio::new(self.ssrc, &key)?;
+        self.audio = CallAudio::new_stereo(self.ssrc, &key)?;
         self.audio.muted = self.muted;
         self.audio.mixer.set_deaf(self.deafened);
         if let Some(speaking) = self.session.speaking_message(!self.muted) {
@@ -481,6 +539,88 @@ impl LiveCall {
         };
         self.dispatch_frame(frame).await?;
         Ok(())
+    }
+
+    /// One step of the call: a control frame, a heartbeat, a UDP packet, or a
+    /// 20 ms tick so microphone packets are not stuck behind a quiet socket.
+    pub async fn drive_once(&mut self) -> Result<Option<Vec<i16>>, VoiceLinkError> {
+        let wake = {
+            let beat_at = self.next_beat;
+            let tick = Instant::now() + Duration::from_millis(20);
+            let read = &mut self.read;
+            let udp = &self.udp;
+            let mut buf = vec![0u8; 2048];
+            tokio::select! {
+                biased;
+                message = read.next() => Wake::Socket(message),
+                read = udp.recv(&mut buf) => Wake::Udp(read.map(|n| buf[..n].to_vec())),
+                _ = tokio::time::sleep_until(beat_at.min(tick)) => Wake::Tick,
+            }
+        };
+        match wake {
+            Wake::Tick => {
+                if Instant::now() >= self.next_beat {
+                    self.beat().await?;
+                }
+                self.maintain().await?;
+                Ok(None)
+            }
+            Wake::Socket(message) => {
+                if let Some(frame) = self.frame_from(message)? {
+                    self.dispatch_frame(frame).await?;
+                }
+                Ok(None)
+            }
+            Wake::Udp(Ok(buf)) => {
+                self.path.inbound();
+                if buf.len() < 12 || self.deafened {
+                    return Ok(None);
+                }
+                self.rx_packets = self.rx_packets.wrapping_add(1);
+                let arrival = self.rx_packets.saturating_mul(20);
+                let ssrc = self.ssrc;
+                self.audio.pipeline.recv_packet(
+                    &buf,
+                    arrival,
+                    u64::from(ssrc),
+                    Some(&mut self.session.dave),
+                    false,
+                )?;
+                let mut pcm = self.audio.pipeline.pull_pcm()?;
+                self.audio.mixer.apply(ssrc, &mut pcm);
+                Ok(Some(pcm))
+            }
+            Wake::Udp(Err(err)) => Err(err.into()),
+        }
+    }
+
+    fn frame_from(
+        &mut self,
+        message: Option<Result<WsMessage, tokio_tungstenite::tungstenite::Error>>,
+    ) -> Result<Option<VoiceFrame>, VoiceLinkError> {
+        let message =
+            message.ok_or_else(|| VoiceLinkError::Socket("voice websocket closed".into()))??;
+        let parsed = match message {
+            WsMessage::Text(text) => VoiceFrame::parse(text.as_bytes()),
+            WsMessage::Binary(bytes) => VoiceFrame::parse_binary(&bytes),
+            WsMessage::Close(_) => {
+                return Err(VoiceLinkError::Socket("voice websocket closed".into()))
+            }
+            _ => return Ok(None),
+        };
+        match parsed {
+            Ok(frame) => {
+                if frame.seq.is_some() {
+                    self.last_seq = frame.seq;
+                }
+                if frame.op == VoiceOpcode::HeartbeatAck {
+                    self.awaiting_ack = false;
+                }
+                Ok(Some(frame))
+            }
+            Err(FrameError::Opcode) => Ok(None),
+            Err(err) => Err(VoiceLinkError::Protocol(err.to_string())),
+        }
     }
 
     async fn dispatch_frame(&mut self, frame: VoiceFrame) -> Result<(), VoiceLinkError> {

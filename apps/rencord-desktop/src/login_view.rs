@@ -787,7 +787,7 @@ impl RencordWindow {
                         .as_ref()
                         .is_some_and(|live| Arc::ptr_eq(live, &api));
                     if current {
-                        view.shell.session.apply_gateway(event);
+                        view.on_gateway_event(event, cx);
                         cx.notify();
                     }
                     current

@@ -240,6 +240,102 @@ pub fn open_default_call_audio() -> Result<AudioSession, String> {
     open_call_audio(None, None)
 }
 
+/// Microphone frames for a live call. Mono devices emit 960 samples. Stereo
+/// devices emit 1920 interleaved samples, which is one 20 ms frame.
+#[cfg(feature = "cpal")]
+pub fn open_pcm_devices(
+    input_name: Option<&str>,
+    output_name: Option<&str>,
+    pcm_out: std::sync::mpsc::Sender<Vec<i16>>,
+    speaker: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<i16>>>,
+) -> Result<AudioSession, String> {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+    let host = cpal::default_host();
+    let input_choice = choose_device(
+        input_name,
+        &list_input_devices(),
+        host.default_input_device()
+            .and_then(|device| device.name().ok())
+            .as_deref(),
+    );
+    let output_choice = choose_device(
+        output_name,
+        &list_output_devices(),
+        host.default_output_device()
+            .and_then(|device| device.name().ok())
+            .as_deref(),
+    );
+    let input = host
+        .input_devices()
+        .map_err(|err| err.to_string())?
+        .find(|device| device.name().ok().as_deref() == Some(input_choice.name.as_str()))
+        .or_else(|| host.default_input_device())
+        .ok_or_else(|| "no input device".to_owned())?;
+    let output = host
+        .output_devices()
+        .map_err(|err| err.to_string())?
+        .find(|device| device.name().ok().as_deref() == Some(output_choice.name.as_str()))
+        .or_else(|| host.default_output_device())
+        .ok_or_else(|| "no output device".to_owned())?;
+    let opened_input = input.name().unwrap_or_else(|_| input_choice.name.clone());
+    let opened_output = output.name().unwrap_or_else(|_| output_choice.name.clone());
+    let input_config = input
+        .default_input_config()
+        .map_err(|err| err.to_string())?;
+    let output_config = output
+        .default_output_config()
+        .map_err(|err| err.to_string())?;
+    let channels = input_config.channels() as usize;
+    let frame = if channels >= 2 {
+        crate::opus::FRAME_SAMPLES * 2
+    } else {
+        crate::opus::FRAME_SAMPLES
+    };
+    let pending = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i16>::new()));
+    let capture = pending.clone();
+    let input_stream = input
+        .build_input_stream(
+            &input_config.config(),
+            move |data: &[f32], _| {
+                let mut pending = capture.lock().unwrap_or_else(|err| err.into_inner());
+                for sample in data {
+                    pending.push((sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16);
+                }
+                while pending.len() >= frame {
+                    let frame_pcm = pending.drain(..frame).collect::<Vec<_>>();
+                    let _ = pcm_out.send(frame_pcm);
+                }
+            },
+            tracing_error,
+            None,
+        )
+        .map_err(|err| err.to_string())?;
+    let output_stream = output
+        .build_output_stream(
+            &output_config.config(),
+            move |data: &mut [f32], _| {
+                let mut queue = speaker.lock().unwrap_or_else(|err| err.into_inner());
+                for sample in data.iter_mut() {
+                    let next = queue.pop_front().unwrap_or(0);
+                    *sample = f32::from(next) / f32::from(i16::MAX);
+                }
+            },
+            tracing_error,
+            None,
+        )
+        .map_err(|err| err.to_string())?;
+    input_stream.play().map_err(|err| err.to_string())?;
+    output_stream.play().map_err(|err| err.to_string())?;
+    Ok(AudioSession {
+        _input: input_stream,
+        _output: output_stream,
+        input_name: opened_input,
+        output_name: opened_output,
+        input_fallback: input_choice.fell_back,
+        output_fallback: output_choice.fell_back,
+    })
+}
+
 #[cfg(not(feature = "cpal"))]
 pub struct AudioSession {
     pub input_name: String,
