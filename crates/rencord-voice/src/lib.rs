@@ -7,18 +7,24 @@
 //! adaptive buffer keeps more audio under loss. It is not a copy of another
 //! client's source.
 
+pub mod connection;
 pub mod crypto;
 pub mod dave;
 pub mod devices;
 pub mod fixed;
 pub mod jitter;
+pub mod mixer;
 pub mod opus;
 pub mod pipeline;
 pub mod session;
 
+pub use connection::{CallAudio, LiveCall, VoiceLinkError, VoiceTarget};
 pub use crypto::{TransportCipher, TRANSPORT_MODE};
 pub use dave::{DaveEngine, LiveDave, ScriptedDave};
-pub use devices::{backend_name, default_devices};
+pub use devices::{
+    backend_name, default_devices, list_input_devices, list_output_devices,
+    open_default_call_audio, AudioSession,
+};
 pub use jitter::{AdaptiveBuffer, AdaptiveConfig, JitterStats, Playout};
 pub use pipeline::{loopback_call, LoopbackReport};
 pub use session::{VoicePhase, VoiceSession};

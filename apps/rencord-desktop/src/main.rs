@@ -32,6 +32,7 @@ struct RencordWindow {
     shell: Shell,
     token_input: Entity<InputState>,
     composer: Entity<InputState>,
+    audio_session: Option<rencord_voice::AudioSession>,
 }
 
 impl RencordWindow {
@@ -45,6 +46,7 @@ impl RencordWindow {
             shell,
             token_input,
             composer,
+            audio_session: None,
         }
     }
 
@@ -366,12 +368,48 @@ impl RencordWindow {
             }))
             .child({
                 let this = this.clone();
+                Button::new("mute").label("Mute").on_click(move |_, _, cx| {
+                    this.update(cx, |view, cx| {
+                        view.shell.toggle_mute();
+                        cx.notify();
+                    });
+                })
+            })
+            .child({
+                let this = this.clone();
+                Button::new("deafen").label("Deafen").on_click(move |_, _, cx| {
+                    this.update(cx, |view, cx| {
+                        view.shell.toggle_deaf();
+                        cx.notify();
+                    });
+                })
+            })
+            .child({
+                let this = this.clone();
+                Button::new("quieter").label("Volume -").on_click(move |_, _, cx| {
+                    this.update(cx, |view, cx| {
+                        view.shell
+                            .set_speaker_gain(view.shell.speaker_gain - 0.1);
+                        cx.notify();
+                    });
+                })
+            })
+            .child({
+                let this = this.clone();
                 Button::new("join-voice").label("Join voice").on_click(move |_, _, cx| {
                     this.update(cx, |view, cx| {
                         view.shell.join_voice_demo();
-                        view.shell.note(
-                            "Milestone 1 join uses the in-memory loopback (adaptive jitter, Opus, transport cipher). A live UDP join still needs the voice server payload from the gateway.",
-                        );
+                        match rencord_voice::open_default_call_audio() {
+                            Ok(session) => {
+                                view.audio_session = Some(session);
+                                view.shell.note(
+                                    "cpal default devices are open and routed through the jitter buffer.",
+                                );
+                            }
+                            Err(err) => view.shell.note(format!(
+                                "cpal devices were not opened ({err}). Loopback stats still ran."
+                            )),
+                        }
                         cx.notify();
                     });
                 })

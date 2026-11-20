@@ -104,6 +104,9 @@ impl Session {
             GatewayEvent::Reconnect => {
                 self.status_line = "Gateway asked to reconnect".to_owned();
             }
+            GatewayEvent::Resumed => {
+                self.status_line = "Gateway resumed".to_owned();
+            }
             GatewayEvent::Other { name } => {
                 self.status_line = format!("Event {name}");
             }

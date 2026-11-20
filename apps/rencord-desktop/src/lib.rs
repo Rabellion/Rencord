@@ -11,6 +11,9 @@ pub struct Shell {
     pub session: Session,
     pub demo: bool,
     pub voice_report: Option<LoopbackReport>,
+    pub muted: bool,
+    pub deafened: bool,
+    pub speaker_gain: f32,
     pub audio_backend: &'static str,
     pub log: Vec<String>,
 }
@@ -21,6 +24,9 @@ impl Shell {
             session: Session::demo(),
             demo: true,
             voice_report: None,
+            muted: false,
+            deafened: false,
+            speaker_gain: 1.0,
             audio_backend: backend_name(),
             log: vec!["Demo data is local. Nothing is sent to Discord.".into()],
         }
@@ -31,6 +37,9 @@ impl Shell {
             session: Session::default(),
             demo: false,
             voice_report: None,
+            muted: false,
+            deafened: false,
+            speaker_gain: 1.0,
             audio_backend: backend_name(),
             log: vec![
                 "Paste a user token. Official webview and QR login are not in this build.".into(),
@@ -121,6 +130,27 @@ impl Shell {
         self.session.status_line = "Left voice".into();
     }
 
+    pub fn toggle_mute(&mut self) {
+        self.muted = !self.muted;
+        self.note(if self.muted { "Muted" } else { "Unmuted" });
+    }
+
+    pub fn toggle_deaf(&mut self) {
+        self.deafened = !self.deafened;
+        if self.deafened {
+            self.muted = true;
+        }
+        self.note(if self.deafened {
+            "Deafened"
+        } else {
+            "Undeafened"
+        });
+    }
+
+    pub fn set_speaker_gain(&mut self, gain: f32) {
+        self.speaker_gain = gain.clamp(0.0, 2.0);
+    }
+
     /// Text snapshot of the shell, used by tests in place of a screenshot.
     pub fn outline(&self) -> String {
         let mut lines = Vec::new();
@@ -164,6 +194,10 @@ impl Shell {
                 report.played, report.hard_gaps, report.target_ms
             ));
         }
+        lines.push(format!(
+            "mute={} deaf={} gain={:.2}",
+            self.muted, self.deafened, self.speaker_gain
+        ));
         lines.join("\n")
     }
 }
@@ -193,5 +227,12 @@ mod tests {
         assert!(report.played > 70, "{report:?}");
         assert!(report.hard_gaps < 25, "{report:?}");
         assert!(shell.outline().contains("voice played="));
+        shell.toggle_mute();
+        shell.set_speaker_gain(0.5);
+        shell.toggle_deaf();
+        let outline = shell.outline();
+        assert!(outline.contains("mute=true"));
+        assert!(outline.contains("deaf=true"));
+        assert!(outline.contains("gain=0.50"));
     }
 }

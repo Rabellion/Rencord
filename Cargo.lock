@@ -6452,6 +6452,7 @@ dependencies = [
  "chacha20poly1305",
  "cpal",
  "davey",
+ "futures-util",
  "openmls",
  "openmls_basic_credential",
  "openmls_rust_crypto",
@@ -6460,6 +6461,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

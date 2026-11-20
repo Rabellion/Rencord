@@ -19,6 +19,9 @@ davey.workspace = true
 rencord-model.workspace = true
 rencord-protocol.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
 thiserror.workspace = true
 cpal = { version = "0.15", optional = true }
 
@@ -26,4 +29,5 @@ cpal = { version = "0.15", optional = true }
 openmls = "0.8"
 openmls_basic_credential = "0.5"
 openmls_rust_crypto = "0.5"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+futures-util.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net"] }

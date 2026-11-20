@@ -66,8 +66,8 @@ Honest status for this repository. "Implemented" means the code path and tests e
 | Message history | Implemented | Bounded to 200 messages per channel in memory, with a SQLite copy. |
 | Markdown | Implemented | Headings, quotes, fenced code, bold, italic, inline code, links, mentions, spoilers. Rendered as GPUI text. |
 | Sending messages | Implemented locally; REST client tested against a mock | `POST /channels/{id}/messages` exists. The demo composer appends locally. A live send was not verified. |
-| Gateway live updates | Implemented against a local socket | Identify, heartbeat, `READY`, `MESSAGE_CREATE`. Resume is not finished. |
-| Voice join, audio in and out | Partial | Session state machine, RTP, `aead_xchacha20_poly1305_rtpsize`, Opus, cpal device names, and an in-memory loopback. The desktop **Join voice** button runs that loopback. A live UDP session against Discord was not opened. |
+| Gateway live updates | Implemented against a local socket | Identify, heartbeat, `READY`, `MESSAGE_CREATE`, and resume after the socket drops. Not verified against Discord's gateway. |
+| Voice join, audio in and out | Partial | Local voice websocket + UDP stub covers IP discovery, select protocol, `aead_xchacha20_poly1305_rtpsize`, speaking, a DAVE prepare/ready exchange, resume, mute, deafen, and per-SSRC gain through the jitter buffer. cpal can open the default devices when they exist. The **Join voice** button still runs the in-memory loopback and then tries to open cpal. A live Discord voice server was not used. |
 | DAVE (E2EE) | Implemented | `davey` 0.2. Two-member MLS encrypt/decrypt test. Opcode routing keeps the transport up when a welcome fails. |
 | Adaptive jitter buffer | Implemented | See [Voice](#voice). |
 | Screen share / camera / Go Live | Not implemented | Presets and the worker command enum only. |

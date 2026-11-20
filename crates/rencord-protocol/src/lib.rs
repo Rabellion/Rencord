@@ -382,6 +382,18 @@ pub fn voice_speaking(ssrc: u32, speaking: bool) -> Value {
     })
 }
 
+pub fn voice_resume(server_id: &str, session_id: &str, token: &str, seq_ack: u64) -> Value {
+    json!({
+        "op": VoiceOpcode::Resume as u8,
+        "d": {
+            "server_id": server_id,
+            "session_id": session_id,
+            "token": token,
+            "seq_ack": seq_ack,
+        }
+    })
+}
+
 /// Preferred transport mode. DAVE sits on top of this AEAD mode.
 pub const TRANSPORT_MODE: &str = "aead_xchacha20_poly1305_rtpsize";
 
