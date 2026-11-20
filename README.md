@@ -44,7 +44,7 @@ Several native Rust clients already exist. Rencord is aimed at the gaps that sho
 | | What you get today | What is still ahead |
 | --- | --- | --- |
 | **Voice cut-outs** | Adaptive jitter target from 40&nbsp;ms to 120&nbsp;ms, Opus PLC and in-band FEC, and a one-frame time-stretch instead of a hard skip. A loss simulation beats a fixed 40&nbsp;ms / 8-slot window at 1.5% and 5% loss. | Not measured on a live Discord call. Acoustic echo cancellation and noise suppression are not included. |
-| **Interface** | GPUI Kit 0.10. Direction A is the window: rail, channels, grouped messages, member list, and a flush user panel. Onyx, Dark, Ash, and Light all pass WCAG AA. Ctrl/Cmd+K, density, and type size are in settings. No Nitro surface. | Not a screen-reader pass. Plugins are still out. Layouts B and C remain behind `--layout`. |
+| **Interface** | GPUI Kit 0.10. Direction A layout with the Crisp Minimal look: 12 px gaps, rounded panels, Figtree, photo avatars, and a flush user panel. Onyx is the same look on a black canvas. Light is included. Ctrl/Cmd+K, density, and type size are in settings. No Nitro surface. | Not a screen-reader pass. Plugins are still out. Layouts B and C remain behind `--layout`. |
 | **Streaming** | Quality presets up to 2160p120 are defined and are not hidden behind a Nitro check. The UI must not promise that Discord will accept them. | No capture, no encoder, no Go Live socket. An out-of-process worker is a typed protocol only. |
 | **HDR** | Policy code tone-maps HDR to SDR unless both peers are Rencord and an SFU passthrough test has succeeded. That test has not been run. | No HDR capture. |
 
@@ -52,19 +52,17 @@ Serein, Concord, and Yapfast are further along as daily drivers. Milestone 1 is 
 
 ## Screenshots
 
-Captured from `rencord --demo --layout a` on Linux (X11, software GL). Direction A is the default. The server rail is 72 px wide with 48 px tiles, centered initials, and a selection pill. Channel rows are 32 px in the cozy density. Code blocks use JetBrains Mono on a darker inset. Dark is the default theme. Ash is `--theme ash`. Onyx is `--theme amoled`. Light is `--theme light`. `--voice` opens the loopback call. `--density compact` tightens the channel rows. **Join voice** (click the voice channel, or pass `--voice`) runs the in-memory loopback and then tries to open the default cpal devices. It does not open a Discord UDP session.
+Captured from `rencord --demo --layout a` on Linux (X11, software GL). The default look is Crisp Minimal: a `#16181D` canvas, 12 px gaps, 12 px rounded panels, Figtree, and photo avatars. Onyx (`--theme amoled`) uses the same panels on a `#000000` canvas. `--voice` opens the loopback call. `--density compact` tightens the channel rows. **Join voice** runs the in-memory loopback and then tries to open the default cpal devices. It does not open a Discord UDP session.
 
-| Dark | Ash |
+| Crisp | Voice |
 | :---: | :---: |
-| <img src="docs/design/directions/a-dark.png" alt="Rencord Direction A in Dark: round server rail, channel list, grouped messages, member list, user panel" width="480" /> | <img src="docs/design/directions/a-ash.png" alt="Rencord Direction A in Ash, with the #383A40 composer" width="480" /> |
+| <img src="docs/design/style-c/main.png" alt="Rencord in Crisp Minimal: gapped rounded panels, photo avatars, new-messages banner, code block, and a photo attachment" width="480" /> | <img src="docs/design/style-c/voice.png" alt="Crisp Minimal with the Voice Connected panel above the user dock" width="480" /> |
 
-| Onyx | Light |
+| Compact | Onyx |
 | :---: | :---: |
-| <img src="docs/design/directions/a-amoled.png" alt="Rencord Direction A in Onyx, true black rail and near-black chat" width="480" /> | <img src="docs/design/directions/a-light.png" alt="Rencord Direction A in Light" width="480" /> |
+| <img src="docs/design/style-c/compact.png" alt="Crisp Minimal at compact density" width="480" /> | <img src="docs/design/style-c/amoled.png" alt="Crisp Minimal on a true-black canvas" width="480" /> |
 
-| Voice connected | Compact |
-| :---: | :---: |
-| <img src="docs/design/directions/a-voice.png" alt="Voice Connected strip above the user panel, with mute, deafen, settings, and disconnect" width="480" /> | <img src="docs/design/directions/a-compact.png" alt="Direction A at compact density" width="480" /> |
+Hover actions: [docs/design/style-c/hover.png](docs/design/style-c/hover.png).
 
 ## Feature status
 

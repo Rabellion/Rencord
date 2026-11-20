@@ -14,36 +14,32 @@ The window should feel quieter than Discord and cheaper to run. This document is
 
 ### Color
 
-Tokens are sRGB. AMOLED uses true black (`#000000`) for the window and the conversation so an OLED panel can turn those pixels off. Dark is the default and keeps a lifted gray so panels separate on an LCD. Light inverts the text and surfaces. Accent is a single blue used for the selected server, links, mentions, and avatars. Danger red is reserved for destructive states and is not used as decoration.
+The default theme is Crisp Minimal. The window canvas is `#16181D`. Rail, channel list, chat, and members are `#1C1F26` panels separated by a 12 px gap. Inputs are `#23272F`. Onyx keeps that structure on a `#000000` canvas with `#0C0E12` panels. Light uses `#E6E9F0` behind `#F7F8FB` panels. Accent is blurple `#5865F2`, used for the new-messages banner, mentions, and links. Body text is `#EDF0F8`. Meta text is `#8592AD`.
 
-| Token | AMOLED | Dark | Light |
+| Token | Crisp | Onyx | Light |
 | --- | --- | --- | --- |
-| App / chat | `#000000` | `#111214` / `#1A1B1E` | `#F2F3F5` / `#FFFFFF` |
-| Rail | `#000000` | `#0C0D0F` | `#E3E5E8` |
-| Sidebar | `#050505` | `#17181B` | `#FFFFFF` |
-| Elevated | `#101010` | `#232428` | `#FFFFFF` |
-| Hover | `#161616` | `#2B2D31` | `#EAEBEE` |
-| Selected | `#1C1C1C` | `#35373C` | `#E0E1E6` |
-| Text | `#F2F3F5` | `#F2F3F5` | `#1E1F22` |
-| Muted | `#A0A2A8` | `#B5BAC1` | `#4E5058` |
-| Accent | `#5B8CFF` | `#5865F2` | `#5865F2` |
-| Line | `#1A1A1A` | `#2E3035` | `#E1E2E4` |
+| Canvas | `#16181D` | `#000000` | `#E6E9F0` |
+| Panels | `#1C1F26` | `#0C0E12` | `#F7F8FB` |
+| Input | `#23272F` | `#14171C` | `#FFFFFF` |
+| Text | `#EDF0F8` | `#EDF0F8` | `#1A1D26` |
+| Muted | `#8592AD` | `#8592AD` | `#4E5870` |
+| Accent | `#5865F2` | `#5865F2` | `#5865F2` |
 
 ### Type
 
-The UI font is the platform UI font. Sizes at the middle step are 11, 13, 15, 18, and 24 px. The settings control picks 13, 15, or 17 px for the window. Bold marks strong markdown. Italic is drawn in the muted color because a true italic face is not bundled. Code and links use the accent color.
+The UI face is Figtree, bundled under the SIL Open Font License. Message body is 16 px. Names are 16 px semibold in a muted role tint. Timestamps, topics, and activity are 12 px muted. Code is JetBrains Mono at 13–14 px. The settings control still steps the window size through 13, 15, and 17 px.
 
 ### Space, radius, motion
 
-Spacing steps are 4, 8, 12, 16, 24, and 32 px. Radii are 0, 6 (rows and fields), 12 (panels and the voice card), and a pill for round avatars. Hover feedback is 80 ms. Overlays fade in over 140 ms with the default ease-out curve. Layout moves, when they animate, use 180 ms. `reduce motion` in GPUI skips the overlay fade.
+Spacing steps are 4, 8, 12, 16, 24, and 32 px. Controls use a 6 px radius. Panels, the composer, code, embeds, and media use 12 px. Avatars and the date pill are fully round. Columns do not use drop shadows. A 1 px hairline separates a panel from the canvas. Hover feedback is 80 ms. Overlays fade in over 140 ms. `reduce motion` in GPUI skips the overlay fade.
 
 ### Density
 
-Cozy rows are 68 px. Compact rows are 44 px. Both heights are fixed so the virtual list can keep its measurement. Grouped messages from the same author leave the avatar gutter empty instead of repeating the name.
+Cozy channel rows are 32 px. Compact rows are 28 px. Spacious rows are 36 px. Grouped messages from the same author leave the avatar gutter empty instead of repeating the name.
 
 ### Iconography
 
-Servers use a one-letter mark, not a downloaded icon. People use the same treatment. Voice, reply, and edit are words (`Mute`, `Reply`, `Edit`) so the window stays readable without an icon font. There is no shop icon.
+One clean-room set, 24 px viewBox, 1.5 px stroke, `currentColor`. People in the demo use photographs. Servers without art fall back to a muted tile and a centered initial. There is no shop icon and no Send button on the desktop composer.
 
 ## What Discord gets wrong, and what this window does
 

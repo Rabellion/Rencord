@@ -2,6 +2,7 @@
 //! picks the starting theme. `--bench` prints startup, RSS, and frame gaps,
 //! then quits.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -32,6 +33,7 @@ gpui_kit::actions!(
         ToggleSplit,
         TogglePip,
         ShowHelp,
+        SendMessage,
     ]
 );
 
@@ -63,6 +65,11 @@ fn main() {
     let app = gpui_kit::application().with_assets(Assets);
     app.run(move |cx| {
         gpui_kit::init(cx);
+        let _ = cx
+            .text_system()
+            .add_fonts(vec![Cow::Borrowed(include_bytes!(
+                "../assets/fonts/Figtree-wght.ttf"
+            ))]);
         cx.bind_keys([
             KeyBinding::new("ctrl-k", QuickSwitcher, None),
             KeyBinding::new("cmd-k", QuickSwitcher, None),
@@ -82,6 +89,7 @@ fn main() {
             KeyBinding::new("ctrl-\\", ToggleSplit, None),
             KeyBinding::new("ctrl-/", ShowHelp, None),
             KeyBinding::new("cmd-/", ShowHelp, None),
+            KeyBinding::new("enter", SendMessage, None),
         ]);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
@@ -477,7 +485,7 @@ impl Render for RencordWindow {
             .track_focus(&self.focus)
             .size_full()
             .bg(rgb(palette.app_bg))
-            .font_family("Inter")
+            .font_family("Figtree")
             .text_color(rgb(palette.text))
             .text_size(px(self.shell.prefs.font_px))
             .on_action(cx.listener(|this, _: &QuickSwitcher, _, cx| {
@@ -528,6 +536,9 @@ impl Render for RencordWindow {
             .on_action(cx.listener(|this, _: &TogglePip, _, cx| {
                 this.shell.prefs.pip = !this.shell.prefs.pip;
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &SendMessage, _, cx| {
+                this.send(cx);
             }))
             .on_action(cx.listener(|this, _: &ShowHelp, _, cx| {
                 this.shell.help_open = !this.shell.help_open;
@@ -645,10 +656,14 @@ impl RencordWindow {
                 } else {
                     Pill::None
                 },
-                0x5865f2,
-                0x5865f2,
+                if home_active { 0x5865f2 } else { 0x2a2e38 },
+                if home_active { 0x5865f2 } else { 0x343844 },
                 pill_ink,
-                icon("home", 26., 0xffffff),
+                icon(
+                    "home",
+                    22.,
+                    if home_active { 0xffffff } else { palette.text },
+                ),
                 move |_, _, cx| {
                     view.update(cx, |this, cx| {
                         this.shell
@@ -703,7 +718,7 @@ impl RencordWindow {
         ));
 
         let mut sidebar = v_flex()
-            .w(px(232.))
+            .w(px(240.))
             .h_full()
             .bg(rgb(palette.sidebar))
             .border_r_1()
@@ -938,6 +953,8 @@ impl RencordWindow {
                             )),
                     ),
             )
+            .child(new_messages_banner(palette))
+            .child(date_pill("Today", palette))
             .child(div().flex_1().overflow_hidden().child(timeline));
         let hits = self.shell.search_hits();
         if !self.shell.search.trim().is_empty() {
@@ -951,13 +968,15 @@ impl RencordWindow {
         }
         chat = chat.child(
             h_flex()
-                .mx(px(16.))
-                .mb(px(20.))
+                .mx(px(12.))
+                .mb(px(12.))
                 .px(px(4.))
-                .h(px(44.))
+                .h(px(47.))
                 .items_center()
                 .gap(px(2.))
-                .rounded(px(8.))
+                .rounded(px(12.))
+                .border_1()
+                .border_color(rgb(palette.line))
                 .bg(rgb(palette.input))
                 .child(header_icon(
                     this.clone(),
@@ -996,13 +1015,6 @@ impl RencordWindow {
                         view.shell.note("The emoji picker is not in this build.");
                         cx.notify();
                     },
-                ))
-                .child(header_icon(
-                    this.clone(),
-                    "composer-send",
-                    "send",
-                    palette,
-                    |view, cx| view.send(cx),
                 )),
         );
         if self.shell.prefs.stats_hud {
@@ -1031,7 +1043,6 @@ impl RencordWindow {
                 .split_once(" · ")
                 .map(|(name, activity)| (name.to_owned(), activity.to_owned()))
                 .unwrap_or_else(|| (member.clone(), "Online".into()));
-            let initial = name.chars().next().unwrap_or('?').to_string();
             let role = role_color(&name, palette);
             let dot = match activity.as_str() {
                 "Idle" => 0xf0b232,
@@ -1045,9 +1056,9 @@ impl RencordWindow {
                     .h(px(44.))
                     .gap(px(10.))
                     .items_center()
-                    .rounded(px(4.))
+                    .rounded(px(6.))
                     .hover(|style| style.bg(rgb(palette.hover)))
-                    .child(status_avatar(palette, &initial, role, dot))
+                    .child(portrait_status(&name, 32., dot, palette.members))
                     .child(
                         v_flex()
                             .gap(px(0.))
@@ -1064,12 +1075,23 @@ impl RencordWindow {
         let sidebar = if hide_sidebar { div() } else { sidebar };
         let people = if hide_members { div() } else { people };
         let body = match layout_kind {
-            rencord_desktop::LayoutKind::Discord => h_flex()
+            rencord_desktop::LayoutKind::Discord => div()
                 .size_full()
-                .child(rail)
-                .child(sidebar.child(voice_panel))
-                .child(chat)
-                .child(people)
+                .bg(rgb(palette.app_bg))
+                .p(px(12.))
+                .child(
+                    h_flex()
+                        .size_full()
+                        .gap(px(12.))
+                        .child(panel(palette, palette.rail).w(px(72.)).child(rail))
+                        .child(
+                            panel(palette, palette.sidebar)
+                                .w(px(240.))
+                                .child(sidebar.child(voice_panel)),
+                        )
+                        .child(panel(palette, palette.chat).flex_1().child(chat))
+                        .child(panel(palette, palette.members).w(px(240.)).child(people)),
+                )
                 .into_any_element(),
             rencord_desktop::LayoutKind::Keyboard => v_flex()
                 .size_full()
@@ -1247,7 +1269,6 @@ impl RencordWindow {
         } else {
             0x23a559
         };
-        let initial = user_name.chars().next().unwrap_or('?').to_string();
         let mut column = v_flex().w_full().flex_shrink_0().bg(rgb(palette.sidebar));
         if let Some(report) = voice {
             let view = this.clone();
@@ -1295,7 +1316,7 @@ impl RencordWindow {
                 .gap(px(8.))
                 .items_center()
                 .bg(rgb(palette.sidebar))
-                .child(status_avatar(palette, &initial, palette.accent, dot))
+                .child(portrait_status(user_name, 32., dot, palette.sidebar))
                 .child(
                     v_flex()
                         .flex_1()
@@ -1597,7 +1618,7 @@ fn channel_row(
         .mx(px(8.))
         .px(px(8.))
         .h(px(height))
-        .rounded(px(4.))
+        .rounded(px(6.))
         .overflow_hidden()
         .bg(rgb(bg))
         .cursor_pointer()
@@ -1612,7 +1633,8 @@ fn channel_row(
                         .gap(px(6.))
                         .items_center()
                         .child(if kind == "dm" {
-                            dm_face(palette, &title).into_any_element()
+                            portrait_status(&title, 24., 0x23a559, palette.sidebar)
+                                .into_any_element()
                         } else {
                             icon(
                                 if kind == "speaker" { "speaker" } else { "hash" },
@@ -1687,7 +1709,7 @@ fn dock_circle(
         .id(id)
         .size(px(32.))
         .flex_shrink_0()
-        .rounded(px(16.))
+        .rounded(px(6.))
         .items_center()
         .justify_center()
         .cursor_pointer()
@@ -1793,57 +1815,15 @@ enum Pill {
 
 fn guild_fill(name: &str) -> u32 {
     match name {
-        "Analytical Engines" => 0x5865f2,
-        "Difference Club" => 0x4e5058,
-        _ => 0x3f4147,
+        "Analytical Engines" => 0x3d4a6b,
+        "Difference Club" => 0x3a4150,
+        _ => 0x343844,
     }
-}
-
-fn dm_face(palette: Palette, name: &str) -> impl IntoElement {
-    let initial = name.chars().next().unwrap_or('?').to_string();
-    let role = role_color(name, palette);
-    let ink = if matches!(palette.mode, ThemeMode::Light) {
-        0xffffff
-    } else {
-        0x111214
-    };
-    div()
-        .relative()
-        .size(px(24.))
-        .flex_shrink_0()
-        .child(
-            h_flex()
-                .size(px(24.))
-                .rounded(px(12.))
-                .items_center()
-                .justify_center()
-                .bg(rgb(role))
-                .child(
-                    div()
-                        .font_family("Inter")
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(11.))
-                        .line_height(px(11.))
-                        .text_color(rgb(ink))
-                        .child(initial),
-                ),
-        )
-        .child(
-            div()
-                .absolute()
-                .bottom(px(-1.))
-                .right(px(-1.))
-                .size(px(8.))
-                .rounded(px(4.))
-                .bg(rgb(0x23a559))
-                .border_1()
-                .border_color(rgb(palette.sidebar)),
-        )
 }
 
 fn tile_initial(letter: &str, color: u32) -> impl IntoElement {
     div()
-        .font_family("Inter")
+        .font_family("Figtree")
         .font_weight(FontWeight::SEMIBOLD)
         .text_size(px(16.))
         .line_height(px(16.))
@@ -1854,7 +1834,7 @@ fn tile_initial(letter: &str, color: u32) -> impl IntoElement {
 #[allow(clippy::too_many_arguments)]
 fn rail_slot(
     id: SharedString,
-    active: bool,
+    _active: bool,
     pill: Pill,
     fill: u32,
     hover: u32,
@@ -1862,7 +1842,7 @@ fn rail_slot(
     mark: impl IntoElement,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let radius = if active { 16. } else { 24. };
+    let radius = 12.;
     let pill_h = match pill {
         Pill::Selected => 36.,
         Pill::Unread => 8.,
@@ -1897,7 +1877,8 @@ fn rail_slot(
             .justify_center()
             .bg(rgb(fill))
             .cursor_pointer()
-            .hover(move |style| style.rounded(px(16.)).bg(rgb(hover)))
+            .overflow_hidden()
+            .hover(move |style| style.bg(rgb(hover)))
             .child(mark)
             .on_click(on_click),
     )
@@ -1909,12 +1890,7 @@ fn rail_action(
     glyph: &'static str,
     action: impl Fn(&mut RencordWindow, &mut Context<RencordWindow>) + 'static,
 ) -> impl IntoElement {
-    let group = SharedString::from(id);
-    let group_hide = group.clone();
-    let group_show = group.clone();
     h_flex()
-        .group(group)
-        .relative()
         .w(px(72.))
         .h(px(48.))
         .items_center()
@@ -1922,32 +1898,17 @@ fn rail_action(
         .child(
             h_flex()
                 .id(id)
-                .relative()
                 .size(px(48.))
                 .flex_shrink_0()
-                .rounded(px(24.))
+                .rounded(px(12.))
                 .items_center()
                 .justify_center()
-                .bg(rgb(0x2b2d31))
+                .bg(rgb(0x1c1f26))
+                .border_2()
+                .border_color(rgb(0x23a55a))
                 .cursor_pointer()
-                .hover(|style| style.rounded(px(16.)).bg(rgb(0x157a3c)))
-                .child(
-                    div()
-                        .group_hover(group_hide, |style| style.opacity(0.))
-                        .child(icon(glyph, 22., 0x23a559)),
-                )
-                .child(
-                    h_flex()
-                        .absolute()
-                        .top(px(0.))
-                        .left(px(0.))
-                        .size(px(48.))
-                        .items_center()
-                        .justify_center()
-                        .opacity(0.)
-                        .group_hover(group_show, |style| style.opacity(1.))
-                        .child(icon(glyph, 22., 0xffffff)),
-                )
+                .hover(|style| style.bg(rgb(0x243028)))
+                .child(icon(glyph, 22., 0x23a55a))
                 .on_click(move |_, _, cx| {
                     view.update(cx, |this, cx| action(this, cx));
                 }),
@@ -1977,46 +1938,6 @@ fn header_icon(
         })
 }
 
-fn status_avatar(palette: Palette, initial: &str, role: u32, dot: u32) -> impl IntoElement {
-    let ink = if matches!(palette.mode, ThemeMode::Light) {
-        0xffffff
-    } else {
-        0x111214
-    };
-    div()
-        .relative()
-        .size(px(32.))
-        .child(
-            div()
-                .size(px(32.))
-                .rounded(px(16.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgb(role))
-                .child(
-                    div()
-                        .font_family("Inter")
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(13.))
-                        .line_height(px(13.))
-                        .text_color(rgb(ink))
-                        .child(initial.to_owned()),
-                ),
-        )
-        .child(
-            div()
-                .absolute()
-                .bottom(px(-1.))
-                .right(px(-1.))
-                .size(px(12.))
-                .rounded(px(6.))
-                .bg(rgb(dot))
-                .border_2()
-                .border_color(rgb(palette.members)),
-        )
-}
-
 fn guild_mark(name: &str) -> String {
     name.chars()
         .filter(|ch| ch.is_ascii_alphabetic())
@@ -2035,7 +1956,6 @@ fn message_row(
 ) -> impl IntoElement {
     let id = message.id;
     let name = message.author.display_name().to_string();
-    let initial = name.chars().next().unwrap_or('?').to_string();
     let role = role_color(&name, palette);
     let body_source = message.content.clone();
     let (reply_note, body_source) = if let Some(rest) = body_source.strip_prefix("replying to ") {
@@ -2065,15 +1985,15 @@ fn message_row(
                 .items_baseline()
                 .child(
                     div()
-                        .font_family("Inter")
+                        .font_family("Figtree")
                         .text_size(px(16.))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(rgb(role))
-                        .child(name),
+                        .child(name.clone()),
                 )
                 .child(
                     div()
-                        .font_family("Inter")
+                        .font_family("Figtree")
                         .text_size(px(12.))
                         .text_color(rgb(palette.muted))
                         .child(message.timestamp.clone()),
@@ -2128,25 +2048,37 @@ fn message_row(
     if message.content.contains("](") {
         body = body.child(
             v_flex()
-                .mt(px(6.))
-                .p(px(12.))
-                .rounded(px(8.))
+                .mt(px(4.))
+                .max_w(px(432.))
+                .px(px(16.))
+                .py(px(8.))
+                .rounded(px(12.))
                 .bg(rgb(palette.elevated))
                 .border_l_4()
-                .border_color(rgb(palette.accent))
-                .child(paint("example.com", palette.link, 12.))
-                .child(paint("Jitter notes", palette.text, 15.)),
+                .border_color(rgb(palette.link))
+                .child(paint("example.com", palette.muted, 12.))
+                .child(paint("Jitter notes", palette.link, 16.))
+                .child(paint(
+                    "How the adaptive buffer stays under the idle budget.",
+                    palette.text,
+                    14.,
+                )),
         );
     }
     if message.content.contains("attachment:bench.png") {
         body = body.child(
-            div()
-                .mt(px(6.))
-                .w(px(400.))
-                .h(px(112.))
-                .rounded(px(8.))
-                .overflow_hidden()
-                .child(bench_photo()),
+            v_flex()
+                .mt(px(4.))
+                .gap_1()
+                .child(
+                    div()
+                        .w(px(400.))
+                        .h(px(96.))
+                        .rounded(px(12.))
+                        .overflow_hidden()
+                        .child(bench_photo()),
+                )
+                .child(paint("voice-bench.jpg", palette.muted, 12.)),
         );
     }
     h_flex()
@@ -2155,14 +2087,25 @@ fn message_row(
         .relative()
         .w_full()
         .px(px(16.))
-        .py(px(if grouped { 1. } else { 6. }))
+        .py(px(if grouped { 2. } else { 8. }))
+        .border_l_4()
+        .border_color(rgb(if message.content.contains("Mention") {
+            palette.accent
+        } else {
+            palette.chat
+        }))
+        .bg(rgb(if message.content.contains("Mention") {
+            palette.ping
+        } else {
+            palette.chat
+        }))
         .gap(px(16.))
         .items_start()
         .hover(move |style| style.bg(rgb(hover)))
         .child(if grouped {
-            div().w(px(40.)).h(px(8.))
+            div().w(px(40.)).h(px(8.)).into_any_element()
         } else {
-            centered_avatar(palette, &initial, role)
+            portrait(&name, 40.).into_any_element()
         })
         .child(body)
         .child(
@@ -2175,7 +2118,7 @@ fn message_row(
                 .h(px(32.))
                 .items_center()
                 .rounded(px(6.))
-                .bg(rgb(palette.elevated))
+                .bg(rgb(0x111214))
                 .border_1()
                 .border_color(rgb(palette.line))
                 .opacity(0.)
@@ -2242,36 +2185,11 @@ fn role_color(name: &str, palette: Palette) -> u32 {
         };
     }
     match name {
-        "Ada" => 0xc9cdfb,
-        "Charles" => 0xa6e3a1,
-        "Lovelace" => 0xfab387,
+        "Ada" => 0xa8b0d4,
+        "Charles" => 0x8fb89a,
+        "Lovelace" => 0xc4a48a,
         _ => palette.text,
     }
-}
-
-fn centered_avatar(palette: Palette, initial: &str, role: u32) -> gpui_kit::Div {
-    let ink = if matches!(palette.mode, ThemeMode::Light) {
-        0xffffff
-    } else {
-        0x111214
-    };
-    div()
-        .w(px(40.))
-        .h(px(40.))
-        .rounded(px(20.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(rgb(role))
-        .child(
-            div()
-                .font_family("Inter")
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(16.))
-                .line_height(px(16.))
-                .text_color(rgb(ink))
-                .child(initial.to_owned()),
-        )
 }
 
 fn delete_action(view: Entity<RencordWindow>, id: Snowflake, palette: Palette) -> impl IntoElement {
@@ -2279,7 +2197,7 @@ fn delete_action(view: Entity<RencordWindow>, id: Snowflake, palette: Palette) -
     div()
         .id(SharedString::from(format!("delete-{id}")))
         .size(px(32.))
-        .rounded(px(4.))
+        .rounded(px(6.))
         .items_center()
         .justify_center()
         .cursor_pointer()
@@ -2347,10 +2265,10 @@ fn code_block(
     v_flex()
         .w_full()
         .bg(rgb(palette.code_bg))
-        .rounded(px(8.))
+        .rounded(px(12.))
         .border_1()
         .border_color(rgb(palette.line))
-        .p(px(8.))
+        .p(px(16.))
         .gap_1()
         .child(
             h_flex()
@@ -2584,7 +2502,7 @@ fn apply_kit_theme(palette: &Palette, cx: &mut App) {
     let value = serde_json::json!({
         "name": "Rencord",
         "mode": mode,
-        "font.family": "Inter",
+        "font.family": "Figtree",
         "font.size": 15,
         "colors": {
             "background": hex(palette.chat),
@@ -2640,12 +2558,83 @@ fn icon(name: &str, size: f32, color: u32) -> Svg {
         .text_color(rgb(color))
 }
 
+fn portrait(name: &str, size: f32) -> impl IntoElement {
+    let bytes: &'static [u8] = match name {
+        "Charles" => include_bytes!("../assets/avatars/charles.png"),
+        "Lovelace" => include_bytes!("../assets/avatars/lovelace.png"),
+        _ => include_bytes!("../assets/avatars/ada.png"),
+    };
+    let image = Image::from_bytes(ImageFormat::Png, bytes.to_vec());
+    div()
+        .size(px(size))
+        .rounded(px(size / 2.))
+        .overflow_hidden()
+        .flex_shrink_0()
+        .child(img(std::sync::Arc::new(image)).size(px(size)))
+}
+
+fn portrait_status(name: &str, size: f32, dot: u32, ring: u32) -> impl IntoElement {
+    div()
+        .relative()
+        .size(px(size))
+        .flex_shrink_0()
+        .child(portrait(name, size))
+        .child(
+            div()
+                .absolute()
+                .bottom(px(-1.))
+                .right(px(-1.))
+                .size(px(10.))
+                .rounded(px(5.))
+                .bg(rgb(dot))
+                .border_2()
+                .border_color(rgb(ring)),
+        )
+}
+
+fn panel(palette: Palette, fill: u32) -> gpui_kit::Div {
+    div()
+        .h_full()
+        .rounded(px(12.))
+        .overflow_hidden()
+        .bg(rgb(fill))
+        .border_1()
+        .border_color(rgb(palette.line))
+}
+
+fn new_messages_banner(_palette: Palette) -> impl IntoElement {
+    h_flex()
+        .mx(px(12.))
+        .mt(px(8.))
+        .h(px(32.))
+        .px(px(12.))
+        .rounded(px(6.))
+        .items_center()
+        .justify_between()
+        .bg(rgba(0x5865f2cc))
+        .child(paint("4 new messages", 0xffffff, 13.))
+        .child(paint("Mark as read", 0xffffff, 12.))
+}
+
+fn date_pill(label: &str, palette: Palette) -> impl IntoElement {
+    h_flex().justify_center().py(px(8.)).child(
+        h_flex()
+            .px(px(10.))
+            .h(px(20.))
+            .rounded(px(999.))
+            .items_center()
+            .justify_center()
+            .bg(rgb(palette.input))
+            .child(paint(label, palette.muted, 11.)),
+    )
+}
+
 fn paint(text: impl Into<String>, color: u32, size: f32) -> impl IntoElement {
     div()
         .text_size(px(size))
         .text_color(rgb(color))
         .line_height(px(size + 4.))
-        .font_family("Inter")
+        .font_family("Figtree")
         .child(text.into())
 }
 
