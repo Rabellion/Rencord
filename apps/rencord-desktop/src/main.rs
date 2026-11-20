@@ -610,7 +610,6 @@ impl RencordWindow {
         let chosen_in = self.shell.prefs.input_device.clone();
         let chosen_out = self.shell.prefs.output_device.clone();
 
-        let icon_px = self.shell.prefs.server_icon_px();
         let user_name = self
             .shell
             .session
@@ -623,8 +622,14 @@ impl RencordWindow {
             .find(|guild| Some(guild.id) == selected_guild)
             .map(|guild| guild.name.clone())
             .unwrap_or_else(|| "Direct Messages".into());
+        let home_active = selected.is_some_and(|id| dms.iter().any(|channel| channel.id == id));
+        let pill_ink = if matches!(palette.mode, ThemeMode::Light) {
+            0x060607
+        } else {
+            0xffffff
+        };
         let mut rail = v_flex()
-            .w(px(68.))
+            .w(px(72.))
             .h_full()
             .bg(rgb(palette.rail))
             .items_center()
@@ -634,12 +639,16 @@ impl RencordWindow {
             let view = this.clone();
             rail = rail.child(rail_slot(
                 "rail-home".into(),
-                icon_px,
-                false,
-                palette.elevated,
-                palette.accent,
-                palette.text,
-                icon("home", 22., palette.text),
+                home_active,
+                if home_active {
+                    Pill::Selected
+                } else {
+                    Pill::None
+                },
+                0x5865f2,
+                0x5865f2,
+                pill_ink,
+                icon("home", 26., 0xffffff),
                 move |_, _, cx| {
                     view.update(cx, |this, cx| {
                         this.shell
@@ -655,28 +664,21 @@ impl RencordWindow {
             let mark = guild_mark(&guild.name);
             let active = selected_guild == Some(id);
             let view = this.clone();
-            let fill = if active {
-                palette.accent
-            } else {
-                palette.elevated
-            };
-            let ink = if active {
-                palette.accent_text
-            } else {
-                palette.text
-            };
+            let fill = guild_fill(&guild.name);
             rail = rail.child(rail_slot(
                 format!("guild-{id}").into(),
-                icon_px,
                 active,
-                fill,
                 if active {
-                    palette.accent
+                    Pill::Selected
+                } else if guild.name != "Analytical Engines" {
+                    Pill::Unread
                 } else {
-                    palette.hover
+                    Pill::None
                 },
-                palette.text,
-                paint(mark, ink, 16.),
+                fill,
+                fill,
+                pill_ink,
+                tile_initial(&mark, 0xffffff),
                 move |_, _, cx| {
                     view.update(cx, |this, cx| {
                         this.shell.session.select_guild(id);
@@ -686,42 +688,19 @@ impl RencordWindow {
             ));
         }
         rail = rail.child(rail_rule());
-        {
-            let view = this.clone();
-            rail = rail.child(rail_slot(
-                "rail-add".into(),
-                icon_px,
-                false,
-                0x157a3c,
-                0x1f9d4d,
-                0xffffff,
-                icon("plus", 22., 0xffffff),
-                move |_, _, cx| {
-                    view.update(cx, |this, cx| {
-                        this.shell.note("Creating a server is not in this build.");
-                        cx.notify();
-                    });
-                },
-            ));
-        }
-        {
-            let view = this.clone();
-            rail = rail.child(rail_slot(
-                "rail-explore".into(),
-                icon_px,
-                false,
-                0x157a3c,
-                0x1f9d4d,
-                0xffffff,
-                icon("compass", 22., 0xffffff),
-                move |_, _, cx| {
-                    view.update(cx, |this, cx| {
-                        this.shell.note("Server discovery is not in this build.");
-                        cx.notify();
-                    });
-                },
-            ));
-        }
+        rail = rail.child(rail_action(this.clone(), "rail-add", "plus", |view, cx| {
+            view.shell.note("Creating a server is not in this build.");
+            cx.notify();
+        }));
+        rail = rail.child(rail_action(
+            this.clone(),
+            "rail-explore",
+            "compass",
+            |view, cx| {
+                view.shell.note("Server discovery is not in this build.");
+                cx.notify();
+            },
+        ));
 
         let mut sidebar = v_flex()
             .w(px(232.))
@@ -833,7 +812,7 @@ impl RencordWindow {
                 sidebar = sidebar.child(channel_row(
                     this.clone(),
                     channel.id,
-                    channel.name.clone(),
+                    format!("dm {}", channel.name),
                     selected == Some(channel.id),
                     palette,
                     None,
@@ -1596,27 +1575,32 @@ fn channel_row(
     } else {
         palette.sidebar
     };
-    let (glyph, title) = if let Some(name) = label.strip_prefix("# ") {
+    let (kind, title) = if let Some(name) = label.strip_prefix("# ") {
         ("hash", name.to_owned())
     } else if let Some(name) = label.strip_prefix(")) ") {
         ("speaker", name.to_owned())
     } else if let Some(name) = label.strip_prefix("* ") {
-        ("pin", name.to_owned())
+        ("star", name.to_owned())
+    } else if let Some(name) = label.strip_prefix("dm ") {
+        ("dm", name.to_owned())
     } else {
         ("hash", label.clone())
     };
     let color = if active { palette.text } else { palette.muted };
+    let height = if kind == "dm" {
+        row_px.max(32.)
+    } else {
+        row_px
+    };
     div()
         .id(SharedString::from(format!("channel-{id}")))
         .mx(px(8.))
         .px(px(8.))
-        .h(px(row_px))
+        .h(px(height))
         .rounded(px(4.))
+        .overflow_hidden()
         .bg(rgb(bg))
-        .border_1()
-        .border_color(rgb(bg))
         .cursor_pointer()
-        .focus(|style| style.border_color(rgb(palette.accent)))
         .hover(move |style| style.bg(rgb(if active { bg } else { hover })))
         .child(
             h_flex()
@@ -1627,8 +1611,22 @@ fn channel_row(
                     h_flex()
                         .gap(px(6.))
                         .items_center()
-                        .child(icon(glyph, 16., color))
-                        .child(paint(title, color, 15.)),
+                        .child(if kind == "dm" {
+                            dm_face(palette, &title).into_any_element()
+                        } else {
+                            icon(
+                                if kind == "speaker" { "speaker" } else { "hash" },
+                                20.,
+                                color,
+                            )
+                            .into_any_element()
+                        })
+                        .child(paint(title.clone(), color, 16.))
+                        .children(if kind == "star" {
+                            Some(icon("star", 12., palette.muted))
+                        } else {
+                            None
+                        }),
                 )
                 .children(badge.map(|count| {
                     div()
@@ -1672,28 +1670,29 @@ fn dock_circle(
     active: bool,
     action: impl Fn(&mut RencordWindow, &mut Context<RencordWindow>) + 'static,
 ) -> impl IntoElement {
-    let fill = if active { palette.danger } else { palette.chat };
-    div()
+    let glyph = match (label, active) {
+        ("Mic", true) => "mic-off",
+        ("Mic", false) => "mic",
+        ("Deaf", true) => "deafen-off",
+        ("Deaf", false) => "deafen",
+        ("Set", _) => "settings",
+        _ => "plus",
+    };
+    let ink = if active && label != "Set" {
+        palette.danger
+    } else {
+        palette.text
+    };
+    h_flex()
         .id(id)
         .size(px(32.))
-        .rounded(px(16.))
         .flex_shrink_0()
+        .rounded(px(16.))
         .items_center()
         .justify_center()
-        .bg(rgb(fill))
         .cursor_pointer()
         .hover(|style| style.bg(rgb(palette.hover)))
-        .focus(|style| style.border_color(rgb(palette.accent)))
-        .child(icon(
-            match label {
-                "Mic" => "mic",
-                "Deaf" => "deafen",
-                "Set" => "settings",
-                _ => "plus",
-            },
-            18.,
-            if active { 0xffffff } else { palette.text },
-        ))
+        .child(icon(glyph, 20., ink))
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| action(this, cx));
         })
@@ -1777,43 +1776,122 @@ fn channel_title(
 }
 
 fn rail_rule() -> impl IntoElement {
-    div().w(px(32.)).h(px(2.)).rounded(px(1.)).bg(rgb(0x4e5058))
+    h_flex()
+        .w(px(72.))
+        .h(px(8.))
+        .items_center()
+        .justify_center()
+        .child(div().w(px(32.)).h(px(2.)).rounded(px(1.)).bg(rgb(0x4e5058)))
+}
+
+#[derive(Clone, Copy)]
+enum Pill {
+    None,
+    Unread,
+    Selected,
+}
+
+fn guild_fill(name: &str) -> u32 {
+    match name {
+        "Analytical Engines" => 0x5865f2,
+        "Difference Club" => 0x4e5058,
+        _ => 0x3f4147,
+    }
+}
+
+fn dm_face(palette: Palette, name: &str) -> impl IntoElement {
+    let initial = name.chars().next().unwrap_or('?').to_string();
+    let role = role_color(name, palette);
+    let ink = if matches!(palette.mode, ThemeMode::Light) {
+        0xffffff
+    } else {
+        0x111214
+    };
+    div()
+        .relative()
+        .size(px(24.))
+        .flex_shrink_0()
+        .child(
+            h_flex()
+                .size(px(24.))
+                .rounded(px(12.))
+                .items_center()
+                .justify_center()
+                .bg(rgb(role))
+                .child(
+                    div()
+                        .font_family("Inter")
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(11.))
+                        .line_height(px(11.))
+                        .text_color(rgb(ink))
+                        .child(initial),
+                ),
+        )
+        .child(
+            div()
+                .absolute()
+                .bottom(px(-1.))
+                .right(px(-1.))
+                .size(px(8.))
+                .rounded(px(4.))
+                .bg(rgb(0x23a559))
+                .border_1()
+                .border_color(rgb(palette.sidebar)),
+        )
+}
+
+fn tile_initial(letter: &str, color: u32) -> impl IntoElement {
+    div()
+        .font_family("Inter")
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_size(px(16.))
+        .line_height(px(16.))
+        .text_color(rgb(color))
+        .child(letter.to_owned())
 }
 
 #[allow(clippy::too_many_arguments)]
 fn rail_slot(
     id: SharedString,
-    size: f32,
     active: bool,
+    pill: Pill,
     fill: u32,
     hover: u32,
-    pill: u32,
+    pill_ink: u32,
     mark: impl IntoElement,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
-    let radius = if active { 16. } else { size / 2. };
-    let mut slot = div()
+    let radius = if active { 16. } else { 24. };
+    let pill_h = match pill {
+        Pill::Selected => 36.,
+        Pill::Unread => 8.,
+        Pill::None => 0.,
+    };
+    let mut slot = h_flex()
         .relative()
-        .w(px(68.))
-        .h(px(size))
+        .w(px(72.))
+        .h(px(48.))
+        .flex_shrink_0()
         .items_center()
         .justify_center();
-    if active {
+    if pill_h > 0. {
         slot = slot.child(
             div()
                 .absolute()
                 .left(px(0.))
-                .top(px((size - 20.) / 2.))
+                .top(px((48. - pill_h) / 2.))
                 .w(px(4.))
-                .h(px(20.))
+                .h(px(pill_h))
                 .rounded(px(2.))
-                .bg(rgb(pill)),
+                .bg(rgb(pill_ink)),
         );
     }
     slot.child(
-        div()
+        h_flex()
             .id(id)
-            .size(px(size))
+            .size(px(48.))
+            .flex_shrink_0()
             .rounded(px(radius))
             .items_center()
             .justify_center()
@@ -1823,6 +1901,57 @@ fn rail_slot(
             .child(mark)
             .on_click(on_click),
     )
+}
+
+fn rail_action(
+    view: Entity<RencordWindow>,
+    id: &'static str,
+    glyph: &'static str,
+    action: impl Fn(&mut RencordWindow, &mut Context<RencordWindow>) + 'static,
+) -> impl IntoElement {
+    let group = SharedString::from(id);
+    let group_hide = group.clone();
+    let group_show = group.clone();
+    h_flex()
+        .group(group)
+        .relative()
+        .w(px(72.))
+        .h(px(48.))
+        .items_center()
+        .justify_center()
+        .child(
+            h_flex()
+                .id(id)
+                .relative()
+                .size(px(48.))
+                .flex_shrink_0()
+                .rounded(px(24.))
+                .items_center()
+                .justify_center()
+                .bg(rgb(0x2b2d31))
+                .cursor_pointer()
+                .hover(|style| style.rounded(px(16.)).bg(rgb(0x157a3c)))
+                .child(
+                    div()
+                        .group_hover(group_hide, |style| style.opacity(0.))
+                        .child(icon(glyph, 22., 0x23a559)),
+                )
+                .child(
+                    h_flex()
+                        .absolute()
+                        .top(px(0.))
+                        .left(px(0.))
+                        .size(px(48.))
+                        .items_center()
+                        .justify_center()
+                        .opacity(0.)
+                        .group_hover(group_show, |style| style.opacity(1.))
+                        .child(icon(glyph, 22., 0xffffff)),
+                )
+                .on_click(move |_, _, cx| {
+                    view.update(cx, |this, cx| action(this, cx));
+                }),
+        )
 }
 
 fn header_icon(
@@ -2210,6 +2339,7 @@ fn code_block(
                     "code-{id}-{index}-{line_index}"
                 )))
                 .whitespace_nowrap()
+                .font_family("JetBrains Mono")
                 .text_size(px((font_px - 1.0).max(12.0)))
                 .child(highlight_code_line(line, palette)),
         );
@@ -2226,7 +2356,11 @@ fn code_block(
             h_flex()
                 .justify_between()
                 .items_center()
-                .child(Label::new(language.unwrap_or_else(|| "code".into())))
+                .child(paint(
+                    language.unwrap_or_else(|| "text".into()),
+                    palette.muted,
+                    12.,
+                ))
                 .child(
                     div()
                         .id(SharedString::from(format!("copy-{id}-{index}")))
@@ -2256,19 +2390,14 @@ fn highlight_code_line(line: &str, palette: Palette) -> StyledText {
         let (token, next) = split_token(rest);
         let keyword = KEYWORDS.contains(&token);
         text.push_str(token);
-        let mut font = font(".SystemUIFont");
+        let mut font = font("JetBrains Mono");
         if keyword {
             font.weight = FontWeight::BOLD;
         }
         runs.push(TextRun {
             len: token.len(),
             font,
-            color: rgb(if keyword {
-                palette.accent
-            } else {
-                palette.text
-            })
-            .into(),
+            color: rgb(if keyword { palette.link } else { palette.text }).into(),
             background_color: None,
             underline: None,
             strikethrough: None,
@@ -2499,6 +2628,9 @@ fn icon(name: &str, size: f32, color: u32) -> Svg {
         "compass" => include_str!("../../../docs/design/icons/compass.svg"),
         "phone" => include_str!("../../../docs/design/icons/phone.svg"),
         "send" => include_str!("../../../docs/design/icons/send.svg"),
+        "star" => include_str!("../../../docs/design/icons/star.svg"),
+        "mic-off" => include_str!("../../../docs/design/icons/mic-off.svg"),
+        "deafen-off" => include_str!("../../../docs/design/icons/deafen-off.svg"),
         _ => include_str!("../../../docs/design/icons/hash.svg"),
     };
     let colored = raw.replace("currentColor", &format!("#{color:06X}"));

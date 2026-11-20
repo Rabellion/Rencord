@@ -8,7 +8,7 @@ Familiar rail, channel sidebar, conversation, member list, and a user panel at t
 
 What the window does:
 
-- 48 px rail tiles. A home button, a separator, server marks, another separator, then add and explore. The selected tile eases from a circle to a squircle and grows a pill.
+- A 72 px rail holds 48 px tiles, centered. Home is a blurple tile. Server initials sit in the middle of the circle. The selected tile and a hovered tile ease to a 16 px squircle, and a white pill sits on the left edge for the selected server and for unread. Add and Explore are dark tiles with green glyphs that fill green on hover.
 - Channel rows use the clean-room hash, speaker, and pin icons. Categories are uppercase and collapsible in label only. The selected row is filled. Mentions use a red count.
 - The chat header is one bar: hash, name, topic, and icons for threads, pins, the member list, search, and inbox. There is no second bar above it.
 - Messages group by author. Names use role colors that stay above WCAG AA on every theme. Timestamps are muted. Avatars are 40 px and centered. Reply, edit, and delete are icons on a bar that appears on hover.

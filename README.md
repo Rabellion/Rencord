@@ -52,7 +52,7 @@ Serein, Concord, and Yapfast are further along as daily drivers. Milestone 1 is 
 
 ## Screenshots
 
-Captured from `rencord --demo --layout a` on Linux (X11, software GL). Direction A is the default. Dark is the default theme. Ash is `--theme ash`. Onyx is `--theme amoled`. Light is `--theme light`. `--voice` opens the loopback call. `--density compact` tightens the channel rows. **Join voice** (click the voice channel, or pass `--voice`) runs the in-memory loopback and then tries to open the default cpal devices. It does not open a Discord UDP session.
+Captured from `rencord --demo --layout a` on Linux (X11, software GL). Direction A is the default. The server rail is 72 px wide with 48 px tiles, centered initials, and a selection pill. Channel rows are 32 px in the cozy density. Code blocks use JetBrains Mono on a darker inset. Dark is the default theme. Ash is `--theme ash`. Onyx is `--theme amoled`. Light is `--theme light`. `--voice` opens the loopback call. `--density compact` tightens the channel rows. **Join voice** (click the voice channel, or pass `--voice`) runs the in-memory loopback and then tries to open the default cpal devices. It does not open a Discord UDP session.
 
 | Dark | Ash |
 | :---: | :---: |
