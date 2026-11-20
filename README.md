@@ -44,15 +44,15 @@ Several native Rust clients already exist. Rencord is aimed at the gaps that sho
 | **Streaming** | Quality presets up to 2160p120 are defined and are not hidden behind a Nitro check. The UI must not promise that Discord will accept them. | No capture, no encoder, no Go Live socket. An out-of-process worker is a typed protocol only. |
 | **HDR** | Policy code tone-maps HDR to SDR unless both peers are Rencord and an SFU passthrough test has succeeded. That test has not been run. | No HDR capture. |
 
-Serein, Concord, and Yapfast are further along as daily drivers. Rencord's Milestone 1 is the shell, the text path, and a voice engine whose jitter buffer is the part worth keeping.
+Serein, Concord, and Yapfast are further along as daily drivers. Milestone 1 is the shell and the text path. Milestone 2 adds a voice websocket and UDP session, tested against a local stub, with mute, deafen, and gain. Neither milestone has been signed into a real Discord voice server.
 
 ## Screenshots
 
-Captured from `rencord --demo` on Linux (X11, software GL). These are the real window, not mockups. Markdown is still drawn as text, and **Join voice** runs the in-memory loopback rather than a Discord UDP session.
+Captured from `rencord --demo` on Linux (X11, software GL) after Milestone 2. These are the real window, not mockups. Markdown is still drawn as text. **Join voice** runs the in-memory loopback and then tries to open the default cpal devices. It does not open a Discord UDP session.
 
 | Guild, channels, DMs, and the timeline | After Join voice (loopback stats) |
 | :---: | :---: |
-| <img src="docs/screenshots/shell.png" alt="Rencord demo: guild rail, general and voice channels, Charles DM, message timeline, composer" width="480" /> | <img src="docs/screenshots/voice.png" alt="Rencord demo after Join voice, status line showing loopback played, concealed, hard gaps, and target delay" width="480" /> |
+| <img src="docs/screenshots/shell.png" alt="Rencord demo: guild rail, channels, composer, and Mute, Deafen, Volume, Join voice" width="480" /> | <img src="docs/screenshots/voice.png" alt="Rencord demo after Join voice, status line showing loopback played, concealed, hard gaps, and target delay" width="480" /> |
 
 ## Feature status
 
@@ -66,8 +66,8 @@ Honest status for this repository. "Implemented" means the code path and tests e
 | Message history | Implemented | Bounded to 200 messages per channel in memory, with a SQLite copy. |
 | Markdown | Implemented | Headings, quotes, fenced code, bold, italic, inline code, links, mentions, spoilers. Rendered as GPUI text. |
 | Sending messages | Implemented locally; REST client tested against a mock | `POST /channels/{id}/messages` exists. The demo composer appends locally. A live send was not verified. |
-| Gateway live updates | Implemented against a local socket | Identify, heartbeat, `READY`, `MESSAGE_CREATE`, and resume after the socket drops. Not verified against Discord's gateway. |
-| Voice join, audio in and out | Partial | Local voice websocket + UDP stub covers IP discovery, select protocol, `aead_xchacha20_poly1305_rtpsize`, speaking, a DAVE prepare/ready exchange, resume, mute, deafen, and per-SSRC gain through the jitter buffer. cpal can open the default devices when they exist. The **Join voice** button still runs the in-memory loopback and then tries to open cpal. A live Discord voice server was not used. |
+| Gateway live updates | Implemented against a local socket | Identify, heartbeat, `READY`, `MESSAGE_CREATE`. After the socket drops, the client reconnects and sends Resume with the saved session id and sequence. Not verified against Discord's gateway. |
+| Voice join, audio in and out | Partial | `LiveCall` speaks the voice gateway and UDP against a local stub: identify or resume, IP discovery, select protocol, `aead_xchacha20_poly1305_rtpsize`, speaking, and a DAVE prepare / transition-ready exchange. Encrypted Opus is echoed through the adaptive jitter buffer. Mute, deafen, and per-SSRC gain are in that path. The desktop **Join voice** button still runs the loopback, then opens the default cpal input and output when the machine has them. There is no device picker yet. A live Discord voice server was not used. |
 | DAVE (E2EE) | Implemented | `davey` 0.2. Two-member MLS encrypt/decrypt test. Opcode routing keeps the transport up when a welcome fails. |
 | Adaptive jitter buffer | Implemented | See [Voice](#voice). |
 | Screen share / camera / Go Live | Not implemented | Presets and the worker command enum only. |
@@ -132,6 +132,17 @@ Discord voice is 48 kHz Opus, usually 20 ms frames. A fixed two-frame buffer has
 
 `crates/rencord-voice` compares that buffer with `FixedWindow`, a baseline of the fixed 40 ms behavior, under a deterministic loss and delay trace. The adaptive buffer records fewer hard gaps at 1.5% and at 5% loss. That comparison is a simulation, not a recording of a Discord call.
 
+Milestone 2 drives a real websocket and UDP socket, but the peer is a process on localhost:
+
+- Hello, then Identify, or Resume (`op` 7) with `server_id`, `session_id`, `token`, and `seq_ack` after the socket is replaced
+- Ready supplies the UDP address and SSRC; the client sends the 74-byte IP discovery packet and puts the answered address into Select Protocol
+- Session Description installs the 32-byte `aead_xchacha20_poly1305_rtpsize` key; Speaking follows
+- A DAVE prepare transition is answered with transition-ready. The MLS group itself is covered by the davey round-trip test, not by the stub
+- Microphone frames are Opus-encoded, sealed, and written to UDP. Received packets are unsealed, jitter-buffered, then scaled by per-SSRC gain. Mute suppresses the packet. Deafen zeros playback
+- The main gateway uses the same idea: on a clean close it reconnects and sends gateway Resume (`op` 6) when it still has a session id
+
+None of that has been checked against `gateway.discord.gg` or a Discord voice server. The desktop button does not call `LiveCall` yet. It prints loopback stats and, when cpal can see devices, monitors the default microphone through the same jitter buffer.
+
 DAVE v1 sits on top of the transport cipher. Media is encrypted with `davey` before `aead_xchacha20_poly1305_rtpsize`. Silence packets are left to davey's own passthrough rules. If an MLS welcome fails, the session reports it and leaves the UDP key in place.
 
 ## Architecture
@@ -170,11 +181,17 @@ The UI does not embed egui. Protocol crates do not depend on GPUI.
 
 ## Roadmap
 
-1. **Threads, search, uploads, notifications.** Click-to-focus toasts and the OS keyring behind the existing `SecretStore` trait.
-2. **Live voice on Linux, macOS, and Windows.** Finish UDP discovery against a real voice server, cpal capture and playback on the same session, and DAVE rekey without dropping the call.
-3. **Go Live that stays up.** Per-OS capture (Windows Graphics Capture, ScreenCaptureKit, PipeWire portal), H.264 encode with a software fallback, and an out-of-process stream worker so a capture failure does not kill the call. Quality controls go up to 2160p and 120 fps with no Nitro checkbox. The UI will show Discord's documented caps (720p30 without Nitro, 4K60 with Nitro) and require an explicit acknowledgement before requesting more. Viewers on the official client may be transcoded or rejected. 120 fps is only offered when the local display reports that refresh.
-4. **HDR between Rencord users.** Capture HDR where the OS allows it, tone-map to BT.709 8-bit for everyone else, and try a 10-bit path only after a measured SFU test. Mixed audiences stay SDR.
-5. **Polish.** Multi-account, IME, accessibility, themes. Plugins only after chat and media are boring.
+| Milestone | State | What landed |
+| --- | --- | --- |
+| 1. Shell and adaptive jitter | On `main` | GPUI window, token login, guild and DM lists, markdown history, local send, gateway identify against a local socket, jitter simulation. |
+| 2. Live voice path | On `main` | Gateway resume, voice websocket + UDP discovery, transport cipher, speaking, DAVE control frames, mute, deafen, per-SSRC gain, default cpal devices. Local stubs only. |
+| 3. UI | Next | Themes, virtualized timeline, command palette, keyboard navigation, settings, device picker. |
+| 4. Threads, search, uploads, notifications | Not started | OS keyring behind the existing `SecretStore` trait. |
+| 5. Voice against Discord | Not started | Point `LiveCall` at a real voice server and keep DAVE rekeys without dropping the call. |
+| 6. Go Live | Not started | Per-OS capture, H.264, out-of-process worker, presets up to 2160p120 with no Nitro checkbox. The UI will show Discord's documented caps and require an explicit acknowledgement before requesting more. 120 fps only when the display reports that refresh. |
+| 7. HDR between Rencord users | Not started | Tone-map to BT.709 8-bit unless both peers are Rencord and an SFU passthrough test has succeeded. |
+
+Go Live and HDR stay policy-only until those milestones. The UI must not promise that Discord will accept a preset.
 
 ## FAQ
 
@@ -182,7 +199,7 @@ The UI does not embed egui. Protocol crates do not depend on GPUI.
 From your own client, on an account you control. Rencord will not read another app's storage for you. Official login is the plan described above; it is not built.
 
 **Does Join voice put me in a Discord channel?**  
-In this milestone the button runs the in-process loopback so you can see jitter stats without a call. The voice state machine and DAVE session are in `rencord-voice` and covered by tests. Wiring them to a live voice server is the next voice task.
+No. The button runs the in-process loopback and then tries to open the default microphone and speaker. `LiveCall` can complete discovery, select protocol, transport encryption, speaking, and a voice-gateway resume, but only against the local stub in tests. It has not been pointed at a Discord voice server.
 
 **Will 4K / 120 work without Nitro?**  
 The preset list is not gated. Discord's service is. Treat higher settings as a request, not a grant.
