@@ -5,7 +5,7 @@ The window should feel quieter than Discord and cheaper to run. This document is
 ## Principles
 
 1. **One job per region.** The rail is servers. The sidebar is channels. The center is the conversation. The right column is people. Voice sits in a card, not across the whole window.
-2. **No upsells.** There is no Nitro shop, gift button, quest, boost banner, or "upgrade" row. Stream presets stay in code until capture exists, and the settings screen says Go Live is absent.
+2. **No upsells.** There is no Nitro shop, gift button, quest, boost banner, or "upgrade" row. Go Live defaults to 720p30. Higher presets stay in the list, and the settings screen says Discord may still reject them.
 3. **Keyboard first.** Ctrl/Cmd+K opens the quick switcher. Alt+Up/Down moves channels. Ctrl/Cmd+Alt+Up/Down moves servers. Esc closes the switcher and settings. Ctrl/Cmd+, opens settings.
 4. **The list does not draw what is off screen.** Messages use GPUI's virtual list. A row can grow for a code block, an embed, or an attachment.
 5. **Themes are data.** Onyx Ink, dark, ash, and light are token sets. Switching them does not rebuild the session.
@@ -50,7 +50,7 @@ These are recurring complaints from Discord's own feedback channels, client revi
 | Complaint | What people run into | What this build does |
 | --- | --- | --- |
 | Clutter | Gift button, boost banners, quests, active-now, and app directory compete with the message | Four regions and a voice card. No promotional row. |
-| Nitro upsells | Quality, upload size, and emoji are sold inside the chrome | No purchase surface. Settings states that Go Live is not built. |
+| Nitro upsells | Quality, upload size, and emoji are sold inside the chrome | No purchase surface. Go Live defaults to 720p30 and says a higher request can be refused. |
 | Slow channel changes | Large servers reflow the whole Electron tree | Cached switch updates the session and the virtual list. See budgets. |
 | Weak keyboard use | Most travel is the mouse. The quick switcher is easy to miss | Ctrl/Cmd+K, Alt arrows, and a visible Ctrl K button. |
 | Search | Global search is heavy and easy to open by accident | A field above the channel list filters the open channel only. |
@@ -99,4 +99,5 @@ Layout presets A, B, and C are compared in [DIRECTIONS.md](DIRECTIONS.md). They 
 - The device row records a name. Capture and playback still open cpal's default devices.
 - Search does not cross channels, and it does not query Discord.
 - Light, Dark, and Ash switch live. The captures in the README are Onyx Ink.
+- Go Live's picker, viewer, and picture-in-picture use preview frames. The safe preset is 720p30. A 10-bit or PQ source is tone-mapped to 8-bit. The Rencord-to-Rencord HDR packet format is not in this build.
 - Keyboard bindings need the window focused. They are not a screen-reader pass.

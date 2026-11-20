@@ -165,7 +165,7 @@ pub(crate) fn paint_preview(bgra: &mut [u8], width: u32, height: u32, sequence: 
                 return;
             }
             let bar = ((x + shift) / 12) % 2 == 0;
-            let (b, g, r) = if bar { (40, 70, 210) } else { (12, 12, 18) };
+            let (b, g, r) = if bar { (255, 107, 79) } else { (16, 16, 10) };
             bgra[i] = b;
             bgra[i + 1] = g;
             bgra[i + 2] = r;

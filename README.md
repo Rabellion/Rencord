@@ -45,7 +45,7 @@ Several native Rust clients already exist. Rencord is aimed at the gaps that sho
 | --- | --- | --- |
 | **Voice cut-outs** | Adaptive jitter target from 40&nbsp;ms to 120&nbsp;ms, Opus PLC and in-band FEC, and a one-frame time-stretch instead of a hard skip. A loss simulation beats a fixed 40&nbsp;ms / 8-slot window at 1.5% and 5% loss. | Not measured on a live Discord call. Acoustic echo cancellation and noise suppression are not included. |
 | **Interface** | GPUI Kit 0.10. Direction A layout. The default theme is Onyx Ink: a true-black canvas, `#15152A` hairlines, 8 px gaps, a `#4F6BFF` accent with black ink on the banner, Inter for the UI, and JetBrains Mono for timestamps and status. Dark (Crisp Minimal), Ash, and Light stay selectable. Ctrl/Cmd+K, density, and type size are in settings. No Nitro surface. | Not a screen-reader pass. Plugins are still out. Layouts B and C remain behind `--layout`. |
-| **Streaming** | Presets up to 2160p120, no Nitro checkbox, default 720p30. `rencord-stream` captures out of process. The software encoder, RTP packetization, DAVE video wrapping, and the Go Live voice-state flag are in tree. | Hardware encoders are detected, not linked. The portal, Windows Graphics Capture, and ScreenCaptureKit are not opened from the UI. No viewer yet. Discord may still reject a preset. |
+| **Streaming** | Presets up to 2160p120, no Nitro checkbox, default 720p30. `rencord-stream` captures out of process. Software encode, RTP, DAVE video wrapping, and `--golive` picker, viewer, and PiP are in the window. | Hardware encoders are detected, not linked. The portal, Windows Graphics Capture, and ScreenCaptureKit are not opened from the picker. Discord may still reject a preset. |
 | **HDR** | Policy code tone-maps HDR to SDR unless both peers are Rencord and an SFU passthrough test has succeeded. That test has not been run. | No HDR capture. |
 
 Serein, Concord, and Yapfast are further along as daily drivers. Milestone 1 is the shell and the text path. Milestone 2 adds a voice websocket and UDP session, tested against a local stub, with mute, deafen, and gain. Milestone 3 is the quieter window described in [docs/design/UX.md](docs/design/UX.md). None of this has been signed into a real Discord voice server.
@@ -61,6 +61,14 @@ Captured from `rencord --demo --voice` on Linux (X11, software GL). The default 
 | Compact | Hover |
 | :---: | :---: |
 | <img src="docs/design/onyx/compact.png" alt="Onyx Ink at compact density" width="480" /> | <img src="docs/design/onyx/hover.png" alt="Onyx Ink message hover bar with react, reply, link, and delete" width="480" /> |
+
+Go Live, from `rencord --demo --golive picker|viewer|pip`. The pictures are preview frames. The stats line is the safe 720p30 preset on the software encoder.
+
+| Source picker | Viewer |
+| :---: | :---: |
+| <img src="docs/design/onyx/golive-picker.png" alt="Onyx Ink Go Live source picker with screen and window previews" width="480" /> | <img src="docs/design/onyx/golive-viewer.png" alt="Stream viewer with resolution, fps, bitrate, encoder, dropped frames, and RTT" width="480" /> |
+
+Picture in picture: [docs/design/onyx/golive-pip.png](docs/design/onyx/golive-pip.png).
 
 ## Feature status
 
@@ -78,7 +86,7 @@ Honest status for this repository. "Implemented" means the code path and tests e
 | Voice join, audio in and out | Partial | `LiveCall` speaks the voice gateway and UDP against a local stub: identify or resume, IP discovery, select protocol, `aead_xchacha20_poly1305_rtpsize`, speaking, and a DAVE prepare / transition-ready exchange. Encrypted Opus is echoed through the adaptive jitter buffer. Mute, deafen, and per-SSRC gain are in that path. **Join voice** still runs the loopback, then opens the default cpal devices. Settings lists device names and remembers the choice; that name is not yet passed into cpal. A live Discord voice server was not used. |
 | DAVE (E2EE) | Implemented | `davey` 0.2. Two-member MLS encrypt/decrypt test. Opcode routing keeps the transport up when a welcome fails. |
 | Adaptive jitter buffer | Implemented | See [Voice](#voice). |
-| Screen share / camera / Go Live | Partial | Separate worker, shared-memory frames, software encoder, RFC 6184 packetization, DAVE video wrap, and a `self_stream` voice-state update. The picker and the viewer are not in the window yet. |
+| Screen share / camera / Go Live | Partial | Separate worker, shared-memory frames, software encoder, RFC 6184 packetization, DAVE video wrap, `self_stream`, and `--golive` picker, viewer, and PiP. Platform capturers are probed. Hardware encoders are not linked. |
 | HDR | Policy only | Tone-map to SDR by default. |
 | Notifications, keyring, tray, hotkeys | Stub | In-process notification sink. OS keyring is the intended next store; Milestone 1 uses the private file. |
 | Themes, density, quick switcher | Implemented | Onyx Ink is the default. Dark, Ash, and Light remain. Compact, Cozy, and Spacious. Direction A is the default; B and C stay behind `--layout`. Ctrl/Cmd+K. Alt+arrows move channels. |
@@ -102,7 +110,7 @@ cargo test --workspace
 cargo run -p rencord-desktop -- --demo
 ```
 
-`--demo` opens the GPUI window on local fixture data. It does not contact Discord. The starting palette is Onyx Ink. `--theme dark`, `--theme ash`, `--theme light`, or `--theme amoled` (an alias of Onyx) picks another palette. `--layout a` is the default; `b` and `c` are the other presets. `--density compact` tightens the channel list. `--voice` starts the loopback call. `--bench` prints startup, RSS, and frame gaps, then quits. Omit `--demo` to paste a token.
+`--demo` opens the GPUI window on local fixture data. It does not contact Discord. The starting palette is Onyx Ink. `--theme dark`, `--theme ash`, `--theme light`, or `--theme amoled` (an alias of Onyx) picks another palette. `--layout a` is the default; `b` and `c` are the other presets. `--density compact` tightens the channel list. `--voice` starts the loopback call. `--golive picker`, `--golive viewer`, or `--golive pip` opens the Go Live screens. `--bench` prints startup, RSS, and frame gaps, then quits. `--bench stream` prints capture-to-encode time for the software encoder and quits. Omit `--demo` to paste a token.
 
 ```sh
 cargo run -p rencord-desktop --bin rencord-measure -- --offline
@@ -117,7 +125,7 @@ cargo run -p rencord-desktop --bin rencord-measure -- --offline
 | Next / previous server | Ctrl+Alt+Down / Ctrl+Alt+Up |
 | Settings | Ctrl+, or Cmd+, or the Settings button |
 
-Settings switches theme (Onyx Ink, dark, ash, light), density (compact 28 px rows, cozy 32 px, spacious 36 px), and type size (13, 15, or 17 px). It lists cpal input and output names, shows the last loopback jitter line, and states that Go Live is not in this build. There is no Nitro row.
+Settings switches theme (Onyx Ink, dark, ash, light), density (compact 28 px rows, cozy 32 px, spacious 36 px), and type size (13, 15, or 17 px). It lists cpal input and output names, shows the last loopback jitter line, and states that Go Live defaults to 720p30. There is no Nitro row.
 
 ## Measured on this machine
 
@@ -227,7 +235,7 @@ The UI does not embed egui. Protocol crates do not depend on GPUI.
 | 3b. Other layouts | Behind `--layout` | `b` keyboard-first and `c` unified sidebar stay in the binary. They are not the default. |
 | 4. Threads, search, uploads, notifications | Not started | OS keyring behind the existing `SecretStore` trait. |
 | 5. Voice against Discord | Not started | Point `LiveCall` at a real voice server and keep DAVE rekeys without dropping the call. |
-| 6. Go Live | Capture and worker on `main` | `rencord-stream` publishes preview frames over IPC and shared memory. Presets go up to 2160p120 with no Nitro checkbox; the default request is 720p30. Encode, the Go Live socket, and the viewer follow. 120 fps is offered only when the display reports that refresh. |
+| 6. Go Live | Worker, software encode, viewer | `rencord-stream` publishes frames out of process. Software encode, RTP, DAVE video wrap, and `--golive` picker, viewer, and PiP are in the tree. Hardware encoders are detected, not linked. The portal, Windows Graphics Capture, and ScreenCaptureKit are not opened from the window. 120 fps is offered only when the display reports that refresh. |
 | 7. HDR between Rencord users | Not started | Tone-map to BT.709 8-bit unless both peers are Rencord and an SFU passthrough test has succeeded. |
 | 8. Files over the attachment cap | Not started | Discord enforces the upload size on the server, so the client cannot lift it. When a file is over the account cap, one dialog offers a saved default: re-encode video or downscale images to fit, upload to Litterbox, Catbox, or a host the user configures and post the link (Rencord shows an inline preview), or split the file into parts. |
 
@@ -242,7 +250,7 @@ From your own client, on an account you control. Rencord will not read another a
 No. The button runs the in-process loopback and then tries to open the default microphone and speaker. `LiveCall` can complete discovery, select protocol, transport encryption, speaking, and a voice-gateway resume, but only against the local stub in tests. It has not been pointed at a Discord voice server.
 
 **Will 4K / 120 work without Nitro?**  
-The preset list is not gated. Discord's service is. Treat higher settings as a request, not a grant.
+The preset list is not gated. The client asks for 720p30 until you pick something else. Discord's service can refuse a higher request, and sending more than the account is allowed can put the account at risk. A software-encoder bench on this machine, 30 frames at 320×180, averaged 571 µs to draw a preview frame and 1354 µs to encode it. GPU time was unused.
 
 **Is the SQLite file encrypted?**  
 No. The token file is mode `0600` on Unix. Logout should delete it; the menu for that is not in the window yet (`FileSecretStore::clear_token` is the API).

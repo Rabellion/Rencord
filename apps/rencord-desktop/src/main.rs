@@ -15,6 +15,8 @@ use gpui_kit::component::label::Label;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use rencord_desktop::{Density, Palette, Shell, ThemeMode, MOTION_OVERLAY_MS};
+
+mod golive;
 use rencord_markdown::{parse, Block, Inline};
 use rencord_model::{Message, Snowflake};
 
@@ -62,7 +64,22 @@ fn main() {
             "spacious" => Some(rencord_desktop::Density::Spacious),
             _ => None,
         });
+    if args
+        .windows(2)
+        .any(|pair| pair[0] == "--bench" && pair[1] == "stream")
+    {
+        println!(
+            "{}",
+            rencord_media::format_bench(&rencord_media::bench_software(30))
+        );
+        return;
+    }
     let start_voice = args.iter().any(|arg| arg == "--voice");
+    let golive = args
+        .windows(2)
+        .find(|pair| pair[0] == "--golive")
+        .map(|pair| golive::GoLiveMode::parse(&pair[1]))
+        .unwrap_or(golive::GoLiveMode::Off);
     let reveal_hover = args.iter().any(|arg| arg == "--reveal-hover");
     let frame = args
         .windows(2)
@@ -121,6 +138,7 @@ fn main() {
                     density,
                     start_voice,
                     reveal_hover,
+                    golive,
                     window,
                     cx,
                 )
@@ -146,6 +164,7 @@ struct RencordWindow {
     collapsed: HashSet<&'static str>,
     pinned_top: bool,
     reveal_hover: bool,
+    golive: golive::GoLiveMode,
 }
 
 impl RencordWindow {
@@ -158,6 +177,7 @@ impl RencordWindow {
         density: Option<rencord_desktop::Density>,
         start_voice: bool,
         reveal_hover: bool,
+        golive: golive::GoLiveMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -212,6 +232,7 @@ impl RencordWindow {
             collapsed: HashSet::new(),
             pinned_top: false,
             reveal_hover,
+            golive,
         }
     }
 
@@ -579,6 +600,15 @@ impl Render for RencordWindow {
                 this.shell.help_open = !this.shell.help_open;
                 cx.notify();
             }));
+        if self.golive == golive::GoLiveMode::Picker {
+            return root.child(golive::picker(palette)).into_any_element();
+        }
+        if self.golive == golive::GoLiveMode::Viewer {
+            return root.child(golive::viewer(palette)).into_any_element();
+        }
+        if self.golive == golive::GoLiveMode::Pip {
+            return root.child(golive::pip(palette)).into_any_element();
+        }
         if !signed_in {
             return root.child(self.login(cx)).into_any_element();
         }
@@ -1729,7 +1759,7 @@ impl RencordWindow {
                         .text_size(px(12.))
                         .text_color(rgb(palette.faint))
                         .child(Label::new(format!(
-                            "Go Live is not in this build. Nitro gate in the UI is {}. There is no purchase surface.",
+                            "Go Live defaults to 720p30. Higher presets are a request, not a grant. Nitro gate in the UI is {}. There is no purchase surface.",
                             rencord_media::nitro_gate_in_ui()
                         ))),
                 ),
