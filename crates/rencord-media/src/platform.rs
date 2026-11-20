@@ -123,7 +123,21 @@ unsafe extern "C" {
 pub fn backend_detail(backend: CaptureBackend) -> String {
     match backend {
         CaptureBackend::WindowsGraphicsCapture => {
-            "Windows.Graphics.Capture is selected on Windows. DXGI duplication is the fallback when capture-for-window is refused.".into()
+            #[cfg(target_os = "windows")]
+            {
+                match probe_windows_capture() {
+                    Ok(name) => format!(
+                        "{name} is available. DXGI duplication is the fallback when a window cannot be captured."
+                    ),
+                    Err(err) => format!(
+                        "Windows capture did not open ({err}). DXGI duplication remains the fallback."
+                    ),
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                "Windows.Graphics.Capture is selected on Windows. DXGI duplication is the fallback when capture-for-window is refused.".into()
+            }
         }
         CaptureBackend::PipeWirePortal => {
             let probe = probe_linux_portal();

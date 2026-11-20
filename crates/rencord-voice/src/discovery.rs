@@ -426,14 +426,16 @@ mod tests {
         let server_addr = server.local_addr().unwrap();
         let stranger = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let client = bind_for(server_addr).await.unwrap();
-        let client_addr = client.local_addr().unwrap();
         tokio::spawn(async move {
             let mut buf = [0u8; 128];
             loop {
-                let Ok((_, _)) = server.recv_from(&mut buf).await else {
+                // Reply to the address the probe came from. On Windows a socket
+                // bound to 0.0.0.0 reports local_addr 0.0.0.0, and send_to that
+                // address never arrives, so the client would time out.
+                let Ok((_, peer)) = server.recv_from(&mut buf).await else {
                     break;
                 };
-                let _ = stranger.send_to(&[9u8; 74], client_addr).await;
+                let _ = stranger.send_to(&[9u8; 74], peer).await;
                 let mut good = [0u8; 74];
                 good[1] = 2;
                 good[3] = 70;
@@ -441,7 +443,7 @@ mod tests {
                 let ip = b"127.0.0.1";
                 good[8..8 + ip.len()].copy_from_slice(ip);
                 good[72..74].copy_from_slice(&9u16.to_be_bytes());
-                let _ = server.send_to(&good, client_addr).await;
+                let _ = server.send_to(&good, peer).await;
             }
         });
         let found = discover(&client, server_addr, 3, MediaRole::Stream, &fast())
