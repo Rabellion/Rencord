@@ -46,13 +46,13 @@ Several native Rust clients already exist. Rencord is aimed at the gaps that sho
 
 Serein, Concord, and Yapfast are further along as daily drivers. Rencord's Milestone 1 is the shell, the text path, and a voice engine whose jitter buffer is the part worth keeping.
 
-## Screenshot placeholders
+## Screenshots
 
-These files are labeled placeholders. They are not pictures of the app.
+Captured from `rencord --demo` on Linux (X11, software GL). These are the real window, not mockups. Markdown is still drawn as text, and **Join voice** runs the in-memory loopback rather than a Discord UDP session.
 
-| Shell | Voice bar |
+| Guild, channels, DMs, and the timeline | After Join voice (loopback stats) |
 | :---: | :---: |
-| <img src="docs/screenshots/shell.svg" alt="PLACEHOLDER: guild rail, channel list, and message timeline. Not a captured screenshot." width="480" /> | <img src="docs/screenshots/shell.svg" alt="PLACEHOLDER: voice bar with adaptive jitter stats. Not a captured screenshot." width="480" /> |
+| <img src="docs/screenshots/shell.png" alt="Rencord demo: guild rail, general and voice channels, Charles DM, message timeline, composer" width="480" /> | <img src="docs/screenshots/voice.png" alt="Rencord demo after Join voice, status line showing loopback played, concealed, hard gaps, and target delay" width="480" /> |
 
 ## Feature status
 
