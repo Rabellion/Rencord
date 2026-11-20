@@ -1,12 +1,19 @@
 [package]
 name = "rencord-media"
 version = "0.1.0"
-description = "Go Live quality, HDR policy, and stream-worker protocol types"
+description = "Go Live capture, shared-memory frames, and the stream worker"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[[bin]]
+name = "rencord-stream"
+path = "src/bin/rencord-stream.rs"
+
 [dependencies]
+memmap2 = "0.9"
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true

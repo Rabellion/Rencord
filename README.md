@@ -45,7 +45,7 @@ Several native Rust clients already exist. Rencord is aimed at the gaps that sho
 | --- | --- | --- |
 | **Voice cut-outs** | Adaptive jitter target from 40&nbsp;ms to 120&nbsp;ms, Opus PLC and in-band FEC, and a one-frame time-stretch instead of a hard skip. A loss simulation beats a fixed 40&nbsp;ms / 8-slot window at 1.5% and 5% loss. | Not measured on a live Discord call. Acoustic echo cancellation and noise suppression are not included. |
 | **Interface** | GPUI Kit 0.10. Direction A layout. The default theme is Onyx Ink: a true-black canvas, `#15152A` hairlines, 8 px gaps, a `#4F6BFF` accent with black ink on the banner, Inter for the UI, and JetBrains Mono for timestamps and status. Dark (Crisp Minimal), Ash, and Light stay selectable. Ctrl/Cmd+K, density, and type size are in settings. No Nitro surface. | Not a screen-reader pass. Plugins are still out. Layouts B and C remain behind `--layout`. |
-| **Streaming** | Quality presets up to 2160p120 are defined and are not hidden behind a Nitro check. The UI must not promise that Discord will accept them. | No capture, no encoder, no Go Live socket. An out-of-process worker is a typed protocol only. |
+| **Streaming** | Presets up to 2160p120 are not hidden behind a Nitro check. `rencord-stream` captures in another process and publishes frames through shared memory. The default request is 720p30. | No hardware encoder yet. The Linux portal and the Windows / macOS capturers are probed, not opened from the picker. Discord may still reject a preset. |
 | **HDR** | Policy code tone-maps HDR to SDR unless both peers are Rencord and an SFU passthrough test has succeeded. That test has not been run. | No HDR capture. |
 
 Serein, Concord, and Yapfast are further along as daily drivers. Milestone 1 is the shell and the text path. Milestone 2 adds a voice websocket and UDP session, tested against a local stub, with mute, deafen, and gain. Milestone 3 is the quieter window described in [docs/design/UX.md](docs/design/UX.md). None of this has been signed into a real Discord voice server.
@@ -78,7 +78,7 @@ Honest status for this repository. "Implemented" means the code path and tests e
 | Voice join, audio in and out | Partial | `LiveCall` speaks the voice gateway and UDP against a local stub: identify or resume, IP discovery, select protocol, `aead_xchacha20_poly1305_rtpsize`, speaking, and a DAVE prepare / transition-ready exchange. Encrypted Opus is echoed through the adaptive jitter buffer. Mute, deafen, and per-SSRC gain are in that path. **Join voice** still runs the loopback, then opens the default cpal devices. Settings lists device names and remembers the choice; that name is not yet passed into cpal. A live Discord voice server was not used. |
 | DAVE (E2EE) | Implemented | `davey` 0.2. Two-member MLS encrypt/decrypt test. Opcode routing keeps the transport up when a welcome fails. |
 | Adaptive jitter buffer | Implemented | See [Voice](#voice). |
-| Screen share / camera / Go Live | Not implemented | Presets and the worker command enum only. |
+| Screen share / camera / Go Live | Partial | `rencord-stream` is a separate process. Synthetic preview frames cross the IPC socket and a shared-memory map. Platform capturers are named and probed. Encode, RTP, and the viewer are not in this build. |
 | HDR | Policy only | Tone-map to SDR by default. |
 | Notifications, keyring, tray, hotkeys | Stub | In-process notification sink. OS keyring is the intended next store; Milestone 1 uses the private file. |
 | Themes, density, quick switcher | Implemented | Onyx Ink is the default. Dark, Ash, and Light remain. Compact, Cozy, and Spacious. Direction A is the default; B and C stay behind `--layout`. Ctrl/Cmd+K. Alt+arrows move channels. |
@@ -227,11 +227,11 @@ The UI does not embed egui. Protocol crates do not depend on GPUI.
 | 3b. Other layouts | Behind `--layout` | `b` keyboard-first and `c` unified sidebar stay in the binary. They are not the default. |
 | 4. Threads, search, uploads, notifications | Not started | OS keyring behind the existing `SecretStore` trait. |
 | 5. Voice against Discord | Not started | Point `LiveCall` at a real voice server and keep DAVE rekeys without dropping the call. |
-| 6. Go Live | Not started | Per-OS capture, H.264, out-of-process worker, presets up to 2160p120 with no Nitro checkbox. The UI will show Discord's documented caps and require an explicit acknowledgement before requesting more. 120 fps only when the display reports that refresh. |
+| 6. Go Live | Capture and worker on `main` | `rencord-stream` publishes preview frames over IPC and shared memory. Presets go up to 2160p120 with no Nitro checkbox; the default request is 720p30. Encode, the Go Live socket, and the viewer follow. 120 fps is offered only when the display reports that refresh. |
 | 7. HDR between Rencord users | Not started | Tone-map to BT.709 8-bit unless both peers are Rencord and an SFU passthrough test has succeeded. |
 | 8. Files over the attachment cap | Not started | Discord enforces the upload size on the server, so the client cannot lift it. When a file is over the account cap, one dialog offers a saved default: re-encode video or downscale images to fit, upload to Litterbox, Catbox, or a host the user configures and post the link (Rencord shows an inline preview), or split the file into parts. |
 
-Go Live and HDR stay policy-only until those milestones. The UI must not promise that Discord will accept a preset.
+HDR stays policy-only until that milestone. The UI must not promise that Discord will accept a Go Live preset. The capture worker publishes preview frames; it does not send them to Discord.
 
 ## FAQ
 

@@ -6405,6 +6405,9 @@ version = "0.1.0"
 name = "rencord-media"
 version = "0.1.0"
 dependencies = [
+ "memmap2",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 
