@@ -442,6 +442,10 @@ impl LiveCall {
         for message in self.session.handle(description) {
             self.send_json(message).await?;
         }
+        if let Some(package) = self.session.take_key_package() {
+            self.send_binary(VoiceOpcode::MlsKeyPackage, &package)
+                .await?;
+        }
         let key = self
             .session
             .secret_key
@@ -454,6 +458,10 @@ impl LiveCall {
             self.send_json(speaking).await?;
         }
         self.phase = self.session.phase;
+        // The interval is measured from hello, which is already behind us.
+        // The first beat the caller sees should still be a full interval away.
+        self.next_beat = Instant::now() + self.beat_every;
+        self.awaiting_ack = false;
         let _ = TRANSPORT_MODE;
         Ok(())
     }
@@ -464,19 +472,30 @@ impl LiveCall {
     /// read timeout of its own because a quiet control channel is normal.
     pub async fn poll_control(&mut self) -> Result<(), VoiceLinkError> {
         let frame = loop {
+            let beat_at = self.next_beat;
             tokio::select! {
-                _ = tokio::time::sleep_until(self.next_beat) => self.beat().await?,
+                biased;
                 frame = self.next_frame() => break frame?,
+                _ = tokio::time::sleep_until(beat_at) => self.beat().await?,
             }
         };
+        self.dispatch_frame(frame).await?;
+        Ok(())
+    }
+
+    async fn dispatch_frame(&mut self, frame: VoiceFrame) -> Result<(), VoiceLinkError> {
         let outgoing = self.session.handle(frame);
         for message in outgoing {
             self.send_json(message).await?;
         }
         for commit in std::mem::take(&mut self.session.commits_to_send) {
-            let mut payload = commit.commit;
-            payload.extend(commit.welcome.unwrap_or_default());
+            let payload =
+                crate::session::commit_welcome_payload(&commit.commit, commit.welcome.as_deref());
             self.send_binary(VoiceOpcode::MlsCommitWelcome, &payload)
+                .await?;
+        }
+        if let Some(package) = self.session.take_key_package() {
+            self.send_binary(VoiceOpcode::MlsKeyPackage, &package)
                 .await?;
         }
         if let Some(speaking) = self.session.speaking_message(!self.muted) {
@@ -674,7 +693,22 @@ mod tests {
                     ))
                     .await
                     .unwrap();
-                let speaking = socket.next().await.unwrap().unwrap().into_text().unwrap();
+                let next = socket.next().await.unwrap().unwrap();
+                let speaking = match next {
+                    WsMessage::Binary(bytes) => {
+                        assert_eq!(bytes[0], VoiceOpcode::MlsKeyPackage as u8, "{bytes:?}");
+                        socket
+                            .next()
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .into_text()
+                            .unwrap()
+                            .to_string()
+                    }
+                    WsMessage::Text(text) => text.to_string(),
+                    other => panic!("expected key package or speaking, got {other:?}"),
+                };
                 assert!(speaking.contains("\"op\":5"), "{speaking}");
                 socket
                     .send(WsMessage::Text(
@@ -987,7 +1021,10 @@ mod tests {
             ))
             .await
             .unwrap();
-            ws.next().await.unwrap().unwrap(); // speaking
+            let next = ws.next().await.unwrap().unwrap();
+            if matches!(next, WsMessage::Binary(_)) {
+                ws.next().await.unwrap().unwrap(); // speaking after the key package
+            }
             script(ws).await
         });
         (format!("ws://{addr}"), task)
@@ -1048,7 +1085,7 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_is_sent_each_interval_and_acks_the_last_seq() {
-        let (url, server) = control_server(30, false, |mut ws| async move {
+        let (url, server) = control_server(400, false, |mut ws| async move {
             ws.send(text(r#"{"op":5,"d":{"ssrc":9,"speaking":0},"seq":7}"#))
                 .await
                 .unwrap();
