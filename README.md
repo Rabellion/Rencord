@@ -40,19 +40,19 @@ Several native Rust clients already exist. Rencord is aimed at the gaps that sho
 | | What you get today | What is still ahead |
 | --- | --- | --- |
 | **Voice cut-outs** | Adaptive jitter target from 40&nbsp;ms to 120&nbsp;ms, Opus PLC and in-band FEC, and a one-frame time-stretch instead of a hard skip. A loss simulation beats a fixed 40&nbsp;ms / 8-slot window at 1.5% and 5% loss. | Not measured on a live Discord call. Acoustic echo cancellation and noise suppression are not included. |
-| **Interface** | One GPUI window (GPUI Kit 0.10). No egui, no Electron. | No themes, plugins, or virtualized million-row timeline. |
+| **Interface** | GPUI Kit 0.10. AMOLED, dark, and light tokens, a virtualized timeline, Ctrl/Cmd+K, and settings for density, type size, and audio device names. No Nitro surface. | Not a screen-reader pass. Plugins are still out. |
 | **Streaming** | Quality presets up to 2160p120 are defined and are not hidden behind a Nitro check. The UI must not promise that Discord will accept them. | No capture, no encoder, no Go Live socket. An out-of-process worker is a typed protocol only. |
 | **HDR** | Policy code tone-maps HDR to SDR unless both peers are Rencord and an SFU passthrough test has succeeded. That test has not been run. | No HDR capture. |
 
-Serein, Concord, and Yapfast are further along as daily drivers. Milestone 1 is the shell and the text path. Milestone 2 adds a voice websocket and UDP session, tested against a local stub, with mute, deafen, and gain. Neither milestone has been signed into a real Discord voice server.
+Serein, Concord, and Yapfast are further along as daily drivers. Milestone 1 is the shell and the text path. Milestone 2 adds a voice websocket and UDP session, tested against a local stub, with mute, deafen, and gain. Milestone 3 is the quieter window described in [docs/design/UX.md](docs/design/UX.md). None of this has been signed into a real Discord voice server.
 
 ## Screenshots
 
-Captured from `rencord --demo` on Linux (X11, software GL) after Milestone 2. These are the real window, not mockups. Markdown is still drawn as text. **Join voice** runs the in-memory loopback and then tries to open the default cpal devices. It does not open a Discord UDP session.
+Captured from `rencord --demo` on Linux (X11, software GL). These are the real window. Dark is the default. AMOLED is `--theme amoled` and uses true black for the conversation. **Join voice** still runs the in-memory loopback and then tries to open the default cpal devices. It does not open a Discord UDP session.
 
-| Guild, channels, DMs, and the timeline | After Join voice (loopback stats) |
+| Dark | AMOLED |
 | :---: | :---: |
-| <img src="docs/screenshots/shell.png" alt="Rencord demo: guild rail, channels, composer, and Mute, Deafen, Volume, Join voice" width="480" /> | <img src="docs/screenshots/voice.png" alt="Rencord demo after Join voice, status line showing loopback played, concealed, hard gaps, and target delay" width="480" /> |
+| <img src="docs/screenshots/dark.png" alt="Rencord demo in the dark theme: server rail, channel sidebar, virtualized messages with avatars, member list, voice card" width="480" /> | <img src="docs/screenshots/amoled.png" alt="Rencord demo in the AMOLED theme with a true-black conversation surface" width="480" /> |
 
 ## Feature status
 
@@ -63,8 +63,8 @@ Honest status for this repository. "Implemented" means the code path and tests e
 | Token login | Implemented | Paste a user token. Stored in a `0600` file under the data directory. |
 | Official / QR / MFA login | Not in this build | Needs an ephemeral `https://discord.com/login` webview: WebView2 or WKWebView on Windows and macOS (`gpui-wry`, which does not cover Linux) and a separate GTK4 / WebKitGTK 6 window on Linux. No captcha solver. |
 | Guild list, channel list, DM list | Implemented | Demo fixture plus REST bootstrap (`/users/@me`, guilds, channels, DMs). |
-| Message history | Implemented | Bounded to 200 messages per channel in memory, with a SQLite copy. |
-| Markdown | Implemented | Headings, quotes, fenced code, bold, italic, inline code, links, mentions, spoilers. Rendered as GPUI text. |
+| Message history | Implemented | Bounded to 4000 messages per channel in memory, with a SQLite copy. The timeline is a uniform virtual list. |
+| Markdown | Implemented | Headings, quotes, fenced code, bold, italic, inline code, links, mentions, spoilers. Drawn as styled runs inside the row. A fenced block is flattened onto that row. |
 | Sending messages | Implemented locally; REST client tested against a mock | `POST /channels/{id}/messages` exists. The demo composer appends locally. A live send was not verified. |
 | Gateway live updates | Implemented against a local socket | Identify, heartbeat, `READY`, `MESSAGE_CREATE`. After the socket drops, the client reconnects and sends Resume with the saved session id and sequence. Not verified against Discord's gateway. |
 | Voice join, audio in and out | Partial | `LiveCall` speaks the voice gateway and UDP against a local stub: identify or resume, IP discovery, select protocol, `aead_xchacha20_poly1305_rtpsize`, speaking, and a DAVE prepare / transition-ready exchange. Encrypted Opus is echoed through the adaptive jitter buffer. Mute, deafen, and per-SSRC gain are in that path. The desktop **Join voice** button still runs the loopback, then opens the default cpal input and output when the machine has them. There is no device picker yet. A live Discord voice server was not used. |
@@ -73,7 +73,10 @@ Honest status for this repository. "Implemented" means the code path and tests e
 | Screen share / camera / Go Live | Not implemented | Presets and the worker command enum only. |
 | HDR | Policy only | Tone-map to SDR by default. |
 | Notifications, keyring, tray, hotkeys | Stub | In-process notification sink. OS keyring is the intended next store; Milestone 1 uses the private file. |
-| Threads, forums, uploads, reactions, search | Not implemented | |
+| Themes, density, quick switcher | Implemented | AMOLED, dark, and light. Compact and cozy row heights. Ctrl/Cmd+K. Alt+arrows move channels. Settings holds type size, device names, and jitter stats. |
+| Search | Partial | Filters the open channel. It does not search the account. |
+| Reactions, reply, edit | Local only | Counts and composer modes in the demo session. Not sent to Discord. |
+| Threads, forums, uploads | Not implemented | |
 
 ## Build
 
@@ -91,7 +94,13 @@ cargo test --workspace
 cargo run -p rencord-desktop -- --demo
 ```
 
-`--demo` opens the GPUI window on local fixture data. It does not contact Discord. Omit `--demo` to paste a token.
+`--demo` opens the GPUI window on local fixture data. It does not contact Discord. `--theme amoled`, `--theme dark`, or `--theme light` picks the starting palette. `--bench` prints startup, RSS, and frame gaps, then quits. Omit `--demo` to paste a token.
+
+```sh
+cargo run -p rencord-desktop --bin rencord-measure -- --offline
+```
+
+The budgets and the numbers from this machine are in [docs/design/UX.md](docs/design/UX.md). Release on this Linux host: first frame 117 ms, RSS 137 MiB with the demo history, frame p50 16.7 ms, release binary 63 MB. Cached channel switches averaged 669 ns. A 120 Hz display was not measured.
 
 `RENCORD_DATA_DIR` overrides the data directory. The default is `$XDG_DATA_HOME/rencord` or `~/.local/share/rencord`.
 
@@ -185,7 +194,7 @@ The UI does not embed egui. Protocol crates do not depend on GPUI.
 | --- | --- | --- |
 | 1. Shell and adaptive jitter | On `main` | GPUI window, token login, guild and DM lists, markdown history, local send, gateway identify against a local socket, jitter simulation. |
 | 2. Live voice path | On `main` | Gateway resume, voice websocket + UDP discovery, transport cipher, speaking, DAVE control frames, mute, deafen, per-SSRC gain, default cpal devices. Local stubs only. |
-| 3. UI | Next | Themes, virtualized timeline, command palette, keyboard navigation, settings, device picker. |
+| 3. UI | In this tree | AMOLED / dark / light, virtualized timeline, quick switcher, keyboard travel, settings, device name list. Measurements are in [docs/design/UX.md](docs/design/UX.md). |
 | 4. Threads, search, uploads, notifications | Not started | OS keyring behind the existing `SecretStore` trait. |
 | 5. Voice against Discord | Not started | Point `LiveCall` at a real voice server and keep DAVE rekeys without dropping the call. |
 | 6. Go Live | Not started | Per-OS capture, H.264, out-of-process worker, presets up to 2160p120 with no Nitro checkbox. The UI will show Discord's documented caps and require an explicit acknowledgement before requesting more. 120 fps only when the display reports that refresh. |

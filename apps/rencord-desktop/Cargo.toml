@@ -15,6 +15,10 @@ path = "src/lib.rs"
 name = "rencord"
 path = "src/main.rs"
 
+[[bin]]
+name = "rencord-measure"
+path = "src/measure.rs"
+
 [dependencies]
 async-channel.workspace = true
 gpui-kit.workspace = true

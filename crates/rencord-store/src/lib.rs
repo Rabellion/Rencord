@@ -10,7 +10,7 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::Path;
 
-const MESSAGE_CAP: usize = 200;
+const MESSAGE_CAP: usize = 4000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
