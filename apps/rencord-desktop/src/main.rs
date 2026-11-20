@@ -65,11 +65,11 @@ fn main() {
     let app = gpui_kit::application().with_assets(Assets);
     app.run(move |cx| {
         gpui_kit::init(cx);
-        let _ = cx
-            .text_system()
-            .add_fonts(vec![Cow::Borrowed(include_bytes!(
-                "../assets/fonts/Figtree-wght.ttf"
-            ))]);
+        let _ = cx.text_system().add_fonts(vec![
+            Cow::Borrowed(include_bytes!("../assets/fonts/Figtree-Regular.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/Figtree-Medium.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/Figtree-SemiBold.ttf")),
+        ]);
         cx.bind_keys([
             KeyBinding::new("ctrl-k", QuickSwitcher, None),
             KeyBinding::new("cmd-k", QuickSwitcher, None),
@@ -93,6 +93,8 @@ fn main() {
         ]);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(1180.), px(760.)), cx)),
+            // Client decorations drop the desktop app-menu button. Settings stays in the dock.
+            window_decorations: Some(WindowDecorations::Client),
             ..Default::default()
         };
         gpui_kit::open_window(options, cx, move |window, cx| {
@@ -118,6 +120,7 @@ struct RencordWindow {
     bench_last: Instant,
     frame_us: Vec<u128>,
     collapsed: HashSet<&'static str>,
+    pinned_top: bool,
 }
 
 impl RencordWindow {
@@ -181,6 +184,7 @@ impl RencordWindow {
             bench_last: Instant::now(),
             frame_us: Vec::new(),
             collapsed: HashSet::new(),
+            pinned_top: false,
         }
     }
 
@@ -842,6 +846,13 @@ impl RencordWindow {
         if self.timeline.item_count() != count {
             self.timeline.reset(count);
         }
+        if self.shell.demo && !self.bench && !self.pinned_top {
+            self.timeline.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.),
+            });
+            self.pinned_top = true;
+        }
         if let Some(index) = self.shell.take_jump() {
             self.timeline.scroll_to_reveal_item(index);
         }
@@ -1283,23 +1294,7 @@ impl RencordWindow {
                             .items_center()
                             .justify_between()
                             .child(paint("Voice Connected", 0x23a559, 12.))
-                            .child(
-                                div()
-                                    .id("voice-leave")
-                                    .size(px(28.))
-                                    .rounded(px(14.))
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .bg(rgb(0xb91c1c))
-                                    .child(icon("phone", 16., 0xffffff))
-                                    .on_click(move |_, _, cx| {
-                                        view.update(cx, |this, cx| {
-                                            this.shell.leave_voice();
-                                            cx.notify();
-                                        });
-                                    }),
-                            ),
+                            .child(hang_up_button(view)),
                     )
                     .child(paint("voice", palette.text, 14.))
                     .child(paint(
@@ -1682,6 +1677,46 @@ fn hint_bar(palette: Palette, text: String) -> impl IntoElement {
         .text_color(rgb(palette.muted))
         .bg(rgb(palette.elevated))
         .child(Label::new(text))
+}
+
+fn hang_up_button(view: Entity<RencordWindow>) -> impl IntoElement {
+    let group = SharedString::from("voice-leave-group");
+    let hide = group.clone();
+    let show = group.clone();
+    h_flex()
+        .group(group)
+        .id("voice-leave")
+        .relative()
+        .size(px(32.))
+        .flex_shrink_0()
+        .rounded(px(6.))
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|style| style.bg(rgb(0xf23f43)))
+        .child(
+            div()
+                .group_hover(hide, |style| style.opacity(0.))
+                .child(icon("phone", 20., 0xf23f43)),
+        )
+        .child(
+            h_flex()
+                .absolute()
+                .top(px(0.))
+                .left(px(0.))
+                .size(px(32.))
+                .items_center()
+                .justify_center()
+                .opacity(0.)
+                .group_hover(show, |style| style.opacity(1.))
+                .child(icon("phone", 20., 0xffffff)),
+        )
+        .on_click(move |_, _, cx| {
+            view.update(cx, |this, cx| {
+                this.shell.leave_voice();
+                cx.notify();
+            });
+        })
 }
 
 fn dock_circle(
@@ -2249,6 +2284,8 @@ fn code_block(
     font_px: f32,
 ) -> impl IntoElement {
     let copy_text = text.clone();
+    let copy_group = SharedString::from(format!("code-copy-{id}-{index}"));
+    let copy_hover = copy_group.clone();
     let mut lines = v_flex().w_full().overflow_hidden();
     for (line_index, line) in text.split('\n').enumerate() {
         lines = lines.child(
@@ -2263,6 +2300,7 @@ fn code_block(
         );
     }
     v_flex()
+        .group(copy_group)
         .w_full()
         .bg(rgb(palette.code_bg))
         .rounded(px(12.))
@@ -2280,11 +2318,17 @@ fn code_block(
                     12.,
                 ))
                 .child(
-                    div()
+                    h_flex()
                         .id(SharedString::from(format!("copy-{id}-{index}")))
+                        .size(px(28.))
+                        .rounded(px(6.))
+                        .items_center()
+                        .justify_center()
                         .cursor_pointer()
-                        .px(px(6.))
-                        .child(Label::new("Copy"))
+                        .opacity(0.)
+                        .group_hover(copy_hover, |style| style.opacity(1.))
+                        .hover(|style| style.bg(rgb(palette.hover)))
+                        .child(icon("copy", 16., palette.muted))
                         .on_click(move |_, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
                         }),
@@ -2546,6 +2590,7 @@ fn icon(name: &str, size: f32, color: u32) -> Svg {
         "compass" => include_str!("../../../docs/design/icons/compass.svg"),
         "phone" => include_str!("../../../docs/design/icons/phone.svg"),
         "send" => include_str!("../../../docs/design/icons/send.svg"),
+        "copy" => include_str!("../../../docs/design/icons/copy.svg"),
         "star" => include_str!("../../../docs/design/icons/star.svg"),
         "mic-off" => include_str!("../../../docs/design/icons/mic-off.svg"),
         "deafen-off" => include_str!("../../../docs/design/icons/deafen-off.svg"),
@@ -2635,6 +2680,7 @@ fn paint(text: impl Into<String>, color: u32, size: f32) -> impl IntoElement {
         .text_color(rgb(color))
         .line_height(px(size + 4.))
         .font_family("Figtree")
+        .font_weight(FontWeight::NORMAL)
         .child(text.into())
 }
 

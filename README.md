@@ -52,7 +52,7 @@ Serein, Concord, and Yapfast are further along as daily drivers. Milestone 1 is 
 
 ## Screenshots
 
-Captured from `rencord --demo --layout a` on Linux (X11, software GL). The default look is Crisp Minimal: a `#16181D` canvas, 12 px gaps, 12 px rounded panels, Figtree, and photo avatars. Onyx (`--theme amoled`) uses the same panels on a `#000000` canvas. `--voice` opens the loopback call. `--density compact` tightens the channel rows. **Join voice** runs the in-memory loopback and then tries to open the default cpal devices. It does not open a Discord UDP session.
+Captured from `rencord --demo --layout a` on Linux (X11, software GL). The default look is Crisp Minimal: a `#16181D` canvas, 12 px gaps, 12 px rounded panels, bundled Figtree, and photo avatars. The window uses client-side decorations, so the desktop app-menu button is not part of the chrome. Settings stays in the user dock. Onyx (`--theme amoled`) uses the same panels on a `#000000` canvas. `--voice` opens the loopback call. `--density compact` tightens the channel rows. **Join voice** runs the in-memory loopback and then tries to open the default cpal devices. It does not open a Discord UDP session.
 
 | Crisp | Voice |
 | :---: | :---: |
