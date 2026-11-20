@@ -6378,6 +6378,7 @@ dependencies = [
  "rencord-platform",
  "rencord-store",
  "rencord-voice",
+ "serde_json",
  "tokio",
  "tracing",
 ]

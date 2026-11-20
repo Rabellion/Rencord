@@ -44,7 +44,7 @@ Several native Rust clients already exist. Rencord is aimed at the gaps that sho
 | | What you get today | What is still ahead |
 | --- | --- | --- |
 | **Voice cut-outs** | Adaptive jitter target from 40&nbsp;ms to 120&nbsp;ms, Opus PLC and in-band FEC, and a one-frame time-stretch instead of a hard skip. A loss simulation beats a fixed 40&nbsp;ms / 8-slot window at 1.5% and 5% loss. | Not measured on a live Discord call. Acoustic echo cancellation and noise suppression are not included. |
-| **Interface** | GPUI Kit 0.10. AMOLED, dark, and light tokens, a virtualized timeline, Ctrl/Cmd+K, and settings for density, type size, and audio device names. No Nitro surface. | Not a screen-reader pass. Plugins are still out. |
+| **Interface** | GPUI Kit 0.10. Direction A is the window: rail, channels, grouped messages, member list, and a flush user panel. Onyx, Dark, Ash, and Light all pass WCAG AA. Ctrl/Cmd+K, density, and type size are in settings. No Nitro surface. | Not a screen-reader pass. Plugins are still out. Layouts B and C remain behind `--layout`. |
 | **Streaming** | Quality presets up to 2160p120 are defined and are not hidden behind a Nitro check. The UI must not promise that Discord will accept them. | No capture, no encoder, no Go Live socket. An out-of-process worker is a typed protocol only. |
 | **HDR** | Policy code tone-maps HDR to SDR unless both peers are Rencord and an SFU passthrough test has succeeded. That test has not been run. | No HDR capture. |
 
@@ -52,11 +52,19 @@ Serein, Concord, and Yapfast are further along as daily drivers. Milestone 1 is 
 
 ## Screenshots
 
-Captured from `rencord --demo` on Linux (X11, software GL). These are the real window. Dark is the default. AMOLED is `--theme amoled` and uses true black for the conversation. **Join voice** still runs the in-memory loopback and then tries to open the default cpal devices. It does not open a Discord UDP session.
+Captured from `rencord --demo --layout a` on Linux (X11, software GL). Direction A is the default. Dark is the default theme. Ash is `--theme ash`. Onyx is `--theme amoled`. Light is `--theme light`. `--voice` opens the loopback call. `--density compact` tightens the channel rows. **Join voice** (click the voice channel, or pass `--voice`) runs the in-memory loopback and then tries to open the default cpal devices. It does not open a Discord UDP session.
 
-| Dark | AMOLED |
+| Dark | Ash |
 | :---: | :---: |
-| <img src="docs/screenshots/dark.png" alt="Rencord demo in the dark theme: server rail, channel sidebar, virtualized messages with avatars, member list, voice card" width="480" /> | <img src="docs/screenshots/amoled.png" alt="Rencord demo in the AMOLED theme with a true-black conversation surface" width="480" /> |
+| <img src="docs/design/directions/a-dark.png" alt="Rencord Direction A in Dark: round server rail, channel list, grouped messages, member list, user panel" width="480" /> | <img src="docs/design/directions/a-ash.png" alt="Rencord Direction A in Ash, with the #383A40 composer" width="480" /> |
+
+| Onyx | Light |
+| :---: | :---: |
+| <img src="docs/design/directions/a-amoled.png" alt="Rencord Direction A in Onyx, true black rail and near-black chat" width="480" /> | <img src="docs/design/directions/a-light.png" alt="Rencord Direction A in Light" width="480" /> |
+
+| Voice connected | Compact |
+| :---: | :---: |
+| <img src="docs/design/directions/a-voice.png" alt="Voice Connected strip above the user panel, with mute, deafen, settings, and disconnect" width="480" /> | <img src="docs/design/directions/a-compact.png" alt="Direction A at compact density" width="480" /> |
 
 ## Feature status
 
@@ -67,8 +75,8 @@ Honest status for this repository. "Implemented" means the code path and tests e
 | Token login | Implemented | Paste a user token. Stored in a `0600` file under the data directory. |
 | Official / QR / MFA login | Not in this build | Needs an ephemeral `https://discord.com/login` webview: WebView2 or WKWebView on Windows and macOS (`gpui-wry`, which does not cover Linux) and a separate GTK4 / WebKitGTK 6 window on Linux. No captcha solver. |
 | Guild list, channel list, DM list | Implemented | Demo fixture plus REST bootstrap (`/users/@me`, guilds, channels, DMs). |
-| Message history | Implemented | Bounded to 4000 messages per channel in memory, with a SQLite copy. The timeline is a uniform virtual list. |
-| Markdown | Implemented | Headings, quotes, fenced code, bold, italic, inline code, links, mentions, spoilers. Drawn as styled runs inside the row. A fenced block is flattened onto that row. |
+| Message history | Implemented | Bounded to 4000 messages per channel in memory, with a SQLite copy. The timeline is a variable-height virtual list. |
+| Markdown | Implemented | Headings, quotes, fenced code, bold, italic, inline code, links, mentions, spoilers. A fenced block keeps its lines, a monospace face, a background, and a Copy button. |
 | Sending messages | Implemented locally; REST client tested against a mock | `POST /channels/{id}/messages` exists. The demo composer appends locally. A live send was not verified. |
 | Gateway live updates | Implemented against a local socket | Identify, heartbeat, `READY`, `MESSAGE_CREATE`. After the socket drops, the client reconnects and sends Resume with the saved session id and sequence. Not verified against Discord's gateway. |
 | Voice join, audio in and out | Partial | `LiveCall` speaks the voice gateway and UDP against a local stub: identify or resume, IP discovery, select protocol, `aead_xchacha20_poly1305_rtpsize`, speaking, and a DAVE prepare / transition-ready exchange. Encrypted Opus is echoed through the adaptive jitter buffer. Mute, deafen, and per-SSRC gain are in that path. **Join voice** still runs the loopback, then opens the default cpal devices. Settings lists device names and remembers the choice; that name is not yet passed into cpal. A live Discord voice server was not used. |
@@ -77,9 +85,9 @@ Honest status for this repository. "Implemented" means the code path and tests e
 | Screen share / camera / Go Live | Not implemented | Presets and the worker command enum only. |
 | HDR | Policy only | Tone-map to SDR by default. |
 | Notifications, keyring, tray, hotkeys | Stub | In-process notification sink. OS keyring is the intended next store; Milestone 1 uses the private file. |
-| Themes, density, quick switcher | Implemented | AMOLED, dark, and light. Compact and cozy row heights. Ctrl/Cmd+K. Alt+arrows move channels. Settings holds type size, device names, and jitter stats. |
-| Search | Partial | Filters the open channel. It does not search the account. |
-| Reactions, reply, edit | Local only | Counts and composer modes in the demo session. Not sent to Discord. |
+| Themes, density, quick switcher | Implemented | Onyx, Dark, Ash, and Light. Compact, Cozy, and Spacious. Direction A is the default; B and C stay behind `--layout`. Ctrl/Cmd+K. Alt+arrows move channels. |
+| Search | Implemented locally | `from:`, `in:`, `has:`, `before:`, and `after:` across cached channels, plus the guild search URL. A hit jumps to that message. Not verified against Discord's search service. |
+| Reactions, reply, edit | Implemented locally; REST client tested against a mock | Optimistic update with rollback. Demo mode does not call Discord. |
 | Threads, forums, uploads | Not implemented | |
 
 ## Build
@@ -98,7 +106,7 @@ cargo test --workspace
 cargo run -p rencord-desktop -- --demo
 ```
 
-`--demo` opens the GPUI window on local fixture data. It does not contact Discord. `--theme amoled`, `--theme dark`, or `--theme light` picks the starting palette. `--bench` prints startup, RSS, and frame gaps, then quits. Omit `--demo` to paste a token.
+`--demo` opens the GPUI window on local fixture data. It does not contact Discord. `--theme amoled`, `--theme dark`, `--theme ash`, or `--theme light` picks the starting palette. `--layout a` is the default; `b` and `c` are the other presets. `--density compact` tightens the channel list. `--voice` starts the loopback call. `--bench` prints startup, RSS, and frame gaps, then quits. Omit `--demo` to paste a token.
 
 ```sh
 cargo run -p rencord-desktop --bin rencord-measure -- --offline
@@ -108,7 +116,7 @@ cargo run -p rencord-desktop --bin rencord-measure -- --offline
 
 | Action | Keys |
 | --- | --- |
-| Quick switcher | Ctrl+K or Cmd+K. Esc closes it. The header button is labeled Ctrl K. |
+| Quick switcher | Ctrl+K or Cmd+K. Esc closes it. The header search icon opens it too. |
 | Next / previous channel | Alt+Down / Alt+Up |
 | Next / previous server | Ctrl+Alt+Down / Ctrl+Alt+Up |
 | Settings | Ctrl+, or Cmd+, or the Settings button |
@@ -219,8 +227,8 @@ The UI does not embed egui. Protocol crates do not depend on GPUI.
 | --- | --- | --- |
 | 1. Shell and adaptive jitter | On `main` | GPUI window, token login, guild and DM lists, markdown history, local send, gateway identify against a local socket, jitter simulation. |
 | 2. Live voice path | On `main` | Gateway resume, voice websocket + UDP discovery, transport cipher, speaking, DAVE control frames, mute, deafen, per-SSRC gain, default cpal devices. Local stubs only. |
-| 3. UI fixes | Ready to land | Variable-height code blocks, REST reply/edit/delete/reactions, named audio devices, cross-channel search, AccessKit labels, WCAG AA themes (Onyx, Dark, Ash, Light), and refresh reporting. Shared chrome from the research note: flush circular dock, no second server-name bar, Compact/Cozy/Spacious, Ctrl+I inbox, local favorites. |
-| 3b. Layout directions | Open pull request, not merged | `--layout a` Discord-like, `b` keyboard-first, `c` unified sidebar with a floating voice card. Comparison and screenshots: [docs/design/DIRECTIONS.md](docs/design/DIRECTIONS.md). |
+| 3. UI | Chosen layout, ready to land | Direction A: Discord-shaped window with WCAG AA themes (Onyx, Dark, Ash, Light), grouped messages, hover actions, a flush user panel, and the six fixes (variable-height code blocks, REST reply/edit/delete/reactions, named audio devices, cross-channel search, AccessKit labels, refresh reporting). Screenshots: [docs/design/DIRECTIONS.md](docs/design/DIRECTIONS.md). |
+| 3b. Other layouts | Behind `--layout` | `b` keyboard-first and `c` unified sidebar stay in the binary. They are not the default. |
 | 4. Threads, search, uploads, notifications | Not started | OS keyring behind the existing `SecretStore` trait. |
 | 5. Voice against Discord | Not started | Point `LiveCall` at a real voice server and keep DAVE rekeys without dropping the call. |
 | 6. Go Live | Not started | Per-OS capture, H.264, out-of-process worker, presets up to 2160p120 with no Nitro checkbox. The UI will show Discord's documented caps and require an explicit acknowledgement before requesting more. 120 fps only when the display reports that refresh. |

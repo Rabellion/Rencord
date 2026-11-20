@@ -129,6 +129,8 @@ pub struct Palette {
     pub chat: u32,
     pub members: u32,
     pub elevated: u32,
+    /// Composer and search fill. Lighter than the chat on Ash, dark on Onyx.
+    pub input: u32,
     pub hover: u32,
     pub selected: u32,
     pub text: u32,
@@ -155,6 +157,7 @@ impl Palette {
                 chat: 0x070709,
                 members: 0x0b0b0c,
                 elevated: 0x141416,
+                input: 0x1e1f22,
                 hover: 0x1a1a1c,
                 selected: 0x222226,
                 text: 0xf2f3f5,
@@ -176,6 +179,7 @@ impl Palette {
                 chat: 0x313338,
                 members: 0x2b2d31,
                 elevated: 0x232428,
+                input: 0x383a40,
                 hover: 0x3a3c41,
                 selected: 0x404249,
                 text: 0xf2f3f5,
@@ -197,6 +201,7 @@ impl Palette {
                 chat: 0x1a1b1e,
                 members: 0x15161a,
                 elevated: 0x232428,
+                input: 0x383a40,
                 hover: 0x2b2d31,
                 selected: 0x35373c,
                 text: 0xf2f3f5,
@@ -218,6 +223,7 @@ impl Palette {
                 chat: 0xffffff,
                 members: 0xf7f7f8,
                 elevated: 0xffffff,
+                input: 0xebedef,
                 hover: 0xeaebee,
                 selected: 0xe0e1e6,
                 text: 0x1e1f22,
@@ -352,6 +358,7 @@ fn desaturate(palette: Palette, saturation: f32) -> Palette {
         &mut palette.chat,
         &mut palette.members,
         &mut palette.elevated,
+        &mut palette.input,
         &mut palette.hover,
         &mut palette.selected,
         &mut palette.text,
@@ -431,9 +438,13 @@ mod tests {
             let palette = Palette::for_mode(mode);
             let text = contrast_ratio(palette.text, palette.chat);
             let muted = contrast_ratio(palette.muted, palette.chat);
+            let field = contrast_ratio(palette.text, palette.input);
+            let placeholder = contrast_ratio(palette.muted, palette.input);
             let accent = contrast_ratio(palette.accent_text, palette.accent);
             assert!(text >= 4.5, "{mode:?} text {text}");
             assert!(muted >= 4.5, "{mode:?} muted {muted}");
+            assert!(field >= 4.5, "{mode:?} field {field}");
+            assert!(placeholder >= 4.5, "{mode:?} placeholder {placeholder}");
             assert!(accent >= 4.5, "{mode:?} accent {accent}");
         }
     }

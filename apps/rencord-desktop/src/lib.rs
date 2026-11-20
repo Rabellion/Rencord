@@ -119,11 +119,85 @@ impl Shell {
     }
 
     pub fn demo() -> Self {
-        Self::fresh(
+        let mut shell = Self::fresh(
             Session::demo(),
             true,
             vec!["Demo data is local. Nothing is sent to Discord.".into()],
-        )
+        );
+        shell.seed_showcase();
+        shell
+    }
+
+    fn seed_showcase(&mut self) {
+        let channel = Snowflake::new(100);
+        let ada = self.session.user.clone().unwrap();
+        let charles = User {
+            id: Snowflake::new(2),
+            username: "charles".into(),
+            global_name: Some("Charles".into()),
+            discriminator: None,
+            bot: false,
+        };
+        let lovelace = User {
+            id: Snowflake::new(3),
+            username: "lovelace".into(),
+            global_name: Some("Lovelace".into()),
+            discriminator: None,
+            bot: false,
+        };
+        self.session.messages.insert(
+            channel,
+            vec![
+                Message {
+                    id: Snowflake::new(1000),
+                    channel_id: channel,
+                    author: ada.clone(),
+                    content: "Pushed the jitter notes. **Rencord** should stay under 200 MiB idle.".into(),
+                    timestamp: "Today at 3:41 PM".into(),
+                },
+                Message {
+                    id: Snowflake::new(1001),
+                    channel_id: channel,
+                    author: ada.clone(),
+                    content: "```rust\nfn main() {\n    let answer = 42;\n}\n```".into(),
+                    timestamp: "Today at 3:41 PM".into(),
+                },
+                Message {
+                    id: Snowflake::new(1002),
+                    channel_id: channel,
+                    author: charles.clone(),
+                    content: "replying to 1000: That buffer is the whole point. Mention <@1> if the call drops.".into(),
+                    timestamp: "Today at 3:44 PM".into(),
+                },
+                Message {
+                    id: Snowflake::new(1003),
+                    channel_id: channel,
+                    author: lovelace,
+                    content: "Write-up is here: [jitter notes](https://example.com/jitter). The preview can sit under the link.\nattachment:bench.png".into(),
+                    timestamp: "Today at 3:51 PM".into(),
+                },
+                Message {
+                    id: Snowflake::new(1004),
+                    channel_id: channel,
+                    author: charles,
+                    content: "Shipping the voice dock next. No shop, no quests.".into(),
+                    timestamp: "Today at 4:02 PM".into(),
+                },
+            ],
+        );
+        self.reactions.insert(
+            1000,
+            vec![Reaction {
+                emoji: "wave".into(),
+                count: 3,
+                mine: true,
+            }],
+        );
+        self.members = vec![
+            "Ada · Online".into(),
+            "Charles · In voice".into(),
+            "Lovelace · Idle".into(),
+        ];
     }
 
     /// Demo session plus a long cached history so the virtual list has work.
@@ -323,6 +397,7 @@ impl Shell {
 
     pub fn leave_voice(&mut self) {
         self.session.voice_channel = None;
+        self.voice_report = None;
         self.session.status_line = "Left voice".into();
     }
 

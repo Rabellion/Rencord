@@ -1,71 +1,60 @@
 # Layout directions
 
-Three presets share one session, the Onyx / Dark / Ash / Light themes, and one message list. Switch them with Settings > Layout or `--layout a|b|c`. This pull request is not merged until one direction is chosen.
+Direction A is the chosen layout and the default. `--layout a` (or no flag) opens the Discord-shaped window. B and C stay in the same binary behind `--layout b` and `--layout c`, and behind Settings > Layout. They are not the product.
 
-The November 2026 research note is reflected in the shared chrome: no second server-name bar, a flush dock of separate circular mic, deafen, and settings buttons, Compact / Cozy / Spacious plus independent font, UI scale, and server-icon size, a soft ping wash instead of harsh yellow, Ctrl+K with a Ctrl+/ cheat sheet, Ctrl+I mentions with Mark all read, local favorites, member list hidden under 1100 px and the channel column under 760 px, and a split-pane toggle (Ctrl+\\). Icons in `docs/design/icons/` are original 24 px `currentColor` strokes. A runtime pack can live in `~/.config/rencord/icon-pack/`. No Discord asset files are in the repo.
+## A. Discord, perfected — chosen
 
-Icons in `docs/design/icons/` are original 24 px strokes (hash, speaker, pin, inbox, search). They are not Discord's files. `discord_install_icon_dir()` only reports a local install path if one exists. It does not copy those assets into the repo.
+Familiar rail, channel sidebar, conversation, member list, and a user panel at the bottom of the sidebar. No shop, gift button, or boost banner.
 
-## A. Discord, perfected
+What the window does:
 
-`--layout a`
+- 48 px rail tiles. A home button, a separator, server marks, another separator, then add and explore. The selected tile eases from a circle to a squircle and grows a pill.
+- Channel rows use the clean-room hash, speaker, and pin icons. Categories are uppercase and collapsible in label only. The selected row is filled. Mentions use a red count.
+- The chat header is one bar: hash, name, topic, and icons for threads, pins, the member list, search, and inbox. There is no second bar above it.
+- Messages group by author. Names use role colors that stay above WCAG AA on every theme. Timestamps are muted. Avatars are 40 px and centered. Reply, edit, and delete are icons on a bar that appears on hover.
+- The demo channel holds a code block with Copy, a reply, an `@Ada` mention wash, a link preview, a reaction, and an image attachment.
+- Search and the composer use a themed fill (`#383A40` on Ash and Dark, `#1E1F22` on Onyx, `#EBEDEF` on Light), with placeholder text. The composer has attach, GIF, and emoji icons.
+- The user panel is flush: avatar, status dot, name, status, and round mic, deafen, and settings buttons. A call adds a Voice Connected strip with a disconnect button.
+- The member list is `ONLINE — 3`, with a status dot and an activity line.
+- Type is Inter at the Discord scale (11 / 13 / 15 / 16). Icons are the 24 px `currentColor` strokes in `docs/design/icons/`.
 
-Familiar rail, channel sidebar, conversation, member list, voice card at the bottom of the sidebar. Same places a Discord user already looks, without a shop, gift button, or boost banner. Code blocks, reply, edit, and delete sit on the message.
+Themes are Onyx, Dark, Ash, and Light. Body text, muted text, field text, placeholder text, and white-on-accent pass WCAG AA 4.5:1. Compact, Cozy, and Spacious change channel-row and server-icon size. Font size, UI scale, and icon size stay independent.
 
-Borrows the information architecture people already know.
-
-Pros: lowest learning cost, screenshots match the muscle memory of the official client, density and keyboard shortcuts are the improvement.
-
-Cons: still four columns, so a narrow window feels tight. The member list is often empty space.
-
-Performance: this is the layout the bench used. Debug build on this machine, software GL: first frame 251 ms, RSS about 183 MiB, frame p50 16.7 ms. The X server did not report a refresh interval (`refresh_hz=unreported`). A 16.7 ms gap is what a 60 Hz compositor produces. A 120 Hz budget would be 8.3 ms. That display was not attached, so 120 Hz is not a measured result. GPUI is asked to follow the display interval. This build does not set a 60 fps cap.
-
-## B. Keyboard-first
+## B. Keyboard-first — still behind the flag
 
 `--layout b`
 
-The server rail and channel tree are gone. A one-line bar says the quick switcher is home. The conversation fills the window. A narrow split pane on the right names the second channel and holds the voice card. Ctrl+K is the way to move.
+The rail and channel tree are gone. A one-line bar says the quick switcher is home. The conversation fills the window. A narrow split pane on the right names the second channel and holds the voice card. Ctrl+K is the way to move. The second pane does not yet render that channel's messages.
 
-Borrows Linear and Raycast: the palette is the navigation, chrome stays out of the way.
-
-Pros: more room for the message and the code block. Fewer things to tab through.
-
-Cons: the second pane does not yet render that channel's messages (this guild's only other channel is voice, so the pane says there is no second text channel). Discoverability of servers is worse until the palette is learned.
-
-Performance: same list and same session as A. Hiding the rail removes a column of buttons. That does not change the channel-switch budget (805 ns average over 200 cached switches in `rencord-measure --offline`).
-
-## C. Unified sidebar
+## C. Unified sidebar — still behind the flag
 
 `--layout c`
 
-Favorites and an inbox line sit above a combined server-and-channel column. The member list stays. The voice card floats over the bottom right, the stand-in for a picture-in-picture call.
-
-Borrows Arc's sidebar and Telegram's compact navigation. The inbox is a label, not a mention query yet.
-
-Pros: one place for "where am I" and a voice card that does not steal a row from the channel list.
-
-Cons: the floating card covers the composer on a short window. Favorites are a fixed "# general", not a user list.
-
-Performance: same data path. The extra labels are a handful of text nodes.
+Favorites and an inbox line sit above a combined server-and-channel column. The voice card floats over the bottom right. The floating card can cover the composer on a short window.
 
 ## Screenshots
 
-Captured from `rencord --demo` on Linux, X11, software GL.
+Captured from `rencord --demo --layout a` on Linux, X11, software GL. The pointer was parked on the title bar so hover chrome stays hidden.
 
-| | Dark | AMOLED |
-| --- | --- | --- |
-| A | [a-dark.png](directions/a-dark.png) | [a-amoled.png](directions/a-amoled.png) |
-| B | [b-dark.png](directions/b-dark.png) | [b-amoled.png](directions/b-amoled.png) |
-| C | [c-dark.png](directions/c-dark.png) | [c-amoled.png](directions/c-amoled.png) |
+| | |
+| --- | --- |
+| Dark | [a-dark.png](directions/a-dark.png) |
+| Ash | [a-ash.png](directions/a-ash.png) |
+| Onyx | [a-amoled.png](directions/a-amoled.png) |
+| Light | [a-light.png](directions/a-light.png) |
+| Voice connected | [a-voice.png](directions/a-voice.png) |
+| Compact | [a-compact.png](directions/a-compact.png) |
 
-## What the six fixes do in every layout
+B and C captures from the earlier pass are still in this folder (`b-*.png`, `c-*.png`). They are not the chosen direction.
 
-- Code blocks are multi-line, monospace, on the code background, with a Copy button and a small keyword highlight. The message list is GPUI's variable-height `list`, which measures and caches row heights.
-- Reply, edit, delete, and reactions update the session immediately. A signed-in window sends REST (`message_reference`, PATCH, DELETE, reaction PUT/DELETE) and rolls back if Discord returns an error. Demo mode stays local. Gateway `MESSAGE_DELETE` is decoded. Tests hit a local HTTP stub.
-- The device row calls `open_call_audio` with the chosen names. A missing device falls back to the default. Switching while a call session is open replaces the streams.
-- Search understands `from:`, `in:`, `has:`, `before:`, and `after:` across cached channels. A hit jumps to that message. `remote_search_path` builds Discord's guild search URL.
-- Focus rings use a 1 px accent border. The window root is an AccessKit document with a label. GPUI's `with_animation` already skips motion when reduced motion is on. Body text, muted text, and accent-on-white pass WCAG AA 4.5:1 on AMOLED, dark, and light.
-- Frame pacing is not capped at 60 in this code. The bench prints the display interval when the platform reports one.
+## Shared behavior
+
+- Code blocks are multi-line, monospace, on the code background, with a Copy button and a small keyword highlight. The message list is GPUI's variable-height `list`.
+- Reply, edit, delete, and reactions update the session immediately. A signed-in window sends REST and rolls back if Discord returns an error. Demo mode stays local.
+- The device row calls `open_call_audio` with the chosen names. A missing device falls back to the default.
+- Search understands `from:`, `in:`, `has:`, `before:`, and `after:` across cached channels. A hit jumps to that message.
+- The window root is an AccessKit document. GPUI's `with_animation` skips motion when reduced motion is on.
+- Frame pacing is not capped at 60 in this code. The bench prints the display interval when the platform reports one. This machine's X server did not report one (`refresh_hz=unreported`). A 16.7 ms gap is a 60 Hz compositor. 120 Hz was not measured.
 
 ## Files over the cap
 
