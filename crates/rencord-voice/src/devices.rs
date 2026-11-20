@@ -35,6 +35,32 @@ pub fn default_devices() -> AudioDevices {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceChoice {
+    pub name: String,
+    pub fell_back: bool,
+}
+
+/// Pick a device the host actually has. A missing name falls back to the default.
+pub fn choose_device(
+    requested: Option<&str>,
+    available: &[String],
+    fallback: Option<&str>,
+) -> DeviceChoice {
+    if let Some(name) = requested {
+        if available.iter().any(|item| item == name) {
+            return DeviceChoice {
+                name: name.to_owned(),
+                fell_back: false,
+            };
+        }
+    }
+    DeviceChoice {
+        name: fallback.unwrap_or("default").to_owned(),
+        fell_back: requested.is_some(),
+    }
+}
+
 pub fn backend_name() -> &'static str {
     if cfg!(feature = "cpal") {
         "cpal"
@@ -69,23 +95,46 @@ pub fn list_output_devices() -> Vec<String> {
     Vec::new()
 }
 
-/// Open the default microphone and speaker and run them through [`crate::CallAudio`].
-/// The returned streams must be kept alive. `outbound` receives sealed RTP packets
-/// from the microphone. Speaker samples are pulled from `inbound`.
+/// Open the named microphone and speaker, falling back to the defaults if a
+/// name is missing (unplugged). Streams stay alive for the life of [`AudioSession`].
 #[cfg(feature = "cpal")]
-pub fn attach_default_devices(
+pub fn attach_devices(
+    input_name: Option<&str>,
+    output_name: Option<&str>,
     audio: std::sync::Arc<std::sync::Mutex<crate::CallAudio>>,
     outbound: std::sync::mpsc::Sender<Vec<u8>>,
     inbound: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<i16>>>,
 ) -> Result<AudioSession, String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     let host = cpal::default_host();
+    let input_choice = choose_device(
+        input_name,
+        &list_input_devices(),
+        host.default_input_device()
+            .and_then(|device| device.name().ok())
+            .as_deref(),
+    );
+    let output_choice = choose_device(
+        output_name,
+        &list_output_devices(),
+        host.default_output_device()
+            .and_then(|device| device.name().ok())
+            .as_deref(),
+    );
     let input = host
-        .default_input_device()
-        .ok_or_else(|| "no default input device".to_owned())?;
+        .input_devices()
+        .map_err(|err| err.to_string())?
+        .find(|device| device.name().ok().as_deref() == Some(input_choice.name.as_str()))
+        .or_else(|| host.default_input_device())
+        .ok_or_else(|| "no input device".to_owned())?;
     let output = host
-        .default_output_device()
-        .ok_or_else(|| "no default output device".to_owned())?;
+        .output_devices()
+        .map_err(|err| err.to_string())?
+        .find(|device| device.name().ok().as_deref() == Some(output_choice.name.as_str()))
+        .or_else(|| host.default_output_device())
+        .ok_or_else(|| "no output device".to_owned())?;
+    let opened_input = input.name().unwrap_or_else(|_| input_choice.name.clone());
+    let opened_output = output.name().unwrap_or_else(|_| output_choice.name.clone());
     let input_config = input
         .default_input_config()
         .map_err(|err| err.to_string())?;
@@ -134,7 +183,20 @@ pub fn attach_default_devices(
     Ok(AudioSession {
         _input: input_stream,
         _output: output_stream,
+        input_name: opened_input,
+        output_name: opened_output,
+        input_fallback: input_choice.fell_back,
+        output_fallback: output_choice.fell_back,
     })
+}
+
+#[cfg(feature = "cpal")]
+pub fn attach_default_devices(
+    audio: std::sync::Arc<std::sync::Mutex<crate::CallAudio>>,
+    outbound: std::sync::mpsc::Sender<Vec<u8>>,
+    inbound: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<i16>>>,
+) -> Result<AudioSession, String> {
+    attach_devices(None, None, audio, outbound, inbound)
 }
 
 /// Owns the cpal streams so the callbacks keep running.
@@ -142,10 +204,14 @@ pub fn attach_default_devices(
 pub struct AudioSession {
     _input: cpal::Stream,
     _output: cpal::Stream,
+    pub input_name: String,
+    pub output_name: String,
+    pub input_fallback: bool,
+    pub output_fallback: bool,
 }
 
 #[cfg(feature = "cpal")]
-pub fn open_default_call_audio() -> Result<AudioSession, String> {
+pub fn open_call_audio(input: Option<&str>, output: Option<&str>) -> Result<AudioSession, String> {
     let audio = std::sync::Arc::new(std::sync::Mutex::new(
         crate::CallAudio::new(1, &[9; 32]).map_err(|err| err.to_string())?,
     ));
@@ -166,15 +232,33 @@ pub fn open_default_call_audio() -> Result<AudioSession, String> {
             }
         }
     });
-    attach_default_devices(audio, outbound, speaker)
+    attach_devices(input, output, audio, outbound, speaker)
+}
+
+#[cfg(feature = "cpal")]
+pub fn open_default_call_audio() -> Result<AudioSession, String> {
+    open_call_audio(None, None)
 }
 
 #[cfg(not(feature = "cpal"))]
-pub struct AudioSession;
+pub struct AudioSession {
+    pub input_name: String,
+    pub output_name: String,
+    pub input_fallback: bool,
+    pub output_fallback: bool,
+}
+
+#[cfg(not(feature = "cpal"))]
+pub fn open_call_audio(
+    _input: Option<&str>,
+    _output: Option<&str>,
+) -> Result<AudioSession, String> {
+    Err("cpal is not enabled".into())
+}
 
 #[cfg(not(feature = "cpal"))]
 pub fn open_default_call_audio() -> Result<AudioSession, String> {
-    Err("cpal is not enabled".into())
+    open_call_audio(None, None)
 }
 
 #[cfg(feature = "cpal")]
@@ -191,5 +275,16 @@ mod device_tests {
         let _ = list_input_devices();
         let _ = list_output_devices();
         let _ = default_devices();
+    }
+
+    #[test]
+    fn missing_device_falls_back_and_a_present_name_is_kept() {
+        let available = vec!["Mic".into(), "Speaker".into()];
+        let kept = choose_device(Some("Mic"), &available, Some("Speaker"));
+        assert_eq!(kept.name, "Mic");
+        assert!(!kept.fell_back);
+        let missing = choose_device(Some("Gone"), &available, Some("Speaker"));
+        assert_eq!(missing.name, "Speaker");
+        assert!(missing.fell_back);
     }
 }

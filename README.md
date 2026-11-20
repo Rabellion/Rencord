@@ -219,11 +219,12 @@ The UI does not embed egui. Protocol crates do not depend on GPUI.
 | --- | --- | --- |
 | 1. Shell and adaptive jitter | On `main` | GPUI window, token login, guild and DM lists, markdown history, local send, gateway identify against a local socket, jitter simulation. |
 | 2. Live voice path | On `main` | Gateway resume, voice websocket + UDP discovery, transport cipher, speaking, DAVE control frames, mute, deafen, per-SSRC gain, default cpal devices. Local stubs only. |
-| 3. UI | On `main` | AMOLED, dark, and light. Virtualized timeline, quick switcher, keyboard travel, settings (density, type size, device names, jitter). Measurements below and in [docs/design/UX.md](docs/design/UX.md). |
+| 3. UI | In progress, not on `main` | Variable-height code blocks, REST reply/edit/delete/reactions, device switching, search, accessibility, and refresh reporting. Three layout presets (`--layout a\|b\|c`) are compared in [docs/design/DIRECTIONS.md](docs/design/DIRECTIONS.md). Not merged until one is chosen. |
 | 4. Threads, search, uploads, notifications | Not started | OS keyring behind the existing `SecretStore` trait. |
 | 5. Voice against Discord | Not started | Point `LiveCall` at a real voice server and keep DAVE rekeys without dropping the call. |
 | 6. Go Live | Not started | Per-OS capture, H.264, out-of-process worker, presets up to 2160p120 with no Nitro checkbox. The UI will show Discord's documented caps and require an explicit acknowledgement before requesting more. 120 fps only when the display reports that refresh. |
 | 7. HDR between Rencord users | Not started | Tone-map to BT.709 8-bit unless both peers are Rencord and an SFU passthrough test has succeeded. |
+| 8. Files over the attachment cap | Not started | Discord enforces the upload size on the server, so the client cannot lift it. When a file is over the account cap, one dialog offers a saved default: re-encode video or downscale images to fit, upload to Litterbox, Catbox, or a host the user configures and post the link (Rencord shows an inline preview), or split the file into parts. |
 
 Go Live and HDR stay policy-only until those milestones. The UI must not promise that Discord will accept a preset.
 

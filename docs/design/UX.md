@@ -79,6 +79,20 @@ cargo run -p rencord-desktop --release --bin rencord -- --demo --bench
 cargo run -p rencord-desktop --bin rencord-measure -- --offline
 ```
 
+## Later: files over the attachment cap
+
+Not part of the current UI fixes. Discord rejects attachments above the account cap on the server. The client cannot remove that cap.
+
+The later milestone is one dialog, with a default the user can save:
+
+1. Compress to fit: re-encode video, or downscale and re-encode images.
+2. Upload the original to an external host (Litterbox, Catbox, or a host the user configures) and post the link. Rencord renders that link as an inline preview.
+3. Optionally split the file into parts.
+
+The dialog should be the only step. There is no second settings hunt and no Nitro upsell.
+
+Layout presets A, B, and C are compared in [DIRECTIONS.md](DIRECTIONS.md). They are not on `main`.
+
 ## What is still rough
 
 - Rows are one height, so a fenced code block is flattened onto the message line instead of growing the row.

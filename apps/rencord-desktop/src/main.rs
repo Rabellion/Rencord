@@ -39,6 +39,10 @@ fn main() {
         .windows(2)
         .find(|pair| pair[0] == "--theme")
         .and_then(|pair| ThemeMode::parse(&pair[1]));
+    let layout = args
+        .windows(2)
+        .find(|pair| pair[0] == "--layout")
+        .and_then(|pair| rencord_desktop::LayoutKind::parse(&pair[1]));
     let app = gpui_kit::application().with_assets(Assets);
     app.run(move |cx| {
         gpui_kit::init(cx);
@@ -58,7 +62,7 @@ fn main() {
             ..Default::default()
         };
         gpui_kit::open_window(options, cx, move |window, cx| {
-            cx.new(|cx| RencordWindow::new(demo, bench, theme, window, cx))
+            cx.new(|cx| RencordWindow::new(demo, bench, theme, layout, window, cx))
         })
         .expect("open Rencord window");
     });
@@ -72,6 +76,7 @@ struct RencordWindow {
     palette_input: Entity<InputState>,
     audio_session: Option<rencord_voice::AudioSession>,
     focus: FocusHandle,
+    timeline: ListState,
     bench: bool,
     bench_frames: u32,
     bench_last: Instant,
@@ -83,6 +88,7 @@ impl RencordWindow {
         demo: bool,
         bench: bool,
         theme: Option<ThemeMode>,
+        layout: Option<rencord_desktop::LayoutKind>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -93,6 +99,9 @@ impl RencordWindow {
         };
         if let Some(mode) = theme {
             shell.set_theme(mode);
+        }
+        if let Some(layout) = layout {
+            shell.prefs.layout = layout;
         }
         let token_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("User token (not stored until you connect)")
@@ -112,6 +121,7 @@ impl RencordWindow {
             palette_input,
             audio_session: None,
             focus,
+            timeline: ListState::new(0, ListAlignment::Bottom, px(160.)),
             bench,
             bench_frames: 0,
             bench_last: Instant::now(),
@@ -165,6 +175,20 @@ impl RencordWindow {
         println!("BENCH frame_p50_us={p50}");
         println!("BENCH frames={}", self.frame_us.len());
         println!("BENCH channel_switch_us={}", self.shell.last_switch_us);
+        match window.refresh_interval(cx) {
+            Some(interval) if !interval.is_zero() => {
+                let hz = 1.0 / interval.as_secs_f32();
+                println!("BENCH refresh_hz={hz:.2}");
+                println!("BENCH frame_budget_us={}", interval.as_micros());
+                println!("BENCH display_is_120hz={}", hz >= 110.0);
+            }
+            _ => {
+                println!("BENCH refresh_hz=unreported");
+                println!("BENCH display_is_120hz=false");
+            }
+        }
+        println!("BENCH inferred_120hz_budget_us=8333");
+        println!("BENCH pacing=gpui follows the display refresh interval and this build does not cap frames at 60");
         cx.quit();
     }
 
@@ -223,13 +247,99 @@ impl RencordWindow {
 
     fn send(&mut self, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value().to_string();
-        self.shell.send_local(&text);
+        if let Some(mutation) = self.shell.send_local(&text) {
+            self.dispatch_mutation(mutation, cx);
+        }
         cx.notify();
+    }
+
+    fn dispatch_mutation(&mut self, mutation: rencord_desktop::Mutation, cx: &mut Context<Self>) {
+        if self.shell.demo {
+            self.shell
+                .note("Demo keeps the change locally. A signed-in session would call Discord.");
+            return;
+        }
+        let Some(token) = Shell::load_token() else {
+            self.shell.rollback(&mutation);
+            self.shell
+                .note("No token stored. The change was rolled back.");
+            return;
+        };
+        let (tx, rx) = async_channel::bounded(1);
+        let outbound = mutation.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio");
+            let outcome = runtime.block_on(push_mutation(&token, &outbound));
+            let _ = tx.send_blocking(outcome);
+        });
+        let rollback = mutation;
+        cx.spawn(async move |this, cx| {
+            let Ok(outcome) = rx.recv().await else {
+                return;
+            };
+            this.update(cx, |view, cx| {
+                if let Err(err) = outcome {
+                    view.shell.rollback(&rollback);
+                    view.shell
+                        .note(format!("Discord rejected the change: {err}"));
+                } else {
+                    view.shell.note("Discord accepted the change.");
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn reopen_audio(&mut self) {
+        if self.audio_session.is_none() {
+            return;
+        }
+        let inputs = rencord_voice::list_input_devices();
+        let outputs = rencord_voice::list_output_devices();
+        let mut input = self.shell.prefs.input_device.clone();
+        let mut output = self.shell.prefs.output_device.clone();
+        if let Some(name) = &input {
+            if !inputs.iter().any(|item| item == name) {
+                input = None;
+            }
+        }
+        if let Some(name) = &output {
+            if !outputs.iter().any(|item| item == name) {
+                output = None;
+            }
+        }
+        match rencord_voice::open_call_audio(input.as_deref(), output.as_deref()) {
+            Ok(session) => {
+                if session.input_fallback || session.output_fallback {
+                    self.shell.note(format!(
+                        "A chosen device was missing. Using {} and {}.",
+                        session.input_name, session.output_name
+                    ));
+                } else {
+                    self.shell.note(format!(
+                        "Audio devices: {} / {}",
+                        session.input_name, session.output_name
+                    ));
+                }
+                self.shell.prefs.input_device = Some(session.input_name.clone());
+                self.shell.prefs.output_device = Some(session.output_name.clone());
+                self.audio_session = Some(session);
+            }
+            Err(err) => self.shell.note(format!("Could not switch devices: {err}")),
+        }
     }
 
     fn join_voice(&mut self) {
         self.shell.join_voice_demo();
-        match rencord_voice::open_default_call_audio() {
+        match rencord_voice::open_call_audio(
+            self.shell.prefs.input_device.as_deref(),
+            self.shell.prefs.output_device.as_deref(),
+        ) {
             Ok(session) => {
                 self.audio_session = Some(session);
                 self.shell
@@ -314,6 +424,8 @@ impl Render for RencordWindow {
         let palette = self.shell.prefs.palette();
         let root = div()
             .id("rencord-root")
+            .role(Role::Document)
+            .aria_label("Rencord")
             .track_focus(&self.focus)
             .size_full()
             .bg(rgb(palette.app_bg))
@@ -522,44 +634,40 @@ impl RencordWindow {
             ));
         }
         sidebar = sidebar.child(div().flex_1());
-        sidebar = sidebar.child(self.voice_card(
-            cx,
-            palette,
-            &status,
-            voice.as_ref(),
-            muted,
-            deafened,
-            gain,
-        ));
 
         let count = messages.len();
-        let row_h = density.row_px();
+        if self.timeline.item_count() != count {
+            self.timeline.reset(count);
+        }
+        if let Some(index) = self.shell.take_jump() {
+            self.timeline.scroll_to_reveal_item(index);
+        }
+        let timeline_state = self.timeline.clone();
         let list_messages = messages.clone();
         let list_palette = palette;
         let list_entity = this.clone();
         let list_reactions = reactions.clone();
-        let timeline = uniform_list("timeline", count, move |range, _window, _cx| {
-            range
-                .filter_map(|index| {
-                    let message = list_messages.get(index)?.clone();
-                    let grouped = index > 0
-                        && list_messages
-                            .get(index - 1)
-                            .is_some_and(|previous| previous.author.id == message.author.id);
-                    Some(message_row(
-                        list_entity.clone(),
-                        &message,
-                        grouped,
-                        list_reactions
-                            .get(&message.id.get())
-                            .cloned()
-                            .unwrap_or_default(),
-                        list_palette,
-                        row_h,
-                        font_px,
-                    ))
-                })
-                .collect()
+        let _density = density;
+        let timeline = list(timeline_state, move |index, _window, _cx| {
+            let Some(message) = list_messages.get(index).cloned() else {
+                return div().into_any_element();
+            };
+            let grouped = index > 0
+                && list_messages
+                    .get(index - 1)
+                    .is_some_and(|previous| previous.author.id == message.author.id);
+            message_row(
+                list_entity.clone(),
+                &message,
+                grouped,
+                list_reactions
+                    .get(&message.id.get())
+                    .cloned()
+                    .unwrap_or_default(),
+                list_palette,
+                font_px,
+            )
+            .into_any_element()
         })
         .h(px(520.));
 
@@ -604,6 +712,10 @@ impl RencordWindow {
                     ),
             )
             .child(div().flex_1().overflow_hidden().px(px(8.)).child(timeline));
+        let hits = self.shell.search_hits();
+        if !self.shell.search.trim().is_empty() {
+            chat = chat.child(search_hits_bar(this.clone(), &hits, palette));
+        }
         if let Some(id) = reply {
             chat = chat.child(hint_bar(palette, format!("Replying to {id}")));
         }
@@ -633,7 +745,8 @@ impl RencordWindow {
                 .text_color(rgb(palette.faint))
                 .text_size(px(12.))
                 .child(Label::new(format!(
-                    "{status}  ·  {theme_label}  ·  switch {switch_us} µs  ·  Alt+Up/Down channels  ·  no upsells"
+                    "{status}  ·  {theme_label}  ·  {}  ·  switch {switch_us} µs  ·  no upsells",
+                    self.shell.prefs.layout.label()
                 ))),
         );
 
@@ -658,12 +771,79 @@ impl RencordWindow {
             );
         }
 
-        let body = h_flex()
-            .size_full()
-            .child(rail)
-            .child(sidebar)
-            .child(chat)
-            .child(people);
+        let voice_panel =
+            self.voice_card(cx, palette, &status, voice.as_ref(), muted, deafened, gain);
+        let layout_kind = self.shell.prefs.layout;
+        let body = match layout_kind {
+            rencord_desktop::LayoutKind::Discord => h_flex()
+                .size_full()
+                .child(rail)
+                .child(sidebar.child(voice_panel))
+                .child(chat)
+                .child(people)
+                .into_any_element(),
+            rencord_desktop::LayoutKind::Keyboard => v_flex()
+                .size_full()
+                .child(
+                    h_flex()
+                        .h(px(40.))
+                        .px(px(12.))
+                        .items_center()
+                        .bg(rgb(palette.rail))
+                        .child(Label::new("Quick switcher is the home. Ctrl+K. Two panes.")),
+                )
+                .child(
+                    h_flex().flex_1().child(chat).child(
+                        v_flex()
+                            .w(px(280.))
+                            .h_full()
+                            .bg(rgb(palette.sidebar))
+                            .border_l_1()
+                            .border_color(rgb(palette.line))
+                            .child(section_label("Split pane", palette.faint))
+                            .child(Label::new(
+                                channels
+                                    .iter()
+                                    .find(|channel| {
+                                        Some(channel.id) != selected && channel.kind.is_text()
+                                    })
+                                    .map(|channel| format!("#{}", channel.name))
+                                    .unwrap_or_else(|| "No second channel".into()),
+                            ))
+                            .child(voice_panel),
+                    ),
+                )
+                .into_any_element(),
+            rencord_desktop::LayoutKind::Sidebar => div()
+                .relative()
+                .size_full()
+                .child(
+                    h_flex()
+                        .size_full()
+                        .child(
+                            v_flex()
+                                .w(px(300.))
+                                .h_full()
+                                .bg(rgb(palette.sidebar))
+                                .child(section_label("Favorites", palette.faint))
+                                .child(Label::new("# general"))
+                                .child(section_label("Inbox", palette.faint))
+                                .child(Label::new("Mentions stay in this list"))
+                                .child(h_flex().flex_1().child(rail).child(sidebar)),
+                        )
+                        .child(chat)
+                        .child(people),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .bottom(px(16.))
+                        .right(px(16.))
+                        .w(px(280.))
+                        .child(voice_panel),
+                )
+                .into_any_element(),
+        };
 
         let mut layer = div().size_full().relative().child(body);
         if palette_open {
@@ -858,6 +1038,10 @@ impl RencordWindow {
                             view.shell.cycle_theme();
                             cx.notify();
                         }))
+                        .child(small_button(this.clone(), "layout", "Layout", |view, cx| {
+                            view.shell.cycle_layout();
+                            cx.notify();
+                        }))
                         .child(small_button(
                             this.clone(),
                             "density",
@@ -953,7 +1137,10 @@ fn channel_row(
         .py(px(6.))
         .rounded(px(6.))
         .bg(rgb(bg))
+        .border_1()
+        .border_color(rgb(bg))
         .cursor_pointer()
+        .focus(|style| style.border_color(rgb(palette.accent)))
         .hover(move |style| style.bg(rgb(if active { bg } else { hover })))
         .child(Label::new(label))
         .on_click(move |_, _, cx| {
@@ -1048,6 +1235,7 @@ fn device_list(
                         } else {
                             this.shell.prefs.output_device = Some(owned);
                         }
+                        this.reopen_audio();
                         cx.notify();
                     });
                 }),
@@ -1083,7 +1271,6 @@ fn message_row(
     grouped: bool,
     reactions: Vec<rencord_desktop::Reaction>,
     palette: Palette,
-    row_h: f32,
     font_px: f32,
 ) -> impl IntoElement {
     let id = message.id;
@@ -1102,8 +1289,8 @@ fn message_row(
     let hover = palette.hover;
     h_flex()
         .id(SharedString::from(format!("msg-{id}")))
-        .h(px(row_h))
         .w_full()
+        .py(px(4.))
         .px(px(8.))
         .gap_2()
         .items_start()
@@ -1120,7 +1307,7 @@ fn message_row(
                         .text_color(rgb(palette.muted))
                         .child(Label::new(header)),
                 )
-                .child(markdown_line(&message.content, palette, font_px))
+                .child(message_blocks(&message.content, id, palette, font_px))
                 .child(reaction_line(view.clone(), id.get(), &reactions, palette)),
         )
         .child(
@@ -1133,8 +1320,208 @@ fn message_row(
                     id,
                     true,
                 ))
-                .child(text_action(view, format!("edit-{id}"), "Edit", id, false)),
+                .child(text_action(
+                    view.clone(),
+                    format!("edit-{id}"),
+                    "Edit",
+                    id,
+                    false,
+                ))
+                .child(delete_action(view, id)),
         )
+}
+
+fn delete_action(view: Entity<RencordWindow>, id: Snowflake) -> impl IntoElement {
+    div()
+        .id(SharedString::from(format!("delete-{id}")))
+        .px(px(6.))
+        .cursor_pointer()
+        .text_size(px(12.))
+        .child(Label::new("Delete"))
+        .on_click(move |_, _, cx| {
+            view.update(cx, |this, cx| {
+                if let Some(message) = this.shell.delete_local(id) {
+                    this.dispatch_mutation(rencord_desktop::Mutation::Delete { message }, cx);
+                }
+                cx.notify();
+            });
+        })
+}
+
+fn message_blocks(
+    content: &str,
+    id: Snowflake,
+    palette: Palette,
+    font_px: f32,
+) -> impl IntoElement {
+    let blocks = parse(content);
+    let mut column = v_flex().gap_1();
+    if blocks.is_empty() {
+        return column.child(markdown_line(content, palette, font_px));
+    }
+    for (index, block) in blocks.into_iter().enumerate() {
+        match block {
+            Block::Code { text, language } => {
+                column = column.child(code_block(id, index, text, language, palette, font_px));
+            }
+            Block::Paragraph { inlines }
+            | Block::Heading { inlines, .. }
+            | Block::Quote { inlines } => {
+                let mut plain = String::new();
+                collect_plain(&inlines, &mut plain);
+                column = column.child(markdown_line(&plain, palette, font_px));
+            }
+        }
+    }
+    column
+}
+
+fn code_block(
+    id: Snowflake,
+    index: usize,
+    text: String,
+    language: Option<String>,
+    palette: Palette,
+    font_px: f32,
+) -> impl IntoElement {
+    let copy_text = text.clone();
+    let mut lines = v_flex().w_full().overflow_hidden();
+    for (line_index, line) in text.split('\n').enumerate() {
+        lines = lines.child(
+            div()
+                .id(SharedString::from(format!(
+                    "code-{id}-{index}-{line_index}"
+                )))
+                .whitespace_nowrap()
+                .text_size(px((font_px - 1.0).max(12.0)))
+                .child(highlight_code_line(line, palette)),
+        );
+    }
+    v_flex()
+        .w_full()
+        .bg(rgb(palette.code_bg))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(rgb(palette.line))
+        .p(px(8.))
+        .gap_1()
+        .child(
+            h_flex()
+                .justify_between()
+                .items_center()
+                .child(Label::new(language.unwrap_or_else(|| "code".into())))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("copy-{id}-{index}")))
+                        .cursor_pointer()
+                        .px(px(6.))
+                        .child(Label::new("Copy"))
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(copy_text.clone()));
+                        }),
+                ),
+        )
+        .child(lines)
+}
+
+fn highlight_code_line(line: &str, palette: Palette) -> StyledText {
+    const KEYWORDS: &[&str] = &[
+        "fn", "let", "mut", "pub", "struct", "impl", "return", "if", "else", "for", "while", "use",
+        "mod", "match", "self",
+    ];
+    let mut text = String::new();
+    let mut runs = Vec::new();
+    let mut rest = line;
+    if rest.is_empty() {
+        rest = " ";
+    }
+    while !rest.is_empty() {
+        let (token, next) = split_token(rest);
+        let keyword = KEYWORDS.contains(&token);
+        text.push_str(token);
+        let mut font = font(".SystemUIFont");
+        if keyword {
+            font.weight = FontWeight::BOLD;
+        }
+        runs.push(TextRun {
+            len: token.len(),
+            font,
+            color: rgb(if keyword {
+                palette.accent
+            } else {
+                palette.text
+            })
+            .into(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        });
+        rest = next;
+    }
+    StyledText::new(text).with_runs(runs)
+}
+
+fn split_token(input: &str) -> (&str, &str) {
+    let mut end = 0;
+    for (index, ch) in input.char_indices() {
+        if index == 0 {
+            end = ch.len_utf8();
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                continue;
+            }
+            break;
+        }
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            end = index + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    input.split_at(end.max(1).min(input.len()))
+}
+
+fn search_hits_bar(
+    view: Entity<RencordWindow>,
+    hits: &[rencord_desktop::SearchHit],
+    palette: Palette,
+) -> impl IntoElement {
+    let mut column = v_flex()
+        .px(px(12.))
+        .py(px(6.))
+        .gap_1()
+        .bg(rgb(palette.elevated))
+        .child(Label::new(format!(
+            "{} local hits. Filters: from: in: has: before: after:",
+            hits.len()
+        )));
+    for hit in hits.iter().take(6) {
+        let channel_id = hit.channel_id;
+        let message_id = hit.message.id;
+        let label = format!(
+            "#{}  {}",
+            hit.channel_name,
+            hit.message.content.replace('\n', " ")
+        );
+        let row = view.clone();
+        column = column.child(
+            div()
+                .id(SharedString::from(format!("hit-{message_id}")))
+                .cursor_pointer()
+                .px(px(6.))
+                .py(px(2.))
+                .rounded(px(6.))
+                .hover(|style| style.bg(rgb(palette.hover)))
+                .child(Label::new(label))
+                .on_click(move |_, _, cx| {
+                    row.update(cx, |this, cx| {
+                        this.shell.jump_to(channel_id, message_id);
+                        this.shell.search.clear();
+                        cx.notify();
+                    });
+                }),
+        );
+    }
+    column
 }
 
 fn text_action(
@@ -1182,7 +1569,8 @@ fn reaction_line(
             .child(Label::new("+"))
             .on_click(move |_, _, cx| {
                 view.update(cx, |this, cx| {
-                    this.shell.toggle_reaction(message_id, "plus");
+                    let mutation = this.shell.toggle_reaction(message_id, "plus");
+                    this.dispatch_mutation(mutation, cx);
                     cx.notify();
                 });
             }),
@@ -1291,6 +1679,65 @@ fn collect_plain(inlines: &[Inline], out: &mut String) {
             }
         }
     }
+}
+
+async fn push_mutation(token: &str, mutation: &rencord_desktop::Mutation) -> Result<(), String> {
+    use rencord_desktop::Mutation;
+    let api = rencord_api::DiscordApi::new(rencord_model::Token::new(token.to_owned()));
+    match mutation {
+        Mutation::Create {
+            channel_id,
+            content,
+            reply_to,
+            ..
+        } => {
+            if let Some(reply) = reply_to {
+                api.reply_message(*channel_id, content, *reply)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| err.to_string())?;
+            } else {
+                api.send_message(*channel_id, content)
+                    .await
+                    .map(|_| ())
+                    .map_err(|err| err.to_string())?;
+            }
+        }
+        Mutation::Edit {
+            channel_id,
+            message_id,
+            next,
+            ..
+        } => {
+            api.edit_message(*channel_id, *message_id, next)
+                .await
+                .map(|_| ())
+                .map_err(|err| err.to_string())?;
+        }
+        Mutation::Delete { message } => {
+            api.delete_message(message.channel_id, message.id)
+                .await
+                .map_err(|err| err.to_string())?;
+        }
+        Mutation::React {
+            channel_id,
+            message_id,
+            emoji,
+            remove,
+        } => {
+            let id = rencord_model::Snowflake::new(*message_id);
+            if *remove {
+                api.remove_reaction(*channel_id, id, emoji)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            } else {
+                api.add_reaction(*channel_id, id, emoji)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn rss_kib() -> u64 {

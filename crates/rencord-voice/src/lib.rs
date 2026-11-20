@@ -22,8 +22,8 @@ pub use connection::{CallAudio, LiveCall, VoiceLinkError, VoiceTarget};
 pub use crypto::{TransportCipher, TRANSPORT_MODE};
 pub use dave::{DaveEngine, LiveDave, ScriptedDave};
 pub use devices::{
-    backend_name, default_devices, list_input_devices, list_output_devices,
-    open_default_call_audio, AudioSession,
+    backend_name, choose_device, default_devices, list_input_devices, list_output_devices,
+    open_call_audio, open_default_call_audio, AudioSession, DeviceChoice,
 };
 pub use jitter::{AdaptiveBuffer, AdaptiveConfig, JitterStats, Playout};
 pub use pipeline::{loopback_call, LoopbackReport};

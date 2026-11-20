@@ -5,6 +5,43 @@
 //! overlay fades.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LayoutKind {
+    /// Familiar server rail, channel list, chat, member list.
+    Discord,
+    /// Palette-first, two channel panes, little chrome.
+    Keyboard,
+    /// One sidebar with favorites and mentions, floating voice card.
+    Sidebar,
+}
+
+impl LayoutKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Discord => "Discord, perfected",
+            Self::Keyboard => "Keyboard-first",
+            Self::Sidebar => "Unified sidebar",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "a" | "discord" => Some(Self::Discord),
+            "b" | "keyboard" => Some(Self::Keyboard),
+            "c" | "sidebar" => Some(Self::Sidebar),
+            _ => None,
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Discord => Self::Keyboard,
+            Self::Keyboard => Self::Sidebar,
+            Self::Sidebar => Self::Discord,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThemeMode {
     Amoled,
     Dark,
@@ -106,7 +143,7 @@ impl Palette {
                 text: 0xf2f3f5,
                 muted: 0xa0a2a8,
                 faint: 0x6d6f76,
-                accent: 0x5b8cff,
+                accent: 0x1d4ed8,
                 accent_text: 0xffffff,
                 danger: 0xed4245,
                 line: 0x1a1a1a,
@@ -126,7 +163,7 @@ impl Palette {
                 text: 0xf2f3f5,
                 muted: 0xb5bac1,
                 faint: 0x80848e,
-                accent: 0x5865f2,
+                accent: 0x1d4ed8,
                 accent_text: 0xffffff,
                 danger: 0xed4245,
                 line: 0x2e3035,
@@ -146,7 +183,7 @@ impl Palette {
                 text: 0x1e1f22,
                 muted: 0x4e5058,
                 faint: 0x6d6f78,
-                accent: 0x5865f2,
+                accent: 0x1d4ed8,
                 accent_text: 0xffffff,
                 danger: 0xda373c,
                 line: 0xe1e2e4,
@@ -185,6 +222,7 @@ pub struct Preferences {
     pub theme: ThemeMode,
     pub density: Density,
     pub font_px: f32,
+    pub layout: LayoutKind,
     pub input_device: Option<String>,
     pub output_device: Option<String>,
 }
@@ -195,6 +233,7 @@ impl Default for Preferences {
             theme: ThemeMode::Dark,
             density: Density::Cozy,
             font_px: 15.0,
+            layout: LayoutKind::Discord,
             input_device: None,
             output_device: None,
         }
@@ -221,6 +260,29 @@ impl Preferences {
 mod tests {
     use super::*;
 
+    fn channel(hex: u32, index: u8) -> f32 {
+        let value = ((hex >> (index * 8)) & 0xff) as f32 / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn luminance(hex: u32) -> f32 {
+        // Stored as 0xRRGGBB.
+        let r = channel(hex, 2);
+        let g = channel(hex, 1);
+        let b = channel(hex, 0);
+        0.2126 * r + 0.7152 * g + 0.0722 * b
+    }
+
+    pub fn contrast_ratio(foreground: u32, background: u32) -> f32 {
+        let lighter = luminance(foreground).max(luminance(background));
+        let darker = luminance(foreground).min(luminance(background));
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
     #[test]
     fn amoled_is_true_black_and_themes_cycle() {
         let amoled = Palette::for_mode(ThemeMode::Amoled);
@@ -229,5 +291,18 @@ mod tests {
         assert_ne!(Palette::for_mode(ThemeMode::Dark).chat, 0x000000);
         assert_ne!(Palette::for_mode(ThemeMode::Light).text, amoled.text);
         assert_eq!(ThemeMode::Amoled.cycle().cycle().cycle(), ThemeMode::Amoled);
+    }
+
+    #[test]
+    fn body_text_meets_wcag_aa_on_every_theme() {
+        for mode in [ThemeMode::Amoled, ThemeMode::Dark, ThemeMode::Light] {
+            let palette = Palette::for_mode(mode);
+            let text = contrast_ratio(palette.text, palette.chat);
+            let muted = contrast_ratio(palette.muted, palette.chat);
+            let accent = contrast_ratio(palette.accent_text, palette.accent);
+            assert!(text >= 4.5, "{mode:?} text {text}");
+            assert!(muted >= 4.5, "{mode:?} muted {muted}");
+            assert!(accent >= 4.5, "{mode:?} accent {accent}");
+        }
     }
 }

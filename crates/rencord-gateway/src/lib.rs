@@ -45,6 +45,10 @@ pub enum GatewayEvent {
     },
     MessageCreate(Message),
     MessageUpdate(Message),
+    MessageDelete {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    },
     VoiceState(VoiceStateDispatch),
     VoiceServer(VoiceServerUpdate),
     Reconnect,
@@ -230,6 +234,16 @@ fn decode_dispatch(name: &str, data: Value) -> Result<Option<GatewayEvent>, Gate
                 session_id: ready.session_id,
                 user: ready.user,
                 guild_ids: ready.guilds.into_iter().map(|guild| guild.id).collect(),
+            })
+        }
+        "MESSAGE_DELETE" => {
+            let channel_id = data.get("channel_id").cloned().unwrap_or(Value::Null);
+            let message_id = data.get("id").cloned().unwrap_or(Value::Null);
+            let channel_id: Snowflake = serde_json::from_value(channel_id)?;
+            let message_id: Snowflake = serde_json::from_value(message_id)?;
+            Some(GatewayEvent::MessageDelete {
+                channel_id,
+                message_id,
             })
         }
         "MESSAGE_CREATE" | "MESSAGE_UPDATE" => {
@@ -466,5 +480,24 @@ mod tests {
         }
         assert!(saw_resumed, "gateway did not resume");
         runner.abort();
+    }
+
+    #[test]
+    fn message_delete_dispatch_carries_ids() {
+        let event = decode_dispatch(
+            "MESSAGE_DELETE",
+            serde_json::json!({"id": "9", "channel_id": "3"}),
+        )
+        .unwrap();
+        match event {
+            Some(GatewayEvent::MessageDelete {
+                channel_id,
+                message_id,
+            }) => {
+                assert_eq!(channel_id.get(), 3);
+                assert_eq!(message_id.get(), 9);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

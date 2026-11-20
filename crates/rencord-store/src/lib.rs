@@ -73,6 +73,14 @@ impl Session {
                 self.status_line = "Gateway ready".to_owned();
             }
             GatewayEvent::MessageCreate(message) => self.insert_message(message),
+            GatewayEvent::MessageDelete {
+                channel_id,
+                message_id,
+            } => {
+                if let Some(list) = self.messages.get_mut(&channel_id) {
+                    list.retain(|message| message.id != message_id);
+                }
+            }
             GatewayEvent::MessageUpdate(message) => {
                 if let Some(list) = self.messages.get_mut(&message.channel_id) {
                     if let Some(existing) = list.iter_mut().find(|item| item.id == message.id) {

@@ -1,6 +1,8 @@
 //! Desktop session controller. The GPUI binary renders this; tests drive it
 //! without opening a window.
 
+mod icons;
+mod search;
 mod theme;
 
 use rencord_model::{Message, Snowflake, User};
@@ -10,12 +12,42 @@ use rencord_voice::{backend_name, loopback_call, LoopbackReport};
 use std::collections::HashMap;
 use std::time::Instant;
 
-pub use theme::{token_summary, Density, Palette, Preferences, ThemeMode, MOTION_OVERLAY_MS};
+pub use icons::discord_install_icon_dir;
+pub use search::{guild_search_path, local_search, parse_message_query, MessageQuery, SearchHit};
+pub use theme::{
+    token_summary, Density, LayoutKind, Palette, Preferences, ThemeMode, MOTION_OVERLAY_MS,
+};
+
+#[derive(Clone, Debug)]
+pub enum Mutation {
+    Create {
+        local_id: Snowflake,
+        channel_id: Snowflake,
+        content: String,
+        reply_to: Option<Snowflake>,
+    },
+    Edit {
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        previous: String,
+        next: String,
+    },
+    Delete {
+        message: Message,
+    },
+    React {
+        channel_id: Snowflake,
+        message_id: u64,
+        emoji: String,
+        remove: bool,
+    },
+}
 
 #[derive(Clone, Debug)]
 pub struct Reaction {
     pub emoji: String,
     pub count: u32,
+    pub mine: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -39,6 +71,7 @@ pub struct Shell {
     pub members: Vec<String>,
     /// Last cached channel switch, in microseconds.
     pub last_switch_us: u128,
+    pub jump_index: Option<usize>,
 }
 
 impl Shell {
@@ -62,12 +95,14 @@ impl Shell {
             reactions: HashMap::new(),
             members: vec!["Ada".into(), "Charles".into(), "Lovelace".into()],
             last_switch_us: 0,
+            jump_index: None,
         };
         shell.reactions.insert(
             1000,
             vec![Reaction {
                 emoji: "wave".into(),
                 count: 2,
+                mine: false,
             }],
         );
         shell
@@ -114,6 +149,13 @@ impl Shell {
                 timestamp: format!("2026-11-20T00:{:02}:{:02}Z", (index / 60) % 60, index % 60),
             });
         }
+        shell.session.insert_message(Message {
+            id: Snowflake::new(90_000),
+            channel_id: Snowflake::new(100),
+            author: ada,
+            content: "```rust\nfn main() {\n    let answer = 42;\n}\n```".into(),
+            timestamp: "2026-11-20T01:00:00Z".into(),
+        });
         shell
     }
 
@@ -149,25 +191,32 @@ impl Shell {
         self.session.status_line = "Signed in".into();
     }
 
-    pub fn send_local(&mut self, content: &str) {
+    pub fn send_local(&mut self, content: &str) -> Option<Mutation> {
         let content = content.trim();
         if content.is_empty() {
-            return;
+            return None;
         }
         let Some(channel_id) = self.session.selected_channel else {
             self.note("Select a channel before sending.");
-            return;
+            return None;
         };
         if let Some(editing) = self.editing.take() {
             if let Some(list) = self.session.messages.get_mut(&channel_id) {
                 if let Some(message) = list.iter_mut().find(|message| message.id == editing) {
+                    let previous = message.content.clone();
                     message.content = content.to_owned();
                     self.note(format!("Edited message {editing}"));
-                    return;
+                    return Some(Mutation::Edit {
+                        channel_id,
+                        message_id: editing,
+                        previous,
+                        next: content.to_owned(),
+                    });
                 }
             }
         }
-        let prefix = if let Some(reply) = self.reply_to.take() {
+        let reply_to = self.reply_to.take();
+        let prefix = if let Some(reply) = reply_to {
             format!("replying to {reply}: ")
         } else {
             String::new()
@@ -195,6 +244,51 @@ impl Shell {
         });
         self.session.composer.clear();
         self.note(format!("Queued message in channel {channel_id}"));
+        Some(Mutation::Create {
+            local_id: id,
+            channel_id,
+            content: content.to_owned(),
+            reply_to,
+        })
+    }
+
+    pub fn rollback(&mut self, mutation: &Mutation) {
+        match mutation {
+            Mutation::Create {
+                local_id,
+                channel_id,
+                ..
+            } => {
+                if let Some(list) = self.session.messages.get_mut(channel_id) {
+                    list.retain(|message| message.id != *local_id);
+                }
+                self.note("Send rolled back");
+            }
+            Mutation::Edit {
+                channel_id,
+                message_id,
+                previous,
+                ..
+            } => {
+                if let Some(list) = self.session.messages.get_mut(channel_id) {
+                    if let Some(message) = list.iter_mut().find(|message| message.id == *message_id)
+                    {
+                        message.content = previous.clone();
+                    }
+                }
+                self.note("Edit rolled back");
+            }
+            Mutation::Delete { message } => {
+                self.session.insert_message(message.clone());
+                self.note("Delete rolled back");
+            }
+            Mutation::React {
+                message_id, emoji, ..
+            } => {
+                let _ = self.toggle_reaction(*message_id, emoji);
+                self.note("Reaction rolled back");
+            }
+        }
     }
 
     pub fn join_voice_demo(&mut self) {
@@ -243,6 +337,10 @@ impl Shell {
 
     pub fn cycle_theme(&mut self) {
         self.prefs.theme = self.prefs.theme.cycle();
+    }
+
+    pub fn cycle_layout(&mut self) {
+        self.prefs.layout = self.prefs.layout.cycle();
     }
 
     pub fn set_theme(&mut self, mode: ThemeMode) {
@@ -306,21 +404,7 @@ impl Shell {
         let Some(channel_id) = self.session.selected_channel else {
             return Vec::new();
         };
-        let query = self.search.trim().to_ascii_lowercase();
-        self.session
-            .messages_for(channel_id)
-            .iter()
-            .filter(|message| {
-                query.is_empty()
-                    || message.content.to_ascii_lowercase().contains(&query)
-                    || message
-                        .author
-                        .display_name()
-                        .to_ascii_lowercase()
-                        .contains(&query)
-            })
-            .cloned()
-            .collect()
+        self.session.messages_for(channel_id).to_vec()
     }
 
     pub fn begin_reply(&mut self, id: Snowflake) {
@@ -333,16 +417,113 @@ impl Shell {
         self.reply_to = None;
     }
 
-    pub fn toggle_reaction(&mut self, message_id: u64, emoji: &str) {
+    pub fn toggle_reaction(&mut self, message_id: u64, emoji: &str) -> Mutation {
+        let channel_id = self.session.selected_channel.unwrap_or(Snowflake::new(0));
         let list = self.reactions.entry(message_id).or_default();
-        if let Some(existing) = list.iter_mut().find(|item| item.emoji == emoji) {
+        if let Some(index) = list
+            .iter()
+            .position(|item| item.emoji == emoji && item.mine)
+        {
+            let existing = &mut list[index];
+            existing.count = existing.count.saturating_sub(1);
+            existing.mine = false;
+            if existing.count == 0 {
+                list.remove(index);
+            }
+            Mutation::React {
+                channel_id,
+                message_id,
+                emoji: emoji.to_owned(),
+                remove: true,
+            }
+        } else if let Some(existing) = list.iter_mut().find(|item| item.emoji == emoji) {
             existing.count = existing.count.saturating_add(1);
+            existing.mine = true;
+            Mutation::React {
+                channel_id,
+                message_id,
+                emoji: emoji.to_owned(),
+                remove: false,
+            }
         } else {
             list.push(Reaction {
                 emoji: emoji.to_owned(),
                 count: 1,
+                mine: true,
             });
+            Mutation::React {
+                channel_id,
+                message_id,
+                emoji: emoji.to_owned(),
+                remove: false,
+            }
         }
+    }
+
+    pub fn delete_local(&mut self, id: Snowflake) -> Option<Message> {
+        let channel_id = self.session.selected_channel?;
+        let list = self.session.messages.get_mut(&channel_id)?;
+        let index = list.iter().position(|message| message.id == id)?;
+        let message = list.remove(index);
+        self.reactions.remove(&id.get());
+        Some(message)
+    }
+
+    pub fn restore_message(&mut self, message: Message) {
+        self.session.insert_message(message);
+    }
+
+    pub fn replace_message_content(&mut self, id: Snowflake, content: &str) -> Option<String> {
+        let channel_id = self.session.selected_channel?;
+        let list = self.session.messages.get_mut(&channel_id)?;
+        let message = list.iter_mut().find(|message| message.id == id)?;
+        let previous = message.content.clone();
+        message.content = content.to_owned();
+        Some(previous)
+    }
+
+    pub fn search_hits(&self) -> Vec<SearchHit> {
+        local_search(&self.session, &self.search)
+    }
+
+    pub fn jump_to(&mut self, channel_id: Snowflake, message_id: Snowflake) {
+        self.select_channel_timed(channel_id);
+        self.jump_index = self
+            .session
+            .messages_for(channel_id)
+            .iter()
+            .position(|message| message.id == message_id);
+    }
+
+    pub fn take_jump(&mut self) -> Option<usize> {
+        self.jump_index.take()
+    }
+
+    /// Guild search path for the signed-in account. `from:` and `in:` names are
+    /// resolved against the cache when possible.
+    pub fn remote_search_path(&self) -> Option<String> {
+        let guild = self.session.selected_guild?;
+        let query = parse_message_query(&self.search);
+        let author_id = query.from.as_ref().and_then(|name| {
+            self.session
+                .messages
+                .values()
+                .flatten()
+                .find_map(|message| {
+                    let matches = message.author.display_name().eq_ignore_ascii_case(name)
+                        || message.author.username.eq_ignore_ascii_case(name)
+                        || message.author.id.get().to_string() == *name;
+                    matches.then_some(message.author.id)
+                })
+        });
+        let channel_id = query.in_channel.as_ref().and_then(|name| {
+            self.session
+                .channels
+                .values()
+                .find(|channel| channel.name.eq_ignore_ascii_case(name))
+                .map(|channel| channel.id)
+        });
+        Some(guild_search_path(guild, &query, author_id, channel_id))
     }
 
     pub fn palette_commands(&self) -> Vec<String> {
@@ -516,15 +697,21 @@ mod tests {
             shell.last_switch_us
         );
         assert!(shell.visible_messages().len() > 100);
-        shell.search = "bold".into();
-        assert!(shell.visible_messages().iter().all(|message| {
-            message.content.to_ascii_lowercase().contains("bold")
-                || message
-                    .author
-                    .display_name()
-                    .to_ascii_lowercase()
-                    .contains("bold")
-        }));
+        shell.search = "from:charles has:code".into();
+        assert!(!shell.search_hits().is_empty());
+        let hit = shell.search_hits()[0].clone();
+        shell.jump_to(hit.channel_id, hit.message.id);
+        assert_eq!(shell.session.selected_channel, Some(hit.channel_id));
+        shell.begin_edit(Snowflake::new(1000));
+        let edit = shell.send_local("changed").expect("edit");
+        shell.rollback(&edit);
+        assert!(shell
+            .session
+            .messages_for(Snowflake::new(100))
+            .iter()
+            .any(
+                |message| message.id == Snowflake::new(1000) && message.content.contains("Rencord")
+            ));
         shell.cycle_theme();
         assert_eq!(shell.prefs.theme, ThemeMode::Light);
         shell.begin_reply(Snowflake::new(1000));

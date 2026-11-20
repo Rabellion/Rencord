@@ -419,8 +419,15 @@ pub struct SessionDescription {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct MessageReference {
+    pub message_id: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct OutgoingMessage {
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_reference: Option<MessageReference>,
 }
 
 #[cfg(test)]

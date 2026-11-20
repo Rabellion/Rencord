@@ -5,7 +5,7 @@
 //! history, and message create. A per-route bucket honors `Retry-After`.
 
 use rencord_model::{Channel, Guild, Message, Snowflake, Token, User};
-use rencord_protocol::{OutgoingMessage, WireChannel, WireMessage};
+use rencord_protocol::{MessageReference, OutgoingMessage, WireChannel, WireMessage};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -98,9 +98,95 @@ impl DiscordApi {
         channel_id: Snowflake,
         content: &str,
     ) -> Result<Message, ApiError> {
+        self.post_message(channel_id, content, None).await
+    }
+
+    pub async fn reply_message(
+        &self,
+        channel_id: Snowflake,
+        content: &str,
+        reply_to: Snowflake,
+    ) -> Result<Message, ApiError> {
+        self.post_message(channel_id, content, Some(reply_to)).await
+    }
+
+    pub async fn edit_message(
+        &self,
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        content: &str,
+    ) -> Result<Message, ApiError> {
+        let path = format!("/channels/{channel_id}/messages/{message_id}");
+        let body = serde_json::json!({ "content": content });
+        let response = self.send("PATCH", &path, Some(&body)).await?;
+        decode_message(response)
+    }
+
+    pub async fn delete_message(
+        &self,
+        channel_id: Snowflake,
+        message_id: Snowflake,
+    ) -> Result<(), ApiError> {
+        let path = format!("/channels/{channel_id}/messages/{message_id}");
+        self.send("DELETE", &path, None::<&()>).await?;
+        Ok(())
+    }
+
+    pub async fn add_reaction(
+        &self,
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        emoji: &str,
+    ) -> Result<(), ApiError> {
+        let path = format!(
+            "/channels/{channel_id}/messages/{message_id}/reactions/{}/@me",
+            url_encode(emoji)
+        );
+        self.send("PUT", &path, None::<&()>).await?;
+        Ok(())
+    }
+
+    pub async fn remove_reaction(
+        &self,
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        emoji: &str,
+    ) -> Result<(), ApiError> {
+        let path = format!(
+            "/channels/{channel_id}/messages/{message_id}/reactions/{}/@me",
+            url_encode(emoji)
+        );
+        self.send("DELETE", &path, None::<&()>).await?;
+        Ok(())
+    }
+
+    pub async fn search_guild(&self, path: &str) -> Result<Vec<Message>, ApiError> {
+        #[derive(Deserialize)]
+        struct SearchBody {
+            #[serde(default)]
+            messages: Vec<Vec<WireMessage>>,
+        }
+        let body: SearchBody = self.get_json(path, "search").await?;
+        Ok(body
+            .messages
+            .into_iter()
+            .flatten()
+            .map(Message::from)
+            .collect())
+    }
+
+    async fn post_message(
+        &self,
+        channel_id: Snowflake,
+        content: &str,
+        reply_to: Option<Snowflake>,
+    ) -> Result<Message, ApiError> {
         let path = format!("/channels/{channel_id}/messages");
         let body = OutgoingMessage {
             content: content.to_owned(),
+            message_reference: reply_to.map(|id| MessageReference {
+                message_id: id.to_string(),
+            }),
         };
         let response = self.send("POST", &path, Some(&body)).await?;
         decode_message(response)
@@ -192,6 +278,17 @@ impl DiscordApi {
     }
 }
 
+fn url_encode(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 fn route_key(method: &str, path: &str) -> String {
     let path = path.split('?').next().unwrap_or(path);
     format!("{method} {path}")
@@ -213,19 +310,30 @@ mod tests {
     use tokio::net::TcpListener;
 
     async fn serve_once(body: &'static str, status: &'static str) -> String {
+        let (base, _) = serve_capture(body, status).await;
+        base
+    }
+
+    async fn serve_capture(
+        body: &'static str,
+        status: &'static str,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 4096];
-            let _ = socket.read(&mut buf).await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let _ = tx.send(request);
             let response = format!(
                 "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nx-ratelimit-remaining: 1\r\nx-ratelimit-reset-after: 1\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             );
             socket.write_all(response.as_bytes()).await.unwrap();
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), rx)
     }
 
     #[tokio::test]
@@ -263,5 +371,64 @@ mod tests {
             route_key("GET", "/channels/1/messages?limit=50"),
             "GET /channels/1/messages"
         );
+    }
+
+    #[tokio::test]
+    async fn reply_edit_delete_and_reaction_hit_the_right_routes() {
+        let message = r#"{"id":"9","channel_id":"3","content":"edited","timestamp":"t","author":{"id":"1","username":"ada"}}"#;
+        let (base, rx) = serve_capture(message, "200 OK").await;
+        let api = DiscordApi::with_base(Token::new("test-token"), base);
+        let sent = api
+            .reply_message(Snowflake::new(3), "hello", Snowflake::new(8))
+            .await
+            .unwrap();
+        assert_eq!(sent.content, "edited");
+        let request = rx.await.unwrap();
+        assert!(request.starts_with("POST /channels/3/messages"));
+        assert!(request.contains("\"message_reference\""));
+        assert!(request.contains("\"message_id\":\"8\""));
+
+        let (base, rx) = serve_capture(message, "200 OK").await;
+        let api = DiscordApi::with_base(Token::new("test-token"), base);
+        api.edit_message(Snowflake::new(3), Snowflake::new(9), "edited")
+            .await
+            .unwrap();
+        assert!(rx
+            .await
+            .unwrap()
+            .starts_with("PATCH /channels/3/messages/9"));
+
+        let (base, rx) = serve_capture("{}", "204 No Content").await;
+        let api = DiscordApi::with_base(Token::new("test-token"), base);
+        api.delete_message(Snowflake::new(3), Snowflake::new(9))
+            .await
+            .unwrap();
+        assert!(rx
+            .await
+            .unwrap()
+            .starts_with("DELETE /channels/3/messages/9"));
+
+        let (base, rx) = serve_capture("", "204 No Content").await;
+        let api = DiscordApi::with_base(Token::new("test-token"), base);
+        api.add_reaction(Snowflake::new(3), Snowflake::new(9), "plus")
+            .await
+            .unwrap();
+        assert!(rx
+            .await
+            .unwrap()
+            .contains("PUT /channels/3/messages/9/reactions/plus/@me"));
+    }
+
+    #[tokio::test]
+    async fn guild_search_flattens_message_groups() {
+        let body = r#"{"messages":[[{"id":"5","channel_id":"8","content":"found","timestamp":"t","author":{"id":"1","username":"ada"}}]]}"#;
+        let base = serve_once(body, "200 OK").await;
+        let api = DiscordApi::with_base(Token::new("test-token"), base);
+        let hits = api
+            .search_guild("/guilds/10/messages/search?content=found")
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].content, "found");
     }
 }
