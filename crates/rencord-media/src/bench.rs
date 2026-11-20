@@ -43,6 +43,75 @@ pub fn bench_software(frames: u32) -> StreamBench {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PresetBench {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub encode_us: u64,
+    pub budget_us: u64,
+    pub sustains: bool,
+    pub encoder: &'static str,
+    pub gpu: &'static str,
+}
+
+/// One software frame at each resolution the milestone asked about.
+/// Hardware encode is not claimed: the GPU path is whatever [`crate::usable_encoder`] opened.
+pub fn bench_preset_matrix() -> Vec<PresetBench> {
+    let targets = [
+        (1920, 1080, 60),
+        (2560, 1440, 120),
+        (3840, 2160, 60),
+        (3840, 2160, 120),
+    ];
+    let encoder = crate::usable_encoder();
+    let gpu = if encoder == crate::encode::EncoderKind::Software {
+        "no GPU session"
+    } else {
+        encoder.label()
+    };
+    targets
+        .into_iter()
+        .map(|(width, height, fps)| {
+            let mut source = SyntheticSource::new("preset", width, height);
+            let frame = source.next_frame();
+            let started = Instant::now();
+            let _unit = encode_software(&frame, 6_000);
+            let encode_us = started.elapsed().as_micros() as u64;
+            let budget_us = 1_000_000 / u64::from(fps);
+            PresetBench {
+                width,
+                height,
+                fps,
+                encode_us,
+                budget_us,
+                sustains: encode_us <= budget_us,
+                encoder: "software",
+                gpu,
+            }
+        })
+        .collect()
+}
+
+pub fn format_preset_matrix(rows: &[PresetBench]) -> String {
+    rows.iter()
+        .map(|row| {
+            format!(
+                "PRESET {}x{}@{} encode_us={} budget_us={} sustains={} encoder={} gpu={}",
+                row.width,
+                row.height,
+                row.fps,
+                row.encode_us,
+                row.budget_us,
+                row.sustains,
+                row.encoder,
+                row.gpu
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn format_bench(bench: &StreamBench) -> String {
     format!(
         "STREAM frames={} size={}x{} capture_us={} encode_us={} encoder={} gpu={}",
@@ -67,5 +136,14 @@ mod tests {
         assert!(bench.capture_us_avg < 50_000);
         assert!(bench.encode_us_avg < 50_000);
         assert!(format_bench(&bench).contains("encode_us="));
+    }
+
+    #[test]
+    fn the_preset_matrix_covers_the_four_targets() {
+        let rows = bench_preset_matrix();
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|row| row.encode_us > 0));
+        assert_eq!(rows[0].width, 1920);
+        assert_eq!(rows[3].fps, 120);
     }
 }

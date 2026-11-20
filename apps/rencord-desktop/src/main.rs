@@ -72,6 +72,16 @@ fn main() {
             "{}",
             rencord_media::format_bench(&rencord_media::bench_software(30))
         );
+        println!(
+            "{}",
+            rencord_media::format_preset_matrix(&rencord_media::bench_preset_matrix())
+        );
+        for probe in rencord_media::probe_all() {
+            println!(
+                "ENCODER {:?} usable={} {}",
+                probe.kind, probe.usable, probe.detail
+            );
+        }
         return;
     }
     let start_voice = args.iter().any(|arg| arg == "--voice");

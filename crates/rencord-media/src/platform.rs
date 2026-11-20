@@ -95,6 +95,23 @@ pub fn portal_source() -> Option<CaptureSource> {
     ))
 }
 
+/// PipeWire is how a granted ScreenCast fd becomes frames. Missing library
+/// means the portal session, even if it connected, cannot be consumed yet.
+pub fn pipewire_library() -> Result<String, String> {
+    let path = std::ffi::CString::new("libpipewire-0.3.so.0").map_err(|err| err.to_string())?;
+    let handle = unsafe { dlopen_pw(path.as_ptr(), 1) };
+    if handle.is_null() {
+        Err("libpipewire-0.3.so.0 is not installed, so a portal fd cannot be consumed".into())
+    } else {
+        Ok("libpipewire-0.3.so.0".into())
+    }
+}
+
+unsafe extern "C" {
+    #[link_name = "dlopen"]
+    fn dlopen_pw(filename: *const i8, flags: i32) -> *mut std::ffi::c_void;
+}
+
 pub fn backend_detail(backend: CaptureBackend) -> String {
     match backend {
         CaptureBackend::WindowsGraphicsCapture => {
@@ -102,10 +119,11 @@ pub fn backend_detail(backend: CaptureBackend) -> String {
         }
         CaptureBackend::PipeWirePortal => {
             let probe = probe_linux_portal();
+            let library = pipewire_library().unwrap_or_else(|err| err);
             if probe.ready() {
-                "xdg-desktop-portal ScreenCast is present, but this process does not raise the consent dialog. Use the preview source until a portal session is granted.".into()
+                format!("xdg-desktop-portal ScreenCast socket is present. {library}. The consent dialog is not raised from this process, so the preview source stays available.")
             } else {
-                "No session bus or PipeWire socket. The preview source is used.".into()
+                format!("No session bus or PipeWire socket. {library}. The preview source is used.")
             }
         }
         CaptureBackend::ScreenCaptureKit => {

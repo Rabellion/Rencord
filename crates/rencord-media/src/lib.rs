@@ -11,14 +11,20 @@ mod encode;
 mod frame;
 mod golive;
 mod hdr;
+mod hw;
 mod ipc;
+mod loopback;
 mod platform;
 mod preset;
 mod rtp;
 mod shm;
+mod sync;
 mod worker;
 
-pub use bench::{bench_software, format_bench, StreamBench};
+pub use bench::{
+    bench_preset_matrix, bench_software, format_bench, format_preset_matrix, PresetBench,
+    StreamBench,
+};
 pub use capture::{
     list_local_sources, open_source, synthetic_sources, CaptureBackend, CaptureError,
     CaptureSource, FrameSource, SourceKind, SyntheticSource,
@@ -30,7 +36,9 @@ pub use encode::{
 pub use frame::{encode_png, Frame, HdrFlags};
 pub use golive::{GoLive, StreamPhase, StreamStats};
 pub use hdr::{hdr_wire_enabled, hdr_wire_format, output_path, tone_map_pq_to_sdr};
+pub use hw::{probe_all, usable_encoder, EncoderProbe};
 pub use ipc::{ClientMessage, WorkerMessage};
+pub use loopback::loopback_frame;
 pub use platform::{
     capture_backends, connect_session_bus, probe_linux_portal, BackendSpec, LinuxPortalProbe,
 };
@@ -40,6 +48,7 @@ pub use preset::{
 };
 pub use rtp::{depacketize, packetize, write_rtp, RtpPacket};
 pub use shm::FrameMap;
+pub use sync::{correction_samples, drift_us, is_system_monitor};
 pub use worker::{worker_main, WorkerClient};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
