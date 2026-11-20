@@ -13,6 +13,10 @@
   &nbsp;·&nbsp;
   <a href="#feature-status">Feature status</a>
   &nbsp;·&nbsp;
+  <a href="#keyboard-and-settings">Keyboard</a>
+  &nbsp;·&nbsp;
+  <a href="#measured-on-this-machine">Measurements</a>
+  &nbsp;·&nbsp;
   <a href="#architecture">Architecture</a>
   &nbsp;·&nbsp;
   <a href="#roadmap">Roadmap</a>
@@ -67,7 +71,7 @@ Honest status for this repository. "Implemented" means the code path and tests e
 | Markdown | Implemented | Headings, quotes, fenced code, bold, italic, inline code, links, mentions, spoilers. Drawn as styled runs inside the row. A fenced block is flattened onto that row. |
 | Sending messages | Implemented locally; REST client tested against a mock | `POST /channels/{id}/messages` exists. The demo composer appends locally. A live send was not verified. |
 | Gateway live updates | Implemented against a local socket | Identify, heartbeat, `READY`, `MESSAGE_CREATE`. After the socket drops, the client reconnects and sends Resume with the saved session id and sequence. Not verified against Discord's gateway. |
-| Voice join, audio in and out | Partial | `LiveCall` speaks the voice gateway and UDP against a local stub: identify or resume, IP discovery, select protocol, `aead_xchacha20_poly1305_rtpsize`, speaking, and a DAVE prepare / transition-ready exchange. Encrypted Opus is echoed through the adaptive jitter buffer. Mute, deafen, and per-SSRC gain are in that path. The desktop **Join voice** button still runs the loopback, then opens the default cpal input and output when the machine has them. There is no device picker yet. A live Discord voice server was not used. |
+| Voice join, audio in and out | Partial | `LiveCall` speaks the voice gateway and UDP against a local stub: identify or resume, IP discovery, select protocol, `aead_xchacha20_poly1305_rtpsize`, speaking, and a DAVE prepare / transition-ready exchange. Encrypted Opus is echoed through the adaptive jitter buffer. Mute, deafen, and per-SSRC gain are in that path. **Join voice** still runs the loopback, then opens the default cpal devices. Settings lists device names and remembers the choice; that name is not yet passed into cpal. A live Discord voice server was not used. |
 | DAVE (E2EE) | Implemented | `davey` 0.2. Two-member MLS encrypt/decrypt test. Opcode routing keeps the transport up when a welcome fails. |
 | Adaptive jitter buffer | Implemented | See [Voice](#voice). |
 | Screen share / camera / Go Live | Not implemented | Presets and the worker command enum only. |
@@ -100,7 +104,28 @@ cargo run -p rencord-desktop -- --demo
 cargo run -p rencord-desktop --bin rencord-measure -- --offline
 ```
 
-The budgets and the numbers from this machine are in [docs/design/UX.md](docs/design/UX.md). Release on this Linux host: first frame 117 ms, RSS 137 MiB with the demo history, frame p50 16.7 ms, release binary 63 MB. Cached channel switches averaged 669 ns. A 120 Hz display was not measured.
+## Keyboard and settings
+
+| Action | Keys |
+| --- | --- |
+| Quick switcher | Ctrl+K or Cmd+K. Esc closes it. The header button is labeled Ctrl K. |
+| Next / previous channel | Alt+Down / Alt+Up |
+| Next / previous server | Ctrl+Alt+Down / Ctrl+Alt+Up |
+| Settings | Ctrl+, or Cmd+, or the Settings button |
+
+Settings switches theme (AMOLED, dark, light), density (compact 44 px rows, cozy 68 px), and type size (13, 15, or 17 px). It lists cpal input and output names, shows the last loopback jitter line, and states that Go Live is not in this build. There is no Nitro row.
+
+## Measured on this machine
+
+Release build, `rencord --demo --bench`, Linux, X11, software GL, about 800 cached messages. A 120 Hz panel was not attached. The full write-up is [docs/design/UX.md](docs/design/UX.md).
+
+| Budget | Target | Measured |
+| --- | --- | --- |
+| First frame | < 1000 ms | 117 ms release, 246 ms debug. Process start to the first bench frame on a warm page cache. |
+| Idle RSS | < 200 MiB | 137 MiB release (`140228` KiB), 183 MiB debug. |
+| Cached channel switch | < 50 ms | 669 ns average over 200 session switches. On-screen switches in the bench were 0–3 µs. |
+| Frame gap | About one 60 Hz frame | p50 16.7 ms over 23 frames while the bench changed channel every frame. |
+| Release binary | < 80 MB | 63 MB. The unstripped debug binary is 840 MB and is not the shipping build. |
 
 `RENCORD_DATA_DIR` overrides the data directory. The default is `$XDG_DATA_HOME/rencord` or `~/.local/share/rencord`.
 
@@ -194,7 +219,7 @@ The UI does not embed egui. Protocol crates do not depend on GPUI.
 | --- | --- | --- |
 | 1. Shell and adaptive jitter | On `main` | GPUI window, token login, guild and DM lists, markdown history, local send, gateway identify against a local socket, jitter simulation. |
 | 2. Live voice path | On `main` | Gateway resume, voice websocket + UDP discovery, transport cipher, speaking, DAVE control frames, mute, deafen, per-SSRC gain, default cpal devices. Local stubs only. |
-| 3. UI | In this tree | AMOLED / dark / light, virtualized timeline, quick switcher, keyboard travel, settings, device name list. Measurements are in [docs/design/UX.md](docs/design/UX.md). |
+| 3. UI | On `main` | AMOLED, dark, and light. Virtualized timeline, quick switcher, keyboard travel, settings (density, type size, device names, jitter). Measurements below and in [docs/design/UX.md](docs/design/UX.md). |
 | 4. Threads, search, uploads, notifications | Not started | OS keyring behind the existing `SecretStore` trait. |
 | 5. Voice against Discord | Not started | Point `LiveCall` at a real voice server and keep DAVE rekeys without dropping the call. |
 | 6. Go Live | Not started | Per-OS capture, H.264, out-of-process worker, presets up to 2160p120 with no Nitro checkbox. The UI will show Discord's documented caps and require an explicit acknowledgement before requesting more. 120 fps only when the display reports that refresh. |
