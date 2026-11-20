@@ -5,19 +5,31 @@
 //! memory map. Presets are not hidden behind a Nitro check. Discord can still
 //! refuse a quality on the server; [`safe_preset`] is the default request.
 
+mod bench;
 mod capture;
+mod encode;
 mod frame;
+mod golive;
+mod hdr;
 mod ipc;
 mod platform;
 mod preset;
+mod rtp;
 mod shm;
 mod worker;
 
+pub use bench::{bench_software, format_bench, StreamBench};
 pub use capture::{
     list_local_sources, open_source, synthetic_sources, CaptureBackend, CaptureError,
     CaptureSource, FrameSource, SourceKind, SyntheticSource,
 };
+pub use encode::{
+    active_encoder, annex_b, decode_software, encode_software, probe_encoders, AccessUnit,
+    EncoderKind,
+};
 pub use frame::{encode_png, Frame, HdrFlags};
+pub use golive::{GoLive, StreamPhase, StreamStats};
+pub use hdr::{hdr_wire_enabled, hdr_wire_format, output_path, tone_map_pq_to_sdr};
 pub use ipc::{ClientMessage, WorkerMessage};
 pub use platform::{
     capture_backends, connect_session_bus, probe_linux_portal, BackendSpec, LinuxPortalProbe,
@@ -26,6 +38,7 @@ pub use preset::{
     clamp_bitrate, fps_available, nitro_gate_in_ui, safe_preset, select_pixel_path, stream_presets,
     PixelPath, StreamPreset, ViewerKind,
 };
+pub use rtp::{depacketize, packetize, write_rtp, RtpPacket};
 pub use shm::FrameMap;
 pub use worker::{worker_main, WorkerClient};
 

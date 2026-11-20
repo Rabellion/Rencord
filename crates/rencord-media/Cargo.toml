@@ -14,6 +14,9 @@ path = "src/bin/rencord-stream.rs"
 
 [dependencies]
 memmap2 = "0.9"
+rencord-model.workspace = true
+rencord-protocol.workspace = true
+rencord-voice.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

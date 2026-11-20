@@ -141,6 +141,36 @@ pub fn voice_state_update(
     })
 }
 
+/// Voice-state update that asks to publish a Go Live stream.
+///
+/// `self_stream` is the gateway flag. It is not a promise that Discord will
+/// accept the quality. The video samples travel on a separate voice connection.
+pub fn voice_state_go_live(
+    guild_id: Option<Snowflake>,
+    channel_id: Option<Snowflake>,
+    streaming: bool,
+) -> Value {
+    json!({
+        "op": GatewayOpcode::VoiceStateUpdate as u8,
+        "d": {
+            "guild_id": guild_id.map(|id| id.to_string()),
+            "channel_id": channel_id.map(|id| id.to_string()),
+            "self_mute": false,
+            "self_deaf": false,
+            "self_video": false,
+            "self_stream": streaming,
+        }
+    })
+}
+
+/// Ask the video connection to subscribe to another member's stream.
+pub fn stream_watch(user_id: &str) -> Value {
+    json!({
+        "op": "stream_watch",
+        "d": { "user_id": user_id }
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct HelloData {
     pub heartbeat_interval: u64,

@@ -25,6 +25,8 @@ pub trait DaveOps {
     fn execute_transition(&mut self, id: u16) -> Result<bool, String>;
     fn encrypt_opus(&mut self, packet: &[u8]) -> Result<Vec<u8>, String>;
     fn decrypt_opus(&mut self, user_id: u64, packet: &[u8]) -> Result<Vec<u8>, String>;
+    fn encrypt_video(&mut self, packet: &[u8]) -> Result<Vec<u8>, String>;
+    fn decrypt_video(&mut self, user_id: u64, packet: &[u8]) -> Result<Vec<u8>, String>;
     fn can_encrypt(&self) -> bool;
 }
 
@@ -90,6 +92,18 @@ impl DaveOps for DaveEngine {
         match self {
             Self::Live(engine) => engine.decrypt_opus(user_id, packet),
             Self::Scripted(engine) => engine.decrypt_opus(user_id, packet),
+        }
+    }
+    fn encrypt_video(&mut self, packet: &[u8]) -> Result<Vec<u8>, String> {
+        match self {
+            Self::Live(engine) => engine.encrypt_video(packet),
+            Self::Scripted(engine) => engine.encrypt_video(packet),
+        }
+    }
+    fn decrypt_video(&mut self, user_id: u64, packet: &[u8]) -> Result<Vec<u8>, String> {
+        match self {
+            Self::Live(engine) => engine.decrypt_video(user_id, packet),
+            Self::Scripted(engine) => engine.decrypt_video(user_id, packet),
         }
     }
     fn can_encrypt(&self) -> bool {
@@ -184,6 +198,22 @@ impl DaveOps for LiveDave {
             .map_err(|err| err.to_string())
     }
 
+    fn encrypt_video(&mut self, packet: &[u8]) -> Result<Vec<u8>, String> {
+        if !self.session.can_encrypt() {
+            return Err("DAVE session cannot encrypt yet".into());
+        }
+        self.session
+            .encrypt(MediaType::VIDEO, Codec::H264, packet)
+            .map(|frame| frame.into_owned())
+            .map_err(|err| err.to_string())
+    }
+
+    fn decrypt_video(&mut self, user_id: u64, packet: &[u8]) -> Result<Vec<u8>, String> {
+        self.session
+            .decrypt(user_id, MediaType::VIDEO, packet)
+            .map_err(|err| err.to_string())
+    }
+
     fn can_encrypt(&self) -> bool {
         self.session.can_encrypt()
     }
@@ -246,6 +276,20 @@ impl DaveOps for ScriptedDave {
             .strip_prefix(&[0xDA])
             .map(|rest| rest.to_vec())
             .ok_or_else(|| "not a scripted dave frame".into())
+    }
+    fn encrypt_video(&mut self, packet: &[u8]) -> Result<Vec<u8>, String> {
+        if !self.ready {
+            return Err("scripted dave is not ready".into());
+        }
+        let mut out = vec![0xDB];
+        out.extend_from_slice(packet);
+        Ok(out)
+    }
+    fn decrypt_video(&mut self, _user_id: u64, packet: &[u8]) -> Result<Vec<u8>, String> {
+        packet
+            .strip_prefix(&[0xDB])
+            .map(|rest| rest.to_vec())
+            .ok_or_else(|| "not a scripted dave video frame".into())
     }
     fn can_encrypt(&self) -> bool {
         self.ready
