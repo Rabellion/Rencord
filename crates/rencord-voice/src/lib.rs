@@ -14,6 +14,7 @@ pub mod devices;
 pub mod discovery;
 pub mod fixed;
 pub mod jitter;
+pub mod join;
 pub mod mixer;
 pub mod opus;
 pub mod pipeline;
@@ -22,6 +23,8 @@ pub mod session;
 pub use connection::{CallAudio, LiveCall, VoiceLinkError, VoiceTarget};
 pub use crypto::{TransportCipher, TRANSPORT_MODE};
 pub use dave::{DaveEngine, LiveDave, ScriptedDave};
+#[cfg(feature = "cpal")]
+pub use devices::open_pcm_devices;
 pub use devices::{
     backend_name, choose_device, default_devices, list_input_devices, list_output_devices,
     open_call_audio, open_default_call_audio, AudioSession, DeviceChoice,
@@ -32,5 +35,6 @@ pub use discovery::{
     SIO_UDP_CONNRESET,
 };
 pub use jitter::{AdaptiveBuffer, AdaptiveConfig, JitterStats, Playout};
+pub use join::{voice_ws_url, VoiceConnect, VoiceGatewayUpdate, VoiceJoin, VoiceStatus};
 pub use pipeline::{loopback_call, LoopbackReport};
 pub use session::{VoicePhase, VoiceSession};

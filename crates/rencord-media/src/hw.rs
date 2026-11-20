@@ -286,6 +286,7 @@ fn probe_vaapi_linux(kind: EncoderKind) -> EncoderProbe {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn va_has_h264_encode(va: *mut c_void, display: *mut c_void) -> Result<(), String> {
     // VAProfileH264Main = 6, VAEntrypointEncSlice = 6.
     let query: unsafe extern "C" fn(*mut c_void, i32, *mut i32, *mut i32) -> i32 =
@@ -307,6 +308,7 @@ fn va_has_h264_encode(va: *mut c_void, display: *mut c_void) -> Result<(), Strin
     }
 }
 
+#[cfg(target_os = "linux")]
 fn first_render_node() -> Result<std::path::PathBuf, String> {
     let dri = Path::new("/dev/dri");
     let entries = std::fs::read_dir(dri)

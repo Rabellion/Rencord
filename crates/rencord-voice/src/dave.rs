@@ -28,6 +28,11 @@ pub trait DaveOps {
     fn encrypt_video(&mut self, packet: &[u8]) -> Result<Vec<u8>, String>;
     fn decrypt_video(&mut self, user_id: u64, packet: &[u8]) -> Result<Vec<u8>, String>;
     fn can_encrypt(&self) -> bool;
+    /// MLS key package bytes for opcode 26. A new one is required after
+    /// session description, a group reset, and an invalid commit or welcome.
+    fn create_key_package(&mut self) -> Result<Vec<u8>, String>;
+    /// Drop the local MLS group. Used when opcode 24 announces epoch 1.
+    fn reset_group(&mut self) -> Result<(), String>;
 }
 
 #[derive(Debug)]
@@ -110,6 +115,18 @@ impl DaveOps for DaveEngine {
         match self {
             Self::Live(engine) => engine.can_encrypt(),
             Self::Scripted(engine) => engine.can_encrypt(),
+        }
+    }
+    fn create_key_package(&mut self) -> Result<Vec<u8>, String> {
+        match self {
+            Self::Live(engine) => engine.create_key_package(),
+            Self::Scripted(engine) => engine.create_key_package(),
+        }
+    }
+    fn reset_group(&mut self) -> Result<(), String> {
+        match self {
+            Self::Live(engine) => engine.reset_group(),
+            Self::Scripted(engine) => engine.reset_group(),
         }
     }
 }
@@ -217,6 +234,16 @@ impl DaveOps for LiveDave {
     fn can_encrypt(&self) -> bool {
         self.session.can_encrypt()
     }
+
+    fn create_key_package(&mut self) -> Result<Vec<u8>, String> {
+        self.session
+            .create_key_package()
+            .map_err(|err| err.to_string())
+    }
+
+    fn reset_group(&mut self) -> Result<(), String> {
+        self.session.reset().map_err(|err| err.to_string())
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -228,6 +255,12 @@ pub struct ScriptedDave {
     pub prepares: Vec<(u16, u16)>,
     pub executes: Vec<u16>,
     pub ready: bool,
+    pub key_packages: u32,
+    pub resets: u32,
+    /// Body passed to the engine after the binary prefix was removed.
+    pub last_body: Vec<u8>,
+    pub last_append: Option<bool>,
+    pub last_transition: Option<u16>,
 }
 
 impl DaveOps for ScriptedDave {
@@ -237,18 +270,22 @@ impl DaveOps for ScriptedDave {
     }
     fn on_proposals(
         &mut self,
-        _append: bool,
-        _data: &[u8],
+        append: bool,
+        data: &[u8],
     ) -> Result<Option<OutgoingCommit>, String> {
         self.proposals += 1;
+        self.last_append = Some(append);
+        self.last_body = data.to_vec();
         Ok(None)
     }
-    fn on_welcome(&mut self, _data: &[u8], _recognized: &[u64]) -> Result<(), String> {
+    fn on_welcome(&mut self, data: &[u8], _recognized: &[u64]) -> Result<(), String> {
         self.welcomes += 1;
+        self.last_body = data.to_vec();
         Ok(())
     }
-    fn on_commit(&mut self, _data: &[u8]) -> Result<(), String> {
+    fn on_commit(&mut self, data: &[u8]) -> Result<(), String> {
         self.commits += 1;
+        self.last_body = data.to_vec();
         Ok(())
     }
     fn prepare_transition(&mut self, id: u16, version: u16) -> Result<(), String> {
@@ -293,5 +330,14 @@ impl DaveOps for ScriptedDave {
     }
     fn can_encrypt(&self) -> bool {
         self.ready
+    }
+    fn create_key_package(&mut self) -> Result<Vec<u8>, String> {
+        self.key_packages += 1;
+        Ok(b"key-package".to_vec())
+    }
+    fn reset_group(&mut self) -> Result<(), String> {
+        self.resets += 1;
+        self.ready = false;
+        Ok(())
     }
 }

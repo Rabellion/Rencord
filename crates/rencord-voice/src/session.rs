@@ -39,6 +39,10 @@ pub struct VoiceSession {
     pub failures: Vec<VoiceFailure>,
     pub commits_to_send: Vec<OutgoingCommit>,
     pub dave: DaveEngine,
+    /// Set when a new MLS key package (opcode 26) must be sent.
+    pub pending_key_package: bool,
+    pub recognized: Vec<u64>,
+    pub last_transition: Option<u16>,
     server_id: String,
     user_id: String,
     session_id: String,
@@ -62,6 +66,9 @@ impl VoiceSession {
             failures: Vec::new(),
             commits_to_send: Vec::new(),
             dave,
+            pending_key_package: false,
+            recognized: Vec::new(),
+            last_transition: None,
             server_id: server_id.into(),
             user_id: user_id.into(),
             session_id: session_id.into(),
@@ -114,6 +121,11 @@ impl VoiceSession {
                         } else {
                             VoicePhase::Connected
                         };
+                        // A non-zero select-protocol ack means this member must
+                        // present a fresh MLS key package.
+                        if self.dave_version > 0 {
+                            self.pending_key_package = true;
+                        }
                     }
                     Err(err) => self.fail(4, err.to_string()),
                 }
@@ -121,26 +133,23 @@ impl VoiceSession {
             VoiceOpcode::HeartbeatAck | VoiceOpcode::Resumed | VoiceOpcode::Speaking => {}
             VoiceOpcode::ClientDisconnect => {}
             VoiceOpcode::DavePrepareTransition => {
-                let id = frame
-                    .data
-                    .get("transition_id")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u16;
-                let version = frame
-                    .data
-                    .get("protocol_version")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u16;
+                let id = json_u16(&frame.data, "transition_id");
+                let version = json_u16(&frame.data, "protocol_version");
+                self.last_transition = Some(id);
                 if let Err(err) = self.dave.prepare_transition(id, version) {
                     self.fail(21, err);
-                } else if id != 0 {
-                    outgoing.push(json!({
-                        "op": VoiceOpcode::DaveTransitionReady as u8,
-                        "d": { "transition_id": id }
-                    }));
+                } else if id == 0 {
+                    // The initialization transition executes immediately.
+                    if let Err(err) = self.dave.execute_transition(0) {
+                        self.fail(21, err);
+                    }
+                } else {
+                    outgoing.push(transition_ready(id));
                 }
                 if version == 0 {
+                    self.dave_version = 0;
                     self.phase = VoicePhase::TransportOnly;
+                    self.pending_key_package = false;
                 }
             }
             VoiceOpcode::DaveExecuteTransition => {
@@ -159,54 +168,104 @@ impl VoiceSession {
                     .get("epoch")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0);
-                let version = frame
-                    .data
-                    .get("protocol_version")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u16;
+                let version = json_u16(&frame.data, "protocol_version");
                 if epoch == 1 {
                     self.dave_version = version;
+                    if let Err(err) = self.dave.reset_group() {
+                        self.fail(24, err);
+                    }
+                    // A recreated group needs a new key package.
+                    if version > 0 {
+                        self.pending_key_package = true;
+                    }
+                }
+            }
+            VoiceOpcode::ClientsConnect => {
+                if let Some(ids) = frame.data.get("user_ids").and_then(|v| v.as_array()) {
+                    for id in ids {
+                        let parsed = id
+                            .as_str()
+                            .and_then(|text| text.parse().ok())
+                            .or_else(|| id.as_u64());
+                        if let Some(user) = parsed {
+                            if !self.recognized.contains(&user) {
+                                self.recognized.push(user);
+                            }
+                        }
+                    }
                 }
             }
             VoiceOpcode::MlsExternalSender => {
-                let bytes = base64_or_bytes(&frame.data);
+                let bytes = payload_bytes(&frame.data);
                 if let Err(err) = self.dave.on_external_sender(&bytes) {
                     self.fail(25, err);
                 }
             }
-            VoiceOpcode::MlsProposals => {
-                let append = frame
-                    .data
-                    .get("opt")
-                    .and_then(|v| v.as_str())
-                    .map(|value| value.eq_ignore_ascii_case("append"))
-                    .unwrap_or(true);
-                let bytes = base64_or_bytes(&frame.data);
-                match self.dave.on_proposals(append, &bytes) {
+            VoiceOpcode::MlsProposals => match proposal_body(&frame.data) {
+                Ok((append, body)) => match self.dave.on_proposals(append, &body) {
                     Ok(Some(commit)) => self.commits_to_send.push(commit),
                     Ok(None) => {}
                     Err(err) => self.fail(27, err),
+                },
+                Err(err) => self.fail(27, err),
+            },
+            VoiceOpcode::MlsWelcome => match transition_body(&frame.data) {
+                Ok((id, body)) => {
+                    self.last_transition = Some(id);
+                    if let Err(err) = self.dave.on_welcome(&body, &self.recognized) {
+                        self.fail(30, err);
+                        outgoing.push(invalid_commit(id));
+                        self.pending_key_package = true;
+                    } else if id != 0 {
+                        outgoing.push(transition_ready(id));
+                    }
                 }
-            }
-            VoiceOpcode::MlsWelcome => {
-                let bytes = base64_or_bytes(&frame.data);
-                if let Err(err) = self.dave.on_welcome(&bytes, &[]) {
+                Err(err) => {
                     self.fail(30, err);
-                    outgoing.push(json!({
-                        "op": VoiceOpcode::MlsInvalidCommitWelcome as u8,
-                        "d": { "transition_id": 0 }
-                    }));
+                    outgoing.push(invalid_commit(0));
+                    self.pending_key_package = true;
                 }
-            }
-            VoiceOpcode::MlsCommitWelcome | VoiceOpcode::MlsAnnounceCommitTransition => {
-                let bytes = base64_or_bytes(&frame.data);
-                if let Err(err) = self.dave.on_commit(&bytes) {
-                    self.fail(frame.op as u8, err);
+            },
+            VoiceOpcode::MlsAnnounceCommitTransition => match transition_body(&frame.data) {
+                Ok((id, body)) => {
+                    self.last_transition = Some(id);
+                    if let Err(err) = self.dave.on_commit(&body) {
+                        self.fail(29, err);
+                        outgoing.push(invalid_commit(id));
+                        self.pending_key_package = true;
+                    } else if id != 0 {
+                        outgoing.push(transition_ready(id));
+                    }
                 }
+                Err(err) => {
+                    self.fail(29, err);
+                    outgoing.push(invalid_commit(0));
+                    self.pending_key_package = true;
+                }
+            },
+            VoiceOpcode::MlsCommitWelcome => {
+                // Opcode 28 is client-to-server. A copy echoed back is ignored.
             }
             _ => {}
         }
         outgoing
+    }
+
+    /// Opcode 26 payload, once. `None` when DAVE is off or nothing is due.
+    pub fn take_key_package(&mut self) -> Option<Vec<u8>> {
+        if !self.pending_key_package || self.dave_version == 0 {
+            return None;
+        }
+        match self.dave.create_key_package() {
+            Ok(bytes) => {
+                self.pending_key_package = false;
+                Some(bytes)
+            }
+            Err(err) => {
+                self.fail(26, err);
+                None
+            }
+        }
     }
 
     pub fn seal_opus(&mut self, packet: &[u8]) -> Result<Vec<u8>, String> {
@@ -224,7 +283,58 @@ impl VoiceSession {
     }
 }
 
-fn base64_or_bytes(value: &Value) -> Vec<u8> {
+fn json_u16(value: &Value, key: &str) -> u16 {
+    value.get(key).and_then(|item| item.as_u64()).unwrap_or(0) as u16
+}
+
+fn transition_ready(id: u16) -> Value {
+    json!({
+        "op": VoiceOpcode::DaveTransitionReady as u8,
+        "d": { "transition_id": id }
+    })
+}
+
+fn invalid_commit(id: u16) -> Value {
+    json!({
+        "op": VoiceOpcode::MlsInvalidCommitWelcome as u8,
+        "d": { "transition_id": id }
+    })
+}
+
+/// Opcode 27: the first byte is append (0) or revoke (1). The rest is MLS.
+fn proposal_body(value: &Value) -> Result<(bool, Vec<u8>), String> {
+    let bytes = payload_bytes(value);
+    let Some((kind, body)) = bytes.split_first() else {
+        return Err("proposals frame is missing the operation type".into());
+    };
+    let append = match kind {
+        0 => true,
+        1 => false,
+        other => return Err(format!("unknown proposals operation {other}")),
+    };
+    Ok((append, body.to_vec()))
+}
+
+/// Opcodes 29 and 30: a big-endian transition id, then the MLS message.
+fn transition_body(value: &Value) -> Result<(u16, Vec<u8>), String> {
+    let bytes = payload_bytes(value);
+    if bytes.len() < 2 {
+        return Err("DAVE frame is missing the transition id".into());
+    }
+    let id = u16::from_be_bytes([bytes[0], bytes[1]]);
+    Ok((id, bytes[2..].to_vec()))
+}
+
+/// Opcode 28 is the commit MLSMessage, then a Welcome only when the commit adds members.
+pub fn commit_welcome_payload(commit: &[u8], welcome: Option<&[u8]>) -> Vec<u8> {
+    let mut payload = commit.to_vec();
+    if let Some(welcome) = welcome {
+        payload.extend_from_slice(welcome);
+    }
+    payload
+}
+
+fn payload_bytes(value: &Value) -> Vec<u8> {
     if let Some(bytes) = value.get("data").and_then(|item| item.as_array()) {
         return bytes
             .iter()
@@ -331,5 +441,88 @@ mod tests {
         });
         assert!(voice.secret_key.is_some());
         assert_ne!(voice.phase, VoicePhase::Idle);
+    }
+
+    #[test]
+    fn session_description_requests_a_key_package_and_prefixes_are_stripped() {
+        let mut voice = session();
+        voice.dave_version = 1;
+        voice.handle(VoiceFrame {
+            seq: None,
+            op: VoiceOpcode::SessionDescription,
+            data: serde_json::json!({
+                "mode": "aead_xchacha20_poly1305_rtpsize",
+                "secret_key": vec![4u8; 32],
+                "dave_protocol_version": 1
+            }),
+        });
+        let package = voice.take_key_package().expect("key package");
+        assert_eq!(package, b"key-package");
+        assert!(voice.take_key_package().is_none());
+
+        let replies = voice.handle(VoiceFrame {
+            seq: None,
+            op: VoiceOpcode::MlsProposals,
+            data: serde_json::json!({"data": [0, 9, 8, 7]}),
+        });
+        assert!(replies.is_empty());
+        let DaveEngine::Scripted(scripted) = &voice.dave else {
+            panic!("scripted");
+        };
+        assert_eq!(scripted.last_append, Some(true));
+        assert_eq!(scripted.last_body, vec![9, 8, 7]);
+
+        let replies = voice.handle(VoiceFrame {
+            seq: None,
+            op: VoiceOpcode::MlsAnnounceCommitTransition,
+            data: serde_json::json!({"data": [0, 12, 1, 2, 3]}),
+        });
+        assert_eq!(replies[0]["op"], VoiceOpcode::DaveTransitionReady as u8);
+        assert_eq!(replies[0]["d"]["transition_id"], 12);
+        let DaveEngine::Scripted(scripted) = &voice.dave else {
+            panic!("scripted");
+        };
+        assert_eq!(scripted.last_body, vec![1, 2, 3]);
+
+        voice.handle(VoiceFrame {
+            seq: None,
+            op: VoiceOpcode::DavePrepareEpoch,
+            data: serde_json::json!({"epoch": 1, "protocol_version": 1}),
+        });
+        assert_eq!(
+            voice.take_key_package().as_deref(),
+            Some(&b"key-package"[..])
+        );
+        let DaveEngine::Scripted(scripted) = &voice.dave else {
+            panic!("scripted");
+        };
+        assert_eq!(scripted.resets, 1);
+
+        let welcome = voice.handle(VoiceFrame {
+            seq: None,
+            op: VoiceOpcode::MlsWelcome,
+            data: serde_json::json!({"data": [0, 4, 5]}),
+        });
+        assert_eq!(welcome[0]["d"]["transition_id"], 4);
+        let payload = commit_welcome_payload(&[1, 2], Some(&[3, 4]));
+        assert_eq!(payload, vec![1, 2, 3, 4]);
+        assert_eq!(commit_welcome_payload(&[1, 2], None), vec![1, 2]);
+    }
+
+    #[test]
+    fn version_zero_downgrades_to_passthrough() {
+        let mut voice = session();
+        voice.dave_version = 1;
+        voice.phase = VoicePhase::Connected;
+        let replies = voice.handle(VoiceFrame {
+            seq: None,
+            op: VoiceOpcode::DavePrepareTransition,
+            data: serde_json::json!({"transition_id": 3, "protocol_version": 0}),
+        });
+        assert_eq!(voice.phase, VoicePhase::TransportOnly);
+        assert_eq!(voice.dave_version, 0);
+        assert_eq!(replies[0]["op"], VoiceOpcode::DaveTransitionReady as u8);
+        let sealed = voice.seal_opus(b"plain").unwrap();
+        assert_eq!(sealed, b"plain");
     }
 }

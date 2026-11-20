@@ -82,6 +82,7 @@ fn big_file_outcome(output: &rencord_upload::JobOutput) -> String {
 
 mod login_view;
 mod net;
+mod voice_call;
 
 use login_view::{LoginModel, LoginPreview};
 
@@ -391,6 +392,9 @@ struct RencordWindow {
     api: Option<Arc<rencord_api::DiscordApi>>,
     /// Dropping this shuts the live gateway down.
     gateway: Option<tokio::sync::mpsc::Sender<rencord_gateway::GatewayCommand>>,
+    voice_join: Option<rencord_voice::VoiceJoin>,
+    voice_cmd: Option<tokio::sync::mpsc::Sender<voice_call::VoiceCmd>>,
+    voice_status: Option<std::sync::mpsc::Receiver<String>>,
     /// Guilds and channels whose channels or history were already requested.
     requested: HashSet<Snowflake>,
     login_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -601,6 +605,9 @@ impl RencordWindow {
             session_token: None,
             api: None,
             gateway: None,
+            voice_join: None,
+            voice_cmd: None,
+            voice_status: None,
             requested: HashSet::new(),
             login_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             remote_generation: 0,
@@ -1371,28 +1378,184 @@ impl RencordWindow {
             }
             Err(err) => self.shell.note(format!("Could not switch devices: {err}")),
         }
+        self.push_voice_cmd(voice_call::VoiceCmd::Devices {
+            input: self.shell.prefs.input_device.clone(),
+            output: self.shell.prefs.output_device.clone(),
+        });
     }
 
-    fn join_voice(&mut self) {
-        self.shell.join_voice_demo();
-        match rencord_voice::open_call_audio(
-            self.shell.prefs.input_device.as_deref(),
-            self.shell.prefs.output_device.as_deref(),
-        ) {
-            Ok(session) => {
-                self.audio_session = Some(session);
-                self.shell
-                    .note("cpal default devices are open and routed through the jitter buffer.");
+    fn join_voice(&mut self, cx: &mut Context<Self>) {
+        if self.shell.demo || self.gateway.is_none() {
+            self.shell.join_voice_demo();
+            match rencord_voice::open_call_audio(
+                self.shell.prefs.input_device.as_deref(),
+                self.shell.prefs.output_device.as_deref(),
+            ) {
+                Ok(session) => {
+                    self.audio_session = Some(session);
+                    self.shell
+                        .note("cpal devices are open. Demo voice stays on the loopback.");
+                }
+                Err(err) => self.shell.note(format!(
+                    "cpal devices were not opened ({err}). Loopback stats still ran."
+                )),
             }
-            Err(err) => self.shell.note(format!(
-                "cpal devices were not opened ({err}). Loopback stats still ran."
-            )),
+            return;
         }
+        let Some(user) = self.shell.session.user.as_ref().map(|user| user.id) else {
+            self.shell.session.status_line = "Voice error (voice): not signed in".into();
+            return;
+        };
+        let channel = self
+            .shell
+            .session
+            .channels
+            .values()
+            .find(|channel| channel.kind.is_voice())
+            .map(|channel| channel.id)
+            .or(self.shell.session.selected_channel);
+        let Some(channel) = channel else {
+            self.shell.session.status_line =
+                "Voice error (voice): no voice channel is selected".into();
+            return;
+        };
+        let guild = self.shell.session.selected_guild;
+        let join = self
+            .voice_join
+            .get_or_insert_with(|| rencord_voice::VoiceJoin::new(user));
+        let update = join.join(guild, channel);
+        self.shell.session.status_line = join.status.text();
+        self.send_voice_state(update);
+        cx.notify();
+    }
+
+    fn send_voice_state(&self, update: rencord_voice::VoiceGatewayUpdate) {
+        let Some(gateway) = &self.gateway else {
+            return;
+        };
+        let _ = gateway.try_send(rencord_gateway::GatewayCommand::UpdateVoiceState {
+            guild_id: update.guild_id,
+            channel_id: update.channel_id,
+            self_mute: update.self_mute,
+            self_deaf: update.self_deaf,
+        });
+    }
+
+    fn on_gateway_event(&mut self, event: rencord_gateway::GatewayEvent, cx: &mut Context<Self>) {
+        let voice_state = match &event {
+            rencord_gateway::GatewayEvent::VoiceState(state) => {
+                Some((state.user_id, state.channel_id, state.session_id.clone()))
+            }
+            _ => None,
+        };
+        let voice_server = match &event {
+            rencord_gateway::GatewayEvent::VoiceServer(update) => {
+                Some((update.token.clone(), update.endpoint.clone()))
+            }
+            _ => None,
+        };
+        self.shell.session.apply_gateway(event);
+        if self.shell.demo {
+            return;
+        }
+        let Some(user) = self.shell.session.user.as_ref().map(|user| user.id) else {
+            return;
+        };
+        let join = self
+            .voice_join
+            .get_or_insert_with(|| rencord_voice::VoiceJoin::new(user));
+        let connect = if let Some((user_id, channel_id, session_id)) = voice_state {
+            join.on_voice_state(user_id, channel_id, &session_id)
+        } else if let Some((token, endpoint)) = voice_server {
+            join.on_voice_server(&token, endpoint.as_deref())
+        } else {
+            None
+        };
+        self.shell.session.status_line = join.status.text();
+        if let Some(connect) = connect {
+            self.spawn_call(connect, cx);
+        }
+    }
+
+    fn spawn_call(&mut self, connect: rencord_voice::VoiceConnect, cx: &mut Context<Self>) {
+        if let Some(cmd) = self.voice_cmd.take() {
+            let _ = cmd.try_send(voice_call::VoiceCmd::Leave);
+        }
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
+        let (status_tx, status_rx) = std::sync::mpsc::channel();
+        self.voice_cmd = Some(cmd_tx);
+        self.voice_status = Some(status_rx);
+        let user_id = connect.user_id.parse().unwrap_or(0);
+        let channel_id = self
+            .voice_join
+            .as_ref()
+            .and_then(|join| join.channel_id())
+            .unwrap_or(0);
+        let target = rencord_voice::VoiceTarget {
+            ws_url: connect.ws_url,
+            server_id: connect.server_id,
+            user_id: connect.user_id,
+            session_id: connect.session_id,
+            token: connect.token,
+        };
+        let server = connect.server_name;
+        let input = self.shell.prefs.input_device.clone();
+        let output = self.shell.prefs.output_device.clone();
+        net::runtime().spawn(voice_call::run_call(voice_call::CallRequest {
+            target,
+            user_id,
+            channel_id,
+            commands: cmd_rx,
+            status: status_tx,
+            server,
+            input,
+            output,
+        }));
+        cx.notify();
+    }
+
+    fn drain_voice_status(&mut self) {
+        let Some(rx) = &self.voice_status else {
+            return;
+        };
+        while let Ok(line) = rx.try_recv() {
+            self.shell.session.status_line = line;
+        }
+    }
+
+    fn push_voice_cmd(&self, cmd: voice_call::VoiceCmd) {
+        if let Some(tx) = &self.voice_cmd {
+            let _ = tx.try_send(cmd);
+        }
+    }
+
+    fn sync_voice_flags(&mut self) {
+        if let Some(join) = self.voice_join.as_mut() {
+            let update = join.set_self_state(self.shell.muted, self.shell.deafened);
+            self.send_voice_state(update);
+        }
+        self.push_voice_cmd(voice_call::VoiceCmd::Mute(self.shell.muted));
+        self.push_voice_cmd(voice_call::VoiceCmd::Deaf(self.shell.deafened));
+    }
+
+    fn leave_voice_call(&mut self) {
+        if let Some(join) = self.voice_join.as_mut() {
+            let update = join.leave();
+            let line = join.status.text();
+            self.send_voice_state(update);
+            self.shell.session.status_line = line;
+        } else {
+            self.shell.leave_voice();
+        }
+        self.push_voice_cmd(voice_call::VoiceCmd::Leave);
+        self.voice_cmd = None;
+        self.shell.session.voice_channel = None;
     }
 }
 
 impl Render for RencordWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.drain_voice_status();
         self.sync_queries(cx);
         self.load_selection(cx);
         self.tick_theme(window, cx);
@@ -2523,6 +2686,7 @@ impl RencordWindow {
                             muted,
                             |view, cx| {
                                 view.shell.toggle_mute();
+                                view.sync_voice_flags();
                                 cx.notify();
                             },
                         ))
@@ -2535,6 +2699,7 @@ impl RencordWindow {
                             deafened,
                             |view, cx| {
                                 view.shell.toggle_deaf();
+                                view.sync_voice_flags();
                                 cx.notify();
                             },
                         ))
@@ -2800,7 +2965,7 @@ fn channel_row(
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| {
                 if joins_voice {
-                    this.join_voice();
+                    this.join_voice(cx);
                 } else {
                     this.shell.select_channel_timed(id);
                 }
@@ -2832,7 +2997,7 @@ fn hang_up_button(view: Entity<RencordWindow>, palette: Palette) -> impl IntoEle
         .child(icon("phone", 14., palette.hangup_fg))
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| {
-                this.shell.leave_voice();
+                this.leave_voice_call();
                 cx.notify();
             });
         })

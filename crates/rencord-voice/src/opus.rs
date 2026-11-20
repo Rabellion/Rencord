@@ -9,6 +9,8 @@ use audiopus::{Application, Bitrate, Channels, SampleRate};
 
 pub const FRAME_SAMPLES: usize = 960;
 pub const SAMPLE_RATE: u32 = 48_000;
+/// Opus silence frame. Five of these go out before speaking stops.
+pub const SILENCE_OPUS: &[u8] = &[0xF8, 0xFF, 0xFE];
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpusError {
@@ -21,22 +23,44 @@ pub enum OpusError {
 pub struct OpusCodec {
     encoder: Encoder,
     decoder: Decoder,
+    channels: usize,
 }
 
 impl OpusCodec {
     pub fn new() -> Result<Self, OpusError> {
-        let mut encoder = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)?;
+        Self::with_channels(Channels::Mono)
+    }
+
+    /// Discord voice is 48 kHz stereo, 20 ms: 960 samples per channel.
+    pub fn stereo() -> Result<Self, OpusError> {
+        Self::with_channels(Channels::Stereo)
+    }
+
+    fn with_channels(channels: Channels) -> Result<Self, OpusError> {
+        let mut encoder = Encoder::new(SampleRate::Hz48000, channels, Application::Voip)?;
         encoder.set_bitrate(Bitrate::BitsPerSecond(64_000))?;
         encoder.set_inband_fec(true)?;
         encoder.set_packet_loss_perc(15)?;
-        let decoder = Decoder::new(SampleRate::Hz48000, Channels::Mono)?;
-        Ok(Self { encoder, decoder })
+        let decoder = Decoder::new(SampleRate::Hz48000, channels)?;
+        let channels = match channels {
+            Channels::Mono => 1,
+            Channels::Stereo | Channels::Auto => 2,
+        };
+        Ok(Self {
+            encoder,
+            decoder,
+            channels,
+        })
+    }
+
+    pub fn frame_len(&self) -> usize {
+        FRAME_SAMPLES * self.channels
     }
 
     pub fn encode(&self, pcm: &[i16]) -> Result<Vec<u8>, OpusError> {
-        if pcm.len() != FRAME_SAMPLES {
+        if pcm.len() != self.frame_len() {
             return Err(OpusError::FrameSize {
-                expected: FRAME_SAMPLES,
+                expected: self.frame_len(),
                 got: pcm.len(),
             });
         }
@@ -59,9 +83,9 @@ impl OpusCodec {
     }
 
     fn decode(&mut self, packet: Option<&[u8]>, fec: bool) -> Result<Vec<i16>, OpusError> {
-        let mut pcm = vec![0i16; FRAME_SAMPLES];
+        let mut pcm = vec![0i16; self.frame_len()];
         let samples = self.decoder.decode(packet, &mut pcm[..], fec)?;
-        pcm.truncate(samples);
+        pcm.truncate(samples * self.channels);
         Ok(pcm)
     }
 }
@@ -95,5 +119,17 @@ mod tests {
         assert!(!fec.is_empty());
         let after = codec.decode_packet(&packets[3]).unwrap();
         assert_eq!(after.len(), FRAME_SAMPLES);
+    }
+
+    #[test]
+    fn stereo_frame_is_20ms_at_48khz() {
+        let mut codec = OpusCodec::stereo().unwrap();
+        assert_eq!(codec.frame_len(), FRAME_SAMPLES * 2);
+        let pcm: Vec<i16> = (0..codec.frame_len())
+            .map(|index| ((index as f32) * 0.05).sin() as i16 * 1000)
+            .collect();
+        let packet = codec.encode(&pcm).unwrap();
+        let decoded = codec.decode_packet(&packet).unwrap();
+        assert_eq!(decoded.len(), FRAME_SAMPLES * 2);
     }
 }

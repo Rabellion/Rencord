@@ -42,8 +42,17 @@ pub struct VoicePipeline {
 
 impl VoicePipeline {
     pub fn new(ssrc: u32) -> Result<Self, PipelineError> {
+        Self::with_codec(ssrc, OpusCodec::new()?)
+    }
+
+    /// 48 kHz stereo, 20 ms. A mono capture is duplicated per channel.
+    pub fn new_stereo(ssrc: u32) -> Result<Self, PipelineError> {
+        Self::with_codec(ssrc, OpusCodec::stereo()?)
+    }
+
+    fn with_codec(ssrc: u32, codec: OpusCodec) -> Result<Self, PipelineError> {
         Ok(Self {
-            codec: OpusCodec::new()?,
+            codec,
             jitter: AdaptiveBuffer::new(AdaptiveConfig::default()),
             transport: None,
             ssrc,
@@ -62,7 +71,42 @@ impl VoicePipeline {
         pcm: &[i16],
         dave: Option<&mut dyn DaveOps>,
     ) -> Result<Vec<u8>, PipelineError> {
+        let stereo = self.codec.frame_len() == crate::opus::FRAME_SAMPLES * 2;
+        let upmixed;
+        let pcm = if stereo && pcm.len() == crate::opus::FRAME_SAMPLES {
+            upmixed = pcm
+                .iter()
+                .flat_map(|sample| [*sample, *sample])
+                .collect::<Vec<_>>();
+            upmixed.as_slice()
+        } else {
+            pcm
+        };
         let mut opus = self.codec.encode(pcm)?;
+        if let Some(dave) = dave {
+            if dave.can_encrypt() {
+                opus = dave.encrypt_opus(&opus).map_err(PipelineError::Dave)?;
+            }
+        }
+        let sequence = self.sequence;
+        let timestamp = self.timestamp;
+        self.sequence = self.sequence.wrapping_add(1);
+        self.timestamp = self.timestamp.wrapping_add(FRAME_SAMPLES as u32);
+        let Some(transport) = self.transport.as_mut() else {
+            return Err(PipelineError::Transport(
+                crate::crypto::CryptoError::KeyLength(0),
+            ));
+        };
+        Ok(transport.seal(sequence, timestamp, self.ssrc, &opus))
+    }
+
+    /// Seal an already-encoded Opus payload. Silence frames use this.
+    pub fn send_opus(
+        &mut self,
+        opus: &[u8],
+        dave: Option<&mut dyn DaveOps>,
+    ) -> Result<Vec<u8>, PipelineError> {
+        let mut opus = opus.to_vec();
         if let Some(dave) = dave {
             if dave.can_encrypt() {
                 opus = dave.encrypt_opus(&opus).map_err(PipelineError::Dave)?;
@@ -94,8 +138,9 @@ impl VoicePipeline {
             ));
         };
         let opened = transport.open(packet)?;
-        let opus = if let Some(dave) = dave {
-            dave.decrypt_opus(sender, &opened.opus)
+        let opus = if dave.as_ref().is_some_and(|engine| engine.can_encrypt()) {
+            dave.unwrap()
+                .decrypt_opus(sender, &opened.opus)
                 .map_err(PipelineError::Dave)?
         } else {
             opened.opus

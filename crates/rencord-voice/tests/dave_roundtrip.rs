@@ -8,6 +8,10 @@ use davey::{DaveSession, ProposalsOperationType};
 use openmls::prelude::{tls_codec::Serialize, *};
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
+use rencord_protocol::VoiceOpcode;
+use rencord_voice::dave::{DaveEngine, DaveOps, LiveDave};
+use rencord_voice::session::{commit_welcome_payload, VoiceSession};
+use serde_json::json;
 
 const VERSION: NonZeroU16 = match NonZeroU16::new(1) {
     Some(value) => value,
@@ -96,4 +100,130 @@ fn two_members_roundtrip_an_opus_frame() {
         .decrypt(user_a, davey::MediaType::AUDIO, encrypted.as_ref())
         .unwrap();
     assert_eq!(decrypted, plaintext);
+}
+
+fn frame(op: VoiceOpcode, data: serde_json::Value) -> rencord_protocol::VoiceFrame {
+    rencord_protocol::VoiceFrame {
+        op,
+        data,
+        seq: Some(1),
+    }
+}
+
+fn bytes_json(bytes: &[u8]) -> serde_json::Value {
+    json!({ "data": bytes })
+}
+
+/// The voice session, not davey directly, must strip the binary prefixes and
+/// send a key package. Feeding the prefixed bytes to the old parser makes
+/// MLS reject the message, so this test fails before the prefix fix.
+#[test]
+fn binary_dave_sequence_sends_a_key_package_parses_prefixes_and_decrypts() {
+    let channel = 5150u64;
+    let user_a = 111u64;
+    let user_b = 222u64;
+    let gateway = ExternalSenderHarness::new(channel);
+    let mut alice = VoiceSession::new(
+        channel.to_string(),
+        user_a.to_string(),
+        "sess-a",
+        "token",
+        DaveEngine::Live(Box::new(LiveDave::new(user_a, channel).unwrap())),
+    );
+    let mut bob = VoiceSession::new(
+        channel.to_string(),
+        user_b.to_string(),
+        "sess-b",
+        "token",
+        DaveEngine::Live(Box::new(LiveDave::new(user_b, channel).unwrap())),
+    );
+    let described = |version: u16| {
+        frame(
+            VoiceOpcode::SessionDescription,
+            json!({
+                "mode": "aead_xchacha20_poly1305_rtpsize",
+                "secret_key": vec![7u8; 32],
+                "dave_protocol_version": version
+            }),
+        )
+    };
+    alice.handle(described(1));
+    bob.handle(described(1));
+    let alice_package = alice.take_key_package().expect("alice key package");
+    let bob_package = bob.take_key_package().expect("bob key package");
+    assert!(!alice_package.is_empty());
+    assert!(!bob_package.is_empty());
+
+    let sender = frame(VoiceOpcode::MlsExternalSender, bytes_json(&gateway.bytes()));
+    alice.handle(sender.clone());
+    bob.handle(sender);
+    assert!(alice.failures.is_empty(), "{:?}", alice.failures);
+    assert!(bob.failures.is_empty(), "{:?}", bob.failures);
+
+    for user in [user_a, user_b] {
+        let connect = frame(
+            VoiceOpcode::ClientsConnect,
+            json!({"user_ids": [user.to_string()]}),
+        );
+        alice.handle(connect.clone());
+        bob.handle(connect);
+    }
+
+    let proposal = gateway.propose_add(&bob_package);
+    let mut prefixed = vec![0u8];
+    prefixed.extend_from_slice(&proposal);
+    alice.handle(frame(VoiceOpcode::MlsProposals, bytes_json(&prefixed)));
+    assert!(
+        alice.failures.is_empty(),
+        "prefix leaked into MLS: {:?}",
+        alice.failures
+    );
+    let commit = alice.commits_to_send.pop().expect("commit");
+    let wire = commit_welcome_payload(&commit.commit, commit.welcome.as_deref());
+    assert!(wire.starts_with(&commit.commit));
+    assert!(
+        wire.len() > commit.commit.len(),
+        "add commit includes a welcome"
+    );
+
+    let mut announced = 7u16.to_be_bytes().to_vec();
+    announced.extend_from_slice(&commit.commit);
+    let ready = alice.handle(frame(
+        VoiceOpcode::MlsAnnounceCommitTransition,
+        bytes_json(&announced),
+    ));
+    assert_eq!(ready[0]["op"], VoiceOpcode::DaveTransitionReady as u8);
+    assert_eq!(ready[0]["d"]["transition_id"], 7);
+    assert!(alice.failures.is_empty(), "{:?}", alice.failures);
+
+    let mut welcomed = 7u16.to_be_bytes().to_vec();
+    welcomed.extend_from_slice(commit.welcome.as_ref().unwrap());
+    let ready = bob.handle(frame(VoiceOpcode::MlsWelcome, bytes_json(&welcomed)));
+    assert_eq!(ready[0]["d"]["transition_id"], 7);
+    assert!(bob.failures.is_empty(), "{:?}", bob.failures);
+
+    for voice in [&mut alice, &mut bob] {
+        voice.handle(frame(
+            VoiceOpcode::DavePrepareTransition,
+            json!({"transition_id": 7, "protocol_version": 1}),
+        ));
+        voice.handle(frame(
+            VoiceOpcode::DaveExecuteTransition,
+            json!({"transition_id": 7}),
+        ));
+    }
+
+    let DaveEngine::Live(alice_live) = &mut alice.dave else {
+        panic!("live");
+    };
+    let encrypted = alice_live
+        .encrypt_opus(b"epoch-media")
+        .expect("alice can encrypt");
+    let DaveEngine::Live(bob_live) = &mut bob.dave else {
+        panic!("live");
+    };
+    let decrypted = bob_live
+        .decrypt_opus(user_a, &encrypted)
+        .expect("bob decrypts with the epoch key");
+    assert_eq!(decrypted, b"epoch-media");
 }
