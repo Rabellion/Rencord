@@ -142,8 +142,9 @@ jobs:
           $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
           $server = (Get-Content (Join-Path $dist "timestamp-server.txt") -Raw).Trim()
           if ($selfSigned) {
-            Import-Certificate -FilePath $cer -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
-            Import-Certificate -FilePath $cer -CertStoreLocation Cert:\CurrentUser\TrustedPublisher | Out-Null
+            # Import-Certificate opens a trust dialog. certutil -f does not.
+            Invoke-Bounded -File certutil.exe -ArgumentList @("-user", "-f", "-addstore", "Root", $cer) -TimeoutSec 30 -Label "trust the signing cert"
+            Invoke-Bounded -File certutil.exe -ArgumentList @("-user", "-f", "-addstore", "TrustedPublisher", $cer) -TimeoutSec 30 -Label "trust the signing cert for Authenticode"
           }
           function Show-Signature([string]$Path) {
             Write-Host "---- signature $Path"
