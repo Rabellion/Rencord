@@ -14,9 +14,13 @@ fn url_safe(part: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
-/// Discord only serves avatar sizes that are powers of two.
+/// Discord only serves image sizes that are powers of two.
 fn image_size(wanted: u32) -> u32 {
     wanted.clamp(16, 256).next_power_of_two()
+}
+
+fn banner_size(wanted: u32) -> u32 {
+    wanted.clamp(64, 1024).next_power_of_two()
 }
 
 /// The user's avatar, or the default one Discord assigns when there is none.
@@ -40,6 +44,15 @@ pub fn guild_icon_url(guild: Snowflake, hash: Option<&str>, wanted: u32) -> Opti
     Some(format!(
         "https://cdn.discordapp.com/icons/{guild}/{hash}.png?size={}",
         image_size(wanted)
+    ))
+}
+
+/// The picture behind a server's name in the channel list, if it has one.
+pub fn guild_banner_url(guild: Snowflake, hash: Option<&str>, wanted: u32) -> Option<String> {
+    let hash = hash.filter(|hash| url_safe(hash))?;
+    Some(format!(
+        "https://cdn.discordapp.com/banners/{guild}/{hash}.png?size={}",
+        banner_size(wanted)
     ))
 }
 
@@ -203,6 +216,19 @@ mod tests {
             guild_icon_url(Snowflake::new(1), Some("abc"), 48).unwrap(),
             "https://cdn.discordapp.com/icons/1/abc.png?size=64"
         );
+    }
+
+    #[test]
+    fn a_banner_url_uses_a_safe_hash_and_a_size_discord_serves() {
+        assert_eq!(
+            guild_banner_url(Snowflake::new(5), Some("a_9f8e"), 480).unwrap(),
+            "https://cdn.discordapp.com/banners/5/a_9f8e.png?size=512"
+        );
+        assert_eq!(guild_banner_url(Snowflake::new(5), None, 480), None);
+        assert_eq!(guild_banner_url(Snowflake::new(5), Some("../x"), 480), None);
+        assert!(guild_banner_url(Snowflake::new(5), Some("abc"), 99_999)
+            .unwrap()
+            .ends_with("size=1024"));
     }
 
     #[test]

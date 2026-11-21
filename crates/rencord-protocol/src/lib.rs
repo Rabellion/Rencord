@@ -283,6 +283,8 @@ pub struct ReadyGuild {
     #[serde(default)]
     pub icon: Option<String>,
     #[serde(default)]
+    pub banner: Option<String>,
+    #[serde(default)]
     pub unavailable: bool,
     #[serde(default)]
     pub channels: Vec<WireChannel>,

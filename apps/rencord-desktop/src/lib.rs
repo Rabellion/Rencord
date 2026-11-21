@@ -20,8 +20,8 @@ pub use icons::{
     discord_install_icon_dir, hexwave_png, hexwave_svg_for_px, icon_pack_dir, rail_home_glyph_px,
 };
 pub use messages::{
-    avatar_url, clean_content, emoji_label, fit_size, guild_icon_url, reply_preview, system_text,
-    ReplyPreview,
+    avatar_url, clean_content, emoji_label, fit_size, guild_banner_url, guild_icon_url,
+    reply_preview, system_text, ReplyPreview,
 };
 pub use search::{guild_search_path, local_search, parse_message_query, MessageQuery, SearchHit};
 pub use theme::{

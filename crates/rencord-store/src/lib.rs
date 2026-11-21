@@ -84,9 +84,10 @@ impl Session {
                 id,
                 name,
                 icon,
+                banner,
                 channels,
             } => {
-                self.apply_guild(id, name, icon);
+                self.apply_guild(id, name, icon, banner);
                 for channel in channels {
                     self.upsert_channel(channel);
                 }
@@ -168,7 +169,7 @@ impl Session {
     fn upsert_ready_guild(&mut self, guild: rencord_protocol::ReadyGuild) {
         let channels = guild.channels;
         let id = guild.id;
-        self.apply_guild(id, guild.name, guild.icon);
+        self.apply_guild(id, guild.name, guild.icon, guild.banner);
         for wire in channels {
             let mut channel = wire.into_channel();
             if channel.guild_id.is_none() {
@@ -178,7 +179,13 @@ impl Session {
         }
     }
 
-    fn apply_guild(&mut self, id: Snowflake, name: Option<String>, icon: Option<String>) {
+    fn apply_guild(
+        &mut self,
+        id: Snowflake,
+        name: Option<String>,
+        icon: Option<String>,
+        banner: Option<String>,
+    ) {
         if let Some(existing) = self.guilds.iter_mut().find(|guild| guild.id == id) {
             if let Some(name) = name {
                 existing.name = name;
@@ -186,12 +193,16 @@ impl Session {
             if icon.is_some() {
                 existing.icon = icon;
             }
+            if banner.is_some() {
+                existing.banner = banner;
+            }
             return;
         }
         self.guilds.push(Guild {
             id,
             name: name.unwrap_or_else(|| format!("Guild {id}")),
             icon,
+            banner,
         });
     }
 
@@ -398,11 +409,14 @@ impl Session {
             id: Snowflake::new(10),
             name: "Analytical Engines".into(),
             icon: None,
+            // A made-up hash; the desktop demo seeds a picture for it.
+            banner: Some("demo".into()),
         });
         session.upsert_guild(Guild {
             id: Snowflake::new(11),
             name: "Difference Club".into(),
             icon: None,
+            ..Default::default()
         });
         session.upsert_channel(Channel {
             id: Snowflake::new(100),
@@ -677,6 +691,7 @@ mod tests {
                 id: Snowflake::new(10),
                 name: None,
                 icon: None,
+                banner: None,
                 unavailable: true,
                 channels: Vec::new(),
             }],
@@ -688,6 +703,7 @@ mod tests {
             id: Snowflake::new(10),
             name: Some("Analytical Engines".into()),
             icon: Some("abc".into()),
+            banner: Some("bnr".into()),
             channels: vec![Channel {
                 id: Snowflake::new(100),
                 name: "general".into(),
@@ -701,6 +717,7 @@ mod tests {
         });
         assert_eq!(session.guilds[0].name, "Analytical Engines");
         assert_eq!(session.guilds[0].icon.as_deref(), Some("abc"));
+        assert_eq!(session.guilds[0].banner.as_deref(), Some("bnr"));
         assert_eq!(session.channels[&Snowflake::new(100)].guild_id, None);
         session.apply_gateway(GatewayEvent::ChannelUpsert(Channel {
             id: Snowflake::new(100),

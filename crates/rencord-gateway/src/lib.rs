@@ -62,6 +62,7 @@ pub enum GatewayEvent {
         id: Snowflake,
         name: Option<String>,
         icon: Option<String>,
+        banner: Option<String>,
         channels: Vec<rencord_model::Channel>,
     },
     GuildDelete(Snowflake),
@@ -369,6 +370,10 @@ fn guild_upsert(data: &Value) -> Result<Option<GatewayEvent>, GatewayError> {
         .get("icon")
         .and_then(|value| value.as_str())
         .map(str::to_owned);
+    let banner = data
+        .get("banner")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
     let mut channels = Vec::new();
     if let Some(list) = data.get("channels").and_then(|value| value.as_array()) {
         for item in list {
@@ -386,6 +391,7 @@ fn guild_upsert(data: &Value) -> Result<Option<GatewayEvent>, GatewayError> {
         id,
         name,
         icon,
+        banner,
         channels,
     }))
 }
@@ -927,6 +933,7 @@ mod tests {
                 "id": "10",
                 "name": "Analytical Engines",
                 "icon": "abc",
+                "banner": "bnr",
                 "channels": [{"id": "100", "type": 0, "name": "general"}]
             }),
         )
@@ -936,8 +943,10 @@ mod tests {
                 id,
                 name,
                 icon,
+                banner,
                 channels,
             }) => {
+                assert_eq!(banner.as_deref(), Some("bnr"));
                 assert_eq!(id.get(), 10);
                 assert_eq!(name.as_deref(), Some("Analytical Engines"));
                 assert_eq!(icon.as_deref(), Some("abc"));

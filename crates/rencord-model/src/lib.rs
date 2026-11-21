@@ -174,12 +174,15 @@ impl ChannelKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Guild {
     pub id: Snowflake,
     pub name: String,
     #[serde(default)]
     pub icon: Option<String>,
+    /// The picture behind the server name in the channel list.
+    #[serde(default)]
+    pub banner: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

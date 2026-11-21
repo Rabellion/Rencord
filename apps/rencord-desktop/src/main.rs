@@ -709,6 +709,11 @@ impl RencordWindow {
                 let cache = images::ImageCache::default();
                 if demo {
                     if let Some(picture) = bench_picture() {
+                        if let Some(url) =
+                            rencord_desktop::guild_banner_url(Snowflake::new(10), Some("demo"), 480)
+                        {
+                            cache.seed(&url, picture.clone());
+                        }
                         cache.seed("demo://bench", picture);
                     }
                 }
@@ -2108,23 +2113,67 @@ impl RencordWindow {
             },
         ));
 
+        // The server's banner behind its name when it has one, as Discord shows it.
+        let banner = self
+            .shell
+            .session
+            .guilds
+            .iter()
+            .find(|guild| Some(guild.id) == selected_guild)
+            .and_then(|guild| {
+                rencord_desktop::guild_banner_url(guild.id, guild.banner.as_deref(), 480)
+            })
+            .and_then(|url| pictures.picture(&url, 640, cx));
+        let sidebar_header: AnyElement = match banner {
+            Some(picture) => div()
+                .relative()
+                .w_full()
+                .h(px(112.))
+                .flex_shrink_0()
+                .overflow_hidden()
+                .border_b_1()
+                .border_color(rgb(palette.line))
+                .child(img(picture.image).size_full().object_fit(ObjectFit::Cover))
+                .child(
+                    div()
+                        .absolute()
+                        .bottom(px(0.))
+                        .left(px(0.))
+                        .right(px(0.))
+                        .h(px(44.))
+                        .bg(black().opacity(0.62)),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .bottom(px(10.))
+                        .left(px(palette.header_px))
+                        .right(px(palette.header_px))
+                        .truncate()
+                        .text_size(px(palette.title_px))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(white())
+                        .child(guild_name.clone()),
+                )
+                .into_any_element(),
+            None => div()
+                .h(px(palette.header_h))
+                .px(px(palette.header_px))
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(rgb(palette.line))
+                .text_size(px(palette.title_px))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(palette.text))
+                .child(guild_name.clone())
+                .into_any_element(),
+        };
         let mut sidebar = v_flex()
             .w_full()
             .h_full()
             .bg(rgb(palette.sidebar))
-            .child(
-                div()
-                    .h(px(palette.header_h))
-                    .px(px(palette.header_px))
-                    .flex()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(rgb(palette.line))
-                    .text_size(px(palette.title_px))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(palette.text))
-                    .child(guild_name.clone()),
-            )
+            .child(sidebar_header)
             .child(if ink {
                 h_flex()
                     .mx(px(10.))
