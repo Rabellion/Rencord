@@ -111,7 +111,8 @@ fn convert(rgb: vec3<f32>) -> vec3<f32> {{
 
 @compute @workgroup_size(64)
 fn tonemap(@builtin(global_invocation_id) gid: vec3<u32>) {{
-  let index = gid.x;
+  // 65535 groups * 64 invocations. A second row covers 4K.
+  let index = gid.x + gid.y * 4194240u;
   let count = arrayLength(&pixels_in);
   if (index >= count) {{
     return;

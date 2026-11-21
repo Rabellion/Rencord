@@ -138,7 +138,6 @@ fn main() {
             _ => rencord_upload::Flow::preview_sheet(),
         });
     let reveal_hover = args.iter().any(|arg| arg == "--reveal-hover");
-    let open_settings = args.iter().any(|arg| arg == "--open-settings");
     let theme_file = args
         .windows(2)
         .find(|pair| pair[0] == "--theme-file")
@@ -165,6 +164,10 @@ fn main() {
     let open_members = args
         .windows(2)
         .any(|pair| pair[0] == "--open" && pair[1] == "members");
+    let open_settings = args.iter().any(|arg| arg == "--open-settings")
+        || args
+            .windows(2)
+            .any(|pair| pair[0] == "--open" && pair[1] == "settings");
     if let Some(scale) = scale {
         // Read by GPUI before the X11 connection opens.
         std::env::set_var("GPUI_X11_SCALE_FACTOR", format!("{scale}"));
@@ -264,11 +267,11 @@ fn main() {
                     panel,
                     open_drawer,
                     open_members,
+                    open_settings,
                     persist_layout,
                     layout_store.clone(),
                     layout_path.clone(),
                     big_file,
-                    open_settings,
                     theme_file,
                     window,
                     cx,
@@ -419,11 +422,11 @@ impl RencordWindow {
         panel: Option<RightPanel>,
         open_drawer: bool,
         open_members: bool,
+        open_settings: bool,
         persist_layout: bool,
         layout_store: LayoutStore,
         layout_path: PathBuf,
         big_file: Option<rencord_upload::Flow>,
-        open_settings: bool,
         theme_file: Option<std::path::PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2351,6 +2354,24 @@ impl RencordWindow {
                 &flow,
                 palette,
             ));
+        }
+        // A grab of the live overlay missed the card, so a settings screenshot
+        // is the card on the black canvas by itself.
+        if settings && self.screenshot.is_some() {
+            return div()
+                .size_full()
+                .bg(rgb(palette.app_bg))
+                .child(self.settings_layer(
+                    cx,
+                    palette,
+                    density,
+                    &inputs,
+                    &outputs,
+                    chosen_in.as_deref(),
+                    chosen_out.as_deref(),
+                    voice.as_ref(),
+                ))
+                .into_any_element();
         }
         layer.into_any_element()
     }

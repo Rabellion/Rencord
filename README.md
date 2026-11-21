@@ -44,7 +44,7 @@ Several native Rust clients already exist. Rencord is aimed at the gaps that sho
 | **Voice cut-outs** | Adaptive jitter target from 40&nbsp;ms to 120&nbsp;ms, Opus PLC and in-band FEC, and a one-frame time-stretch instead of a hard skip. A loss simulation beats a fixed 40&nbsp;ms / 8-slot window at 1.5% and 5% loss. | Not measured on a live Discord call. Acoustic echo cancellation and noise suppression are not included. |
 | **Interface** | GPUI Kit 0.10. Direction A layout. The default theme is Onyx Ink: a true-black canvas, `#15152A` hairlines, a `#4F6BFF` accent with black ink on the banner, Inter for the UI, and JetBrains Mono for timestamps and status. Themes and custom themes are free. The same four columns sit edge to edge and reflow for 16:9, 16:10, 21:9, 32:9, portrait, and small windows. Ctrl/Cmd+K, density, and type size are in settings. No Nitro surface. | Not a screen-reader pass. Plugins are still out. Layouts B and C remain behind `--layout`. |
 | **Streaming** | In progress. Preview capture, the out-of-process worker, software encode, RTP, DAVE video wrap, and the Onyx picker/viewer/PiP are in the tree. VA-API and oneVPL are opened with `dlopen` when a device exists. A wide window shows the viewer only while a stream is open. | No GPU session on the CI machine, so hardware encode does not emit frames. The portal consent dialog, Windows Graphics Capture, and ScreenCaptureKit are not producing frames here. x264 is GPL and is not loaded. Discord may still reject a preset. |
-| **HDR** | `rencord-hdr` tone-maps with BT.2390, Hable, or ACES, writes HDR10 SEI/OBU metadata, and classifies DXGI, ScreenCaptureKit, Wayland, PipeWire, and EDID descriptors. Settings can opt in. The Go Live worker still tone-maps before encode. A 10-bit Discord track needs every viewer to advertise Rencord HDR and a caller to set the SFU flag. That flag is not set. | No NVENC/AMF/QSV/VideoToolbox/VA-API encode session that emits frames, no HEVC/AV1 decoder, no test against Discord's servers. |
+| **HDR** | BT.2390, Hable, and ACES run as a wgpu compute shader (Vulkan, Metal, or D3D12) when an adapter exists, and on the CPU otherwise. Settings can opt in. DXGI float and 10-bit, ScreenCaptureKit 10-bit, and PipeWire P010 are classified. Send-on builds an RHDR sidecar with real HDR10 SEI. | This machine's only adapter is lavapipe, at 50.4 ms for 1080p and 241 ms for 4K. A mid GPU under 2 ms / 4 ms was not attached. NVENC/AMF/QSV/VideoToolbox/VA-API Main10 sessions, D3D11VA, and VideoToolbox decode are not linked. No Discord SFU test. |
 
 Serein, Concord, and Yapfast are further along as daily drivers. Milestone 1 is the shell and the text path. Milestone 2 adds a voice websocket and UDP session, tested against a local stub, with mute, deafen, and gain. Milestone 3 is the quieter window described in [docs/design/UX.md](docs/design/UX.md). None of this has been signed into a real Discord voice server.
 
@@ -91,7 +91,7 @@ Honest status for this repository. "Implemented" means the code path and tests e
 | DAVE (E2EE) | Implemented | `davey` 0.2. Two-member MLS encrypt/decrypt test. Opcode routing keeps the transport up when a welcome fails. |
 | Adaptive jitter buffer | Implemented | See [Voice](#voice). |
 | Screen share / camera / Go Live | In progress | Worker, software encode, RTP, DAVE wrap, and `--golive` screens. VA-API and oneVPL are initialized when a device exists. This machine has no GPU session, so those encoders do not emit frames. PipeWire, Windows Graphics Capture, and ScreenCaptureKit do not produce frames yet. |
-| HDR | Software path | Tone-map, 10-bit metadata, probes, and signalling. See [HDR](docs/design/HDR.md). The worker still tone-maps. Hardware encode and Discord passthrough are not linked. |
+| HDR | GPU shader when an adapter exists | wgpu compute BT.2390, CPU fallback, capture-format classification, RHDR+SEI sidecar when send is on. See [HDR](docs/design/HDR.md). Lavapipe is not the 2 ms budget. Hardware Main10 encode and platform 10-bit decode are not linked. |
 | Notifications, keyring, tray, hotkeys | Stub | In-process notification sink. OS keyring is the intended next store; Milestone 1 uses the private file. |
 | Themes & custom themes, free | Implemented | Onyx Ink is the default. Light, Ash, Dark, Onyx, AMOLED, Midnight Blurple, Nord, Soft Contrast, and Crisp ship with the app. Custom colors, gradients, and theme files are not gated. The choice is stored per account and is not written back to Discord unless Follow Discord is on. See [docs/themes.md](docs/themes.md). |
 | Responsive layout | Implemented | Breakpoints use width, height, and aspect ratio. 16:9 and 16:10 keep the four columns, including 1440×900, 1366×768, 1280×800, and 1280×720. 21:9 and 32:9 cap the message measure and leave the spare width as a gutter unless a stream, thread, or profile panel is open. Portrait keeps a narrow rail, a channel button, and drawers for channels and members. Column edges drag, double-click resets, and widths are stored per aspect and scale. `--window WxH` and `--scale` open a sized window. |
@@ -132,6 +132,8 @@ cargo run -p rencord-desktop --bin rencord-measure -- --offline
 
 Settings > Appearance switches presets, syncs light and dark with the system, and edits a free custom theme. Density is compact 28 px rows, cozy 32 px, or spacious 36 px. Type size steps through 13–17 px. It lists cpal input and output names, shows the last loopback jitter line, and states that Go Live defaults to 720p30. The HDR row (Send, Receive, curve) is off by default. It configures the tone-map and the Rencord-to-Rencord plan. It does not start a capture. There is no Nitro row. Appearance stays on this machine unless Follow Discord is on, and even then Rencord only reads Discord's theme.
 
+<img src="docs/design/onyx/hdr-settings.png" alt="Onyx Ink settings with HDR send and receive off and the BT.2390 curve." width="640" />
+
 ## Measured on this machine
 
 Release build, `rencord --demo --bench`, Linux, X11, software GL, about 800 cached messages. A 120 Hz panel was not attached. The full write-up is [docs/design/UX.md](docs/design/UX.md).
@@ -144,15 +146,21 @@ Release build, `rencord --demo --bench`, Linux, X11, software GL, about 800 cach
 | Frame gap | About one 60 Hz frame | p50 16.7 ms over 23 frames while the bench changed channel every frame. |
 | Release binary | < 80 MB | 63 MB. The unstripped debug binary is 840 MB and is not the shipping build. |
 
-HDR tone-map, same machine, `cargo bench -p rencord-hdr --bench throughput`, one thread, 1920×1080, release. The number includes the BT.2020 to BT.709 matrix. BT.2390 uses a 4096-entry PQ table; the f64 EETF is the accuracy reference, not the per-pixel path.
+HDR tone-map, same machine, `cargo bench -p rencord-hdr --bench throughput`, release. The CPU number includes the BT.2020 to BT.709 matrix. The GPU number is one submit plus readback of the WGSL compute shader, after the pipeline already exists.
 
-| Curve | 1080p frame | Throughput |
-| --- | ---: | ---: |
-| BT.2390 | 87.7 ms | 23.7 Mpix/s |
-| Hable | 15.6 ms | 133 Mpix/s |
-| ACES | 12.6 ms | 165 Mpix/s |
+| Path | Frame | Time |
+| --- | --- | ---: |
+| CPU BT.2390 | 1080p | 91.8 ms |
+| CPU Hable | 1080p | 17.1 ms |
+| CPU ACES | 1080p | 13.0 ms |
+| wgpu BT.2390, lavapipe (LLVM 20.1.2) | 1080p | 50.4 ms |
+| wgpu BT.2390, lavapipe | 3840×2160 | 241 ms |
 
-HDR10 SEI and the AV1 metadata OBUs together take 0.31 µs. BT.2390 is not a 60 fps 1080p grade on this core. Details and the samples the tests lock are in [docs/design/HDR.md](docs/design/HDR.md).
+Lavapipe is a software Vulkan device. It is not a mid GPU, so the 2 ms (1080p) and 4 ms (4K) budgets were not measured. On this adapter the GPU path beats the CPU BT.2390 path and still misses a live frame. HDR10 SEI and the AV1 metadata OBUs together take 0.30 µs. Details are in [docs/design/HDR.md](docs/design/HDR.md).
+
+<img src="docs/design/onyx/hdr-tonemap.png" alt="Left: highlights clipped to white at 100 cd/m². Right: the same ramp tone-mapped with BT.2390, color kept." width="720" />
+
+Left of that frame is the ramp clipped at 100 cd/m². Right is BT.2390.
 
 `RENCORD_DATA_DIR` overrides the data directory. The default is `$XDG_DATA_HOME/rencord` or `~/.local/share/rencord`.
 
@@ -256,7 +264,7 @@ The UI does not embed egui. Protocol crates do not depend on GPUI.
 | 4. Threads, search, uploads, notifications | Not started | OS keyring behind the existing `SecretStore` trait. |
 | 5. Voice against Discord | Not started | Point `LiveCall` at a real voice server and keep DAVE rekeys without dropping the call. |
 | 6. Go Live | In progress | Preview frames, `rencord-stream`, software encode, RTP, DAVE wrap, and `--golive` screens are on `main`. VA-API, oneVPL, NVENC, AMF, and VideoToolbox are probed by loading the system library and opening a session. They do not encode until a GPU session succeeds. Real Windows Graphics Capture, ScreenCaptureKit, and a PipeWire consumer are not producing frames yet. 120 fps is offered only when the display reports that refresh and the encoder sustains the budget. |
-| 7. HDR between Rencord users (Milestone 5) | Software path | `rencord-hdr`: detection traits, BT.2390/Hable/ACES, HEVC Main10 and AV1 10-bit parameter blocks with HDR10 SEI/OBU, opt-in signalling, SDR fallback. `planned_pixel_path` is the hook the worker can call. `output_path` still tone-maps, so a running Go Live preview stays 8-bit. A Discord SFU test is not included. [docs/design/HDR.md](docs/design/HDR.md). |
+| 7. HDR between Rencord users (Milestone 5) | GPU shader linked; hardware codec not | wgpu runs the BT.2390 compute shader on Vulkan, Metal, or D3D12 and falls back to the CPU. DXGI `R16G16B16A16_FLOAT` and `R10G10B10A2`, ScreenCaptureKit 10-bit, and PipeWire P010 are classified. Send-on attaches an RHDR sidecar with HDR10 SEI through `Hdr10Encoder`; the NVENC/AMF/QSV/VideoToolbox/VA-API implementations of that trait return not-linked. D3D11VA, VideoToolbox, and VA-API decode are not opened. The swapchain format is chosen (`Rgb10a2Unorm` or `Rgba16Float`) and no HDR surface is created. Lavapipe measured 50.4 ms at 1080p and 241 ms at 4K, which misses the 2 ms / 4 ms mid-GPU budget. [docs/design/HDR.md](docs/design/HDR.md). |
 | 8. Files over the attachment cap | Implemented | Discord enforces the per-file cap on the server. This client cannot lift it. The composer sheet plans against the API reference default of 20 MiB with no Nitro (the older account-caps table still says 10 MB; Nitro Basic 50 MiB; Nitro 1 GiB; boost level 2 is 50 MiB and level 3 is 100 MiB, server-only, taking the maximum). `attachment_size_limit` wins when the API sends it. Over the cap: compress (ffmpeg two-pass when a hardware encoder is on PATH, WebP or JPEG in-process, Opus for 48 kHz WAV), upload to Litterbox, Catbox, a 0x0.st-compatible host, or a presigned PUT / S3-compatible endpoint and post the link, or split into zip or 7z volumes under the cap. A Rencord message with the split note has a Reassemble control. Screenshots: [docs/design/onyx/big-file.png](docs/design/onyx/big-file.png), [docs/design/onyx/big-file-progress.png](docs/design/onyx/big-file-progress.png). |
 
 The UI must not promise that Discord will accept a Go Live preset or a 10-bit stream. The capture worker publishes preview frames and tone-maps HDR to 8-bit. It does not send them to Discord. A 10-bit track stays off until a caller has proof the SFU forwarded HDR. There is no such proof in this repository.

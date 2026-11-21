@@ -6583,9 +6583,12 @@ dependencies = [
 name = "rencord-hdr"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "naga 25.0.1",
+ "pollster",
  "serde_json",
  "thiserror 2.0.21",
+ "wgpu",
 ]
 
 [[package]]
