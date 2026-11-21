@@ -7477,6 +7477,7 @@ dependencies = [
  "rencord-model",
  "rencord-protocol",
  "reqwest",
+ "resvg 0.45.1",
  "rqrr",
  "rsa",
  "serde",

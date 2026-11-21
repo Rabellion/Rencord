@@ -19,6 +19,7 @@ flate2.workspace = true
 futures-util.workspace = true
 http = "1"
 qrcode = "0.14"
+resvg = "0.45"
 rand = "0.8"
 rencord-model.workspace = true
 rencord-protocol.workspace = true

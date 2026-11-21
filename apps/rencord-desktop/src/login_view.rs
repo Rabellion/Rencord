@@ -86,7 +86,7 @@ impl LoginModel {
                 model.preview_name = "Ada Lovelace".into();
                 model.preview_handle = "ada".into();
                 model.avatar_bytes = Some(include_bytes!("../assets/avatars/ada.png").to_vec());
-                model.status = "Confirm on your phone".into();
+                model.status = "Waiting for approval…".into();
             }
             LoginPreview::Error => {
                 model.phase = LoginPhase::Error;
@@ -162,19 +162,45 @@ impl RencordWindow {
             LoginPhase::Error => self.error_face(cx, palette).into_any_element(),
             LoginPhase::Qr => self.qr_face(palette).into_any_element(),
         };
+        let this = cx.entity();
+        let link = if self.login.phase == LoginPhase::Confirm {
+            text_button(
+                this,
+                "login-not-you",
+                "Not you? Use a new code",
+                palette,
+                |view, _window, cx| view.start_qr(cx),
+            )
+            .into_any_element()
+        } else {
+            div().h(px(16.)).into_any_element()
+        };
         v_flex()
             .w(px(320.))
             .items_center()
-            .gap(px(12.))
-            .child(face)
-            .child(mono(self.login.status.clone(), palette, 12.))
+            .gap(px(10.))
+            .child(stage(face, self.login.phase, palette))
+            .child(self.caption(palette))
+            .child(link)
+    }
+
+    fn caption(&self, palette: Palette) -> impl IntoElement {
+        let mut row = h_flex()
+            .h(px(18.))
+            .items_center()
+            .justify_center()
+            .gap(px(6.));
+        if self.login.phase == LoginPhase::Confirm {
+            row = row.child(wait_spinner());
+        }
+        row.child(mono(self.login.status.clone(), palette, 12.))
     }
 
     fn qr_face(&mut self, palette: Palette) -> impl IntoElement {
         if self.login.qr_image.is_none() && !self.login.qr_png.is_empty() {
             self.login.qr_image = image_from_bytes(&self.login.qr_png);
         }
-        let code = if let Some(image) = self.login.qr_image.clone() {
+        if let Some(image) = self.login.qr_image.clone() {
             img(image)
                 .size(px(248.))
                 .object_fit(ObjectFit::Contain)
@@ -186,14 +212,7 @@ impl RencordWindow {
                 .justify_center()
                 .child(mono("Preparing the code…", palette, 12.))
                 .into_any_element()
-        };
-        div()
-            .p(px(16.))
-            .rounded(px(12.))
-            .bg(rgb(0xffffff))
-            .border_1()
-            .border_color(rgb(palette.line))
-            .child(code)
+        }
     }
 
     fn confirm_face(&mut self, palette: Palette) -> impl IntoElement {
@@ -213,14 +232,8 @@ impl RencordWindow {
                 .into_any_element()
         };
         v_flex()
-            .w(px(280.))
-            .p(px(24.))
             .items_center()
             .gap(px(8.))
-            .rounded(px(12.))
-            .border_1()
-            .border_color(rgb(palette.line))
-            .bg(rgb(palette.app_bg))
             .child(portrait)
             .child(ink("Confirm on your phone", palette.text, 18., true))
             .child(ink(
@@ -234,6 +247,7 @@ impl RencordWindow {
                 palette,
                 12.,
             ))
+            .into_any_element()
     }
 
     fn error_face(&mut self, cx: &mut Context<Self>, palette: Palette) -> impl IntoElement {
@@ -244,14 +258,9 @@ impl RencordWindow {
             .unwrap_or_else(|| "Discord could not finish signing in.".into());
         let this = cx.entity();
         v_flex()
-            .w(px(280.))
-            .p(px(24.))
             .items_center()
+            .justify_center()
             .gap(px(12.))
-            .rounded(px(12.))
-            .border_1()
-            .border_color(rgb(palette.line))
-            .bg(rgb(palette.app_bg))
             .child(ink(message, palette.danger, 15., false))
             .child(accent_button(
                 this,
@@ -261,6 +270,7 @@ impl RencordWindow {
                     view.start_qr(cx);
                 },
             ))
+            .into_any_element()
     }
 
     fn login_copy(&mut self, cx: &mut Context<Self>, palette: Palette) -> impl IntoElement {
@@ -268,7 +278,13 @@ impl RencordWindow {
         let mut column = v_flex()
             .w(px(360.))
             .gap(px(14.))
-            .child(ink("Rencord", palette.text, 28., true))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(hexwave_mark(palette.text, 36.))
+                    .child(ink("Rencord", palette.text, 28., true)),
+            )
             .child(ink("Sign in", palette.text, 16., true))
             .child(ink(
                 "Scan the code with the Discord mobile app. It will ask you to confirm this login.",
@@ -553,7 +569,7 @@ impl RencordWindow {
                 self.login.preview_handle = user.username.clone();
                 self.login.avatar_bytes = None;
                 self.login.avatar_image = None;
-                self.login.status = "Confirm on your phone".into();
+                self.login.status = "Waiting for approval…".into();
                 let url = user.avatar_url();
                 self.load_avatar(url, cx);
             }
@@ -1060,6 +1076,81 @@ fn mono(text: impl AsRef<str>, palette: Palette, size: f32) -> impl IntoElement 
         })
         .line_height(px(size + 6.))
         .child(text.as_ref().to_owned())
+}
+
+/// The left card is the same square in every sign-in state.
+fn stage(face: impl IntoElement, phase: LoginPhase, palette: Palette) -> impl IntoElement {
+    let code = phase == LoginPhase::Qr;
+    div()
+        .w(px(280.))
+        .h(px(280.))
+        .flex_shrink_0()
+        .rounded(px(12.))
+        .border_1()
+        .border_color(rgb(palette.line))
+        .bg(rgb(if code { 0xffffff } else { palette.app_bg }))
+        .flex()
+        .items_center()
+        .justify_center()
+        .overflow_hidden()
+        .child(face)
+}
+
+struct CachedMark {
+    color: u32,
+    png: Vec<u8>,
+}
+
+fn hexwave_mark(color: u32, size: f32) -> impl IntoElement {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<Vec<CachedMark>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    let png = {
+        let mut guard = cache.lock().expect("hexwave cache");
+        if let Some(hit) = guard.iter().find(|item| item.color == color) {
+            hit.png.clone()
+        } else {
+            let png = rencord_auth::hexwave_png(&format!("#{color:06X}"), 144).unwrap_or_default();
+            guard.push(CachedMark {
+                color,
+                png: png.clone(),
+            });
+            png
+        }
+    };
+    let image = Image::from_bytes(ImageFormat::Png, png);
+    img(std::sync::Arc::new(image))
+        .size(px(size))
+        .object_fit(ObjectFit::Contain)
+        .flex_shrink_0()
+}
+
+fn wait_spinner() -> impl IntoElement {
+    let mut dots = div().relative().size(px(16.)).flex_shrink_0();
+    for index in 0..8 {
+        let angle = index as f32 / 8.0 * std::f32::consts::TAU;
+        let x = 7.0 + angle.cos() * 5.5;
+        let y = 7.0 + angle.sin() * 5.5;
+        dots = dots.child(
+            div()
+                .absolute()
+                .left(px(x))
+                .top(px(y))
+                .size(px(2.5))
+                .rounded(px(2.))
+                .bg(rgb(0x9aa0c0))
+                .with_animation(
+                    SharedString::from(format!("login-wait-{index}")),
+                    Animation::new(std::time::Duration::from_millis(960)).repeat(),
+                    move |dot, delta| {
+                        let phase = (delta + index as f32 / 8.0).fract();
+                        let opacity = if phase < 0.18 { 1.0 } else { 0.28 };
+                        dot.opacity(opacity)
+                    },
+                ),
+        );
+    }
+    dots
 }
 
 fn bubble_initial(name: &str) -> String {

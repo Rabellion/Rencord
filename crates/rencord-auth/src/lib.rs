@@ -19,7 +19,7 @@ mod webview;
 pub use crypto::RemoteKey;
 pub use login_api::fetch_avatar;
 pub use login_api::{AuthClient, CaptchaChallenge, LoginOutcome, MfaChallenge, MfaMethod};
-pub use qr::{render_qr_image, render_qr_png, QrImage};
+pub use qr::{hexwave_png, render_qr_image, render_qr_png, QrImage};
 pub use redact::redact;
 pub use remote::{
     complete_remote_login, parse_user_payload, RemoteMachine, RemoteProgress, Step, UserPreview,

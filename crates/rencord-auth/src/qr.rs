@@ -1,8 +1,8 @@
 //! QR image for `https://discord.com/ra/<fingerprint>`.
 //!
-//! Error correction is level H so a center mark still scans. The mark is the
-//! Rencord tile: `#4F6BFF` with a black R, the same ink-on-accent pairing as
-//! the Onyx Ink banner.
+//! Error correction is level H so the center mark still scans. The mark is
+//! Hexwave: a hex speech bubble with the voice bars knocked out, and the
+//! middle bar in `#4F6BFF`.
 
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
@@ -14,22 +14,13 @@ use crate::AuthError;
 
 const SCALE: u32 = 8;
 const QUIET: u32 = 4;
+#[cfg(test)]
 const ACCENT: [u8; 4] = [0x4f, 0x6b, 0xff, 0xff];
 const INK: [u8; 4] = [0x00, 0x00, 0x00, 0xff];
 const PAPER: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
 
-/// 7×9 "R" drawn as ink. 1 is a filled cell.
-const MARK: [&[u8]; 9] = [
-    &[1, 1, 1, 1, 1, 0, 0],
-    &[1, 1, 0, 0, 0, 1, 1],
-    &[1, 1, 0, 0, 0, 1, 1],
-    &[1, 1, 0, 0, 0, 1, 1],
-    &[1, 1, 1, 1, 1, 0, 0],
-    &[1, 1, 0, 0, 1, 1, 0],
-    &[1, 1, 0, 0, 0, 1, 1],
-    &[1, 1, 0, 0, 0, 1, 1],
-    &[1, 1, 0, 0, 0, 1, 1],
-];
+/// Hexwave A knockout. `currentColor` is the bubble; the middle bar is blurple.
+const HEXWAVE: &str = include_str!("../../../assets/brand/hexwave-mark.svg");
 
 #[derive(Clone, Debug)]
 pub struct QrImage {
@@ -74,9 +65,10 @@ pub fn render_qr_png(url: &str) -> Result<Vec<u8>, AuthError> {
 fn paint_mark(image: &mut QrImage, modules: u32) {
     let code_px = modules * SCALE;
     let origin = QUIET * SCALE;
-    let tile = (code_px / 5).max(SCALE * 5);
-    let pad = tile / 6;
-    let outer = tile + pad * 2;
+    // About a fifth of the code, which level H still recovers.
+    let mark = ((code_px as f32) * 0.20).round().max(48.0) as u32;
+    let pad = SCALE * 2;
+    let outer = mark + pad * 2;
     let left = origin as i32 + (code_px as i32 - outer as i32) / 2;
     let top = origin as i32 + (code_px as i32 - outer as i32) / 2;
     fill_round(
@@ -85,40 +77,77 @@ fn paint_mark(image: &mut QrImage, modules: u32) {
         top,
         outer as i32,
         outer as i32,
-        (outer / 5) as i32,
+        (outer / 6) as i32,
         PAPER,
     );
-    let inner_left = left + pad as i32;
-    let inner_top = top + pad as i32;
-    fill_round(
-        image,
-        inner_left,
-        inner_top,
-        tile as i32,
-        tile as i32,
-        (tile / 5) as i32,
-        ACCENT,
-    );
-    blit_mark(image, inner_left, inner_top, tile as i32);
+    if let Some(pixmap) = render_hexwave(mark, "#000000") {
+        blit_pixmap(image, &pixmap, left + pad as i32, top + pad as i32);
+    }
 }
 
-fn blit_mark(image: &mut QrImage, left: i32, top: i32, tile: i32) {
-    let rows = MARK.len() as i32;
-    let cols = MARK[0].len() as i32;
-    let cell = (tile * 5 / 8) / rows.max(cols);
-    let cell = cell.max(1);
-    let mark_w = cell * cols;
-    let mark_h = cell * rows;
-    let x0 = left + (tile - mark_w) / 2;
-    let y0 = top + (tile - mark_h) / 2;
-    for row in 0..rows {
-        for col in 0..cols {
-            if MARK[row as usize][col as usize] == 0 {
+/// Raster of the Hexwave mark. `fill` replaces `currentColor` (the bubble).
+/// The middle bar stays `#4F6BFF`. Transparent pixels keep the background.
+pub fn hexwave_png(fill: &str, side: u32) -> Result<Vec<u8>, AuthError> {
+    let pixmap = render_hexwave(side.max(16), fill)
+        .ok_or_else(|| AuthError::Message("Could not draw the mark.".into()))?;
+    let mut pixels = Vec::with_capacity((pixmap.width() * pixmap.height() * 4) as usize);
+    for chunk in pixmap.data().chunks(4) {
+        let alpha = chunk[3];
+        if alpha == 0 {
+            pixels.extend_from_slice(&[0, 0, 0, 0]);
+            continue;
+        }
+        pixels.push(unpremultiply(chunk[0], alpha));
+        pixels.push(unpremultiply(chunk[1], alpha));
+        pixels.push(unpremultiply(chunk[2], alpha));
+        pixels.push(alpha);
+    }
+    encode_png(&QrImage {
+        width: pixmap.width(),
+        height: pixmap.height(),
+        pixels,
+    })
+}
+
+fn render_hexwave(side: u32, fill: &str) -> Option<resvg::tiny_skia::Pixmap> {
+    let svg = HEXWAVE.replace("currentColor", fill);
+    let options = resvg::usvg::Options::default();
+    let tree = resvg::usvg::Tree::from_str(&svg, &options).ok()?;
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(side, side)?;
+    let scale = side as f32 / tree.size().width();
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+    Some(pixmap)
+}
+
+fn blit_pixmap(image: &mut QrImage, pixmap: &resvg::tiny_skia::Pixmap, left: i32, top: i32) {
+    let width = pixmap.width() as i32;
+    let height = pixmap.height() as i32;
+    let data = pixmap.data();
+    for y in 0..height {
+        for x in 0..width {
+            let index = ((y * width + x) * 4) as usize;
+            let alpha = data[index + 3];
+            if alpha < 16 {
                 continue;
             }
-            fill_rect(image, x0 + col * cell, y0 + row * cell, cell, cell, INK);
+            let color = [
+                unpremultiply(data[index], alpha),
+                unpremultiply(data[index + 1], alpha),
+                unpremultiply(data[index + 2], alpha),
+                255,
+            ];
+            put(image, left + x, top + y, color);
         }
     }
+}
+
+fn unpremultiply(channel: u8, alpha: u8) -> u8 {
+    let value = (u16::from(channel) * 255 + u16::from(alpha) / 2) / u16::from(alpha);
+    value.min(255) as u8
 }
 
 fn fill_rect(image: &mut QrImage, x: i32, y: i32, w: i32, h: i32, color: [u8; 4]) {
