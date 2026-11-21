@@ -189,7 +189,7 @@ jobs:
           @"
           Test build for the owner. Windows x64 installer. Unofficial client: Discord's terms can end the account.
 
-          Since v0.5.0: UDP discovery retries a dropped probe and ignores a garbage datagram, for voice and Go Live. The Go Live worker is the same Rencord.exe, started again with --stream-worker, and this build is an installer rather than a loose zip. A QR ticket exchange keeps Discord's reply when it fails. The login window can show an hCaptcha panel in the app. The audit pass keeps the gateway up across short drops and rate limits, and checks the full RTP header.
+          Since v0.5.1: UDP discovery retries a dropped probe and ignores a garbage datagram, for voice and Go Live. This build is an installer. The Go Live worker is the same Rencord.exe, started again with --stream-worker. On Windows a captcha opens in an in-window hCaptcha panel that the user solves, and the login is retried with the token. After sign-in the gateway stays connected, reconnects after a short drop, waits out a short rate limit, and signs out on close code 4004. Reassemble checks volume headers and the hash and refuses a set that does not agree. Voice speaks DAVE with a key package and the binary prefixes stripped. Join voice, when you are signed in, asks Discord to join the selected voice channel, and the chosen input and output names are passed to the audio devices. Scrolling to the top loads the previous page and keeps your place. A failed fetch shows Discord's message and a Retry button. Guild names arrive with the session, an unopened channel can show unread, message times use the local timezone, and a new account stays on Onyx Ink. Voice and the captcha panel have not been tested against live Discord. The session screenshots were taken against a local stub.
 
           The setup installs per user to %LOCALAPPDATA%\Programs\Rencord unless you choose an all-users install. It adds a Start Menu shortcut, an optional desktop shortcut, and an uninstaller. The uninstaller asks before deleting user data in %APPDATA%, and a silent uninstall keeps that data.
 
@@ -203,13 +203,13 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: Rencord v0.6.0 (test build)
+          name: Rencord ${{ github.ref_name }} (test build)
           prerelease: true
           make_latest: false
           generate_release_notes: false
           body_path: dist/notes.md
           files: |
-            dist/Rencord-v0.6.0-setup-x64.exe
+            dist/Rencord-${{ github.ref_name }}-setup-x64.exe
             dist/SHA256SUMS.txt
             dist/Rencord-signing.cer
         env:
