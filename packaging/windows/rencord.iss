@@ -2,7 +2,12 @@
 ; and Program Files when the user picks an all-users install.
 
 #define MyAppName "Rencord"
-#define MyAppVersion "0.6.0"
+#ifndef MyAppVersion
+  #define MyAppVersion "0.6.0"
+#endif
+#ifndef VersionQuad
+  #define VersionQuad "0.6.0.0"
+#endif
 #define MyAppPublisher "Rabellion"
 #define MyAppExeName "Rencord.exe"
 #ifndef ExeSource
@@ -14,7 +19,7 @@ AppId={{7F3A9C2E-1B64-4E8D-A5F0-6C2D8E4B91A3}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-VersionInfoVersion=0.6.0.0
+VersionInfoVersion={#VersionQuad}
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoProductName={#MyAppName}
 VersionInfoDescription=Rencord
@@ -23,7 +28,7 @@ DefaultGroupName=Rencord
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
-OutputBaseFilename=Rencord-v0.6.0-setup-x64
+OutputBaseFilename=Rencord-v{#MyAppVersion}-setup-x64
 SetupIconFile=..\..\assets\brand\hexwave.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}

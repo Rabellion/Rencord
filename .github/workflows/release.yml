@@ -13,6 +13,7 @@ jobs:
   windows:
     name: Windows x64
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.100.0
@@ -24,18 +25,34 @@ jobs:
           choco install innosetup -y --no-progress
           if ($LASTEXITCODE -eq 3010) { exit 0 }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check the tag
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if (-not $version) { throw "Cargo.toml has no version" }
+          Set-Content -Path dist-version.txt -Value $version -Encoding ascii
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "tag $($env:GITHUB_REF_NAME) does not match v$version"
+          }
+          Write-Host "version $version"
       - name: Build
+        timeout-minutes: 20
         shell: pwsh
         run: |
           $env:RUSTFLAGS = "-C target-feature=+crt-static"
           $env:CFLAGS = "/MT"
           $env:CXXFLAGS = "/MT"
           cargo build --release --locked --target x86_64-pc-windows-msvc -p rencord-desktop --bin rencord
-      - name: Sign, package, and smoke-test
-        timeout-minutes: 25
+      - name: Sign
+        timeout-minutes: 15
         shell: pwsh
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         run: |
           $ErrorActionPreference = "Stop"
+          . (Join-Path $env:GITHUB_WORKSPACE "packaging\windows\bounded.ps1")
           $root = $env:GITHUB_WORKSPACE
           $dist = Join-Path $root "dist"
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
@@ -45,16 +62,11 @@ jobs:
           if (Test-Path (Join-Path $root "target\x86_64-pc-windows-msvc\release\rencord-stream.exe")) {
             throw "the release build produced rencord-stream.exe"
           }
-
           $kits = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $kits) { throw "signtool.exe was not found" }
           $signtool = $kits.FullName
-          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) { throw "ISCC.exe was not found" }
-
           $pfx = Join-Path $dist "signing.pfx"
           $cer = Join-Path $dist "Rencord-signing.cer"
-          $selfSigned = $false
           if ($env:WINDOWS_CERT_PFX_BASE64 -and $env:WINDOWS_CERT_PASSWORD) {
             [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT_PFX_BASE64))
             $password = $env:WINDOWS_CERT_PASSWORD
@@ -63,114 +75,134 @@ jobs:
             Export-Certificate -Cert $imported -FilePath $cer | Out-Null
             Write-Host "Using the certificate from repository secrets."
           } else {
-            $selfSigned = $true
             $password = "RencordSelfSigned"
             $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Rabellion" -CertStoreLocation Cert:\CurrentUser\My -HashAlgorithm SHA256 -KeyExportPolicy Exportable -NotAfter (Get-Date).AddYears(3)
             $secure = ConvertTo-SecureString -String $password -Force -AsPlainText
             Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $secure | Out-Null
             Export-Certificate -Cert $cert -FilePath $cer | Out-Null
+            Set-Content -Path (Join-Path $dist "self-signed.txt") -Value "yes" -Encoding ascii
             Write-Host "No signing secret was set. Generated a self-signed CN=Rabellion certificate."
           }
-
           $env:RENCORD_PFX = $pfx
           $env:RENCORD_PFX_PASSWORD = $password
           $env:RENCORD_SIGNTOOL = $signtool
-          $stampFile = Join-Path $dist "timestamp-server.txt"
-          $env:RENCORD_TIMESTAMP_FILE = $stampFile
+          $env:RENCORD_TIMESTAMP_FILE = Join-Path $dist "timestamp-server.txt"
+          Invoke-Bounded -File (Get-Command pwsh).Source -ArgumentList @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            (Join-Path $root "packaging\windows\sign.ps1"), $exe
+          ) -TimeoutSec 240 -Label "sign Rencord.exe"
+          Write-Host "signed Rencord.exe via $((Get-Content $env:RENCORD_TIMESTAMP_FILE -Raw).Trim())"
+      - name: Package
+        timeout-minutes: 15
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          . (Join-Path $env:GITHUB_WORKSPACE "packaging\windows\bounded.ps1")
+          $root = $env:GITHUB_WORKSPACE
+          $dist = Join-Path $root "dist"
+          $version = Get-Content (Join-Path $root "dist-version.txt") -Raw
+          $version = $version.Trim()
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          $env:RENCORD_PFX = Join-Path $dist "signing.pfx"
+          $env:RENCORD_PFX_PASSWORD = if (Test-Path (Join-Path $dist "self-signed.txt")) { "RencordSelfSigned" } else { $env:WINDOWS_CERT_PASSWORD }
+          $env:RENCORD_SIGNTOOL = $signtool
+          $env:RENCORD_TIMESTAMP_FILE = Join-Path $dist "timestamp-server.txt"
+          $pwsh = (Get-Command pwsh).Source
           $signScript = Join-Path $root "packaging\windows\sign.ps1"
-          function Sign-Binary([string]$Path) {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $signScript $Path
-            if ($LASTEXITCODE -ne 0) { throw "could not sign $Path" }
-          }
-
-          Sign-Binary $exe
-          $script:TimestampServer = (Get-Content $stampFile -Raw).Trim()
-          $signCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `$q$signScript`$q `$f"
-          & $iscc "/Srencord=$signCmd" "/DExeSource=$exe" "/O$dist" (Join-Path $root "packaging\windows\rencord.iss")
-          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
-          $setup = Join-Path $dist "Rencord-v0.6.0-setup-x64.exe"
-          if (-not (Test-Path $setup)) { throw "setup exe missing" }
-
+          $signCmd = "`"$pwsh`" -NoProfile -ExecutionPolicy Bypass -File `$q$signScript`$q `$f"
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          Invoke-Bounded -File $iscc -ArgumentList @(
+            "/Srencord=$signCmd",
+            "/DExeSource=$(Join-Path $dist 'Rencord.exe')",
+            "/DMyAppVersion=$version",
+            "/DVersionQuad=$($version).0",
+            "/O$dist",
+            (Join-Path $root "packaging\windows\rencord.iss")
+          ) -TimeoutSec 720 -Label "Inno Setup"
+          $setup = Join-Path $dist "Rencord-v$version-setup-x64.exe"
+          if (-not (Test-Path $setup)) { throw "setup exe missing: $setup" }
+          Write-Host "packaged $setup"
+      - name: Smoke-test
+        timeout-minutes: 15
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          . (Join-Path $env:GITHUB_WORKSPACE "packaging\windows\bounded.ps1")
+          $root = $env:GITHUB_WORKSPACE
+          $dist = Join-Path $root "dist"
+          $version = (Get-Content (Join-Path $root "dist-version.txt") -Raw).Trim()
+          $setup = Join-Path $dist "Rencord-v$version-setup-x64.exe"
+          $exe = Join-Path $dist "Rencord.exe"
+          $cer = Join-Path $dist "Rencord-signing.cer"
+          $selfSigned = Test-Path (Join-Path $dist "self-signed.txt")
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          $server = (Get-Content (Join-Path $dist "timestamp-server.txt") -Raw).Trim()
           if ($selfSigned) {
             Import-Certificate -FilePath $cer -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
             Import-Certificate -FilePath $cer -CertStoreLocation Cert:\CurrentUser\TrustedPublisher | Out-Null
           }
           function Show-Signature([string]$Path) {
             Write-Host "---- signature $Path"
-            & $signtool verify /pa /tw $Path
-            if ($LASTEXITCODE -ne 0) { throw "verify failed for $Path" }
+            Invoke-Bounded -File $signtool -ArgumentList @("verify", "/pa", "/tw", $Path) -TimeoutSec 60 -Label "verify $Path"
             $info = Get-AuthenticodeSignature $Path
-            Write-Host ("Status={0} Subject={1} Timestamp={2}" -f $info.Status, $info.SignerCertificate.Subject, $(if ($info.TimeStamperCertificate) { $info.TimeStamperCertificate.Subject } else { "missing" }))
+            $stamp = if ($info.TimeStamperCertificate) { $info.TimeStamperCertificate.Subject } else { "missing" }
+            Write-Host ("Status={0} Subject={1} Timestamp={2}" -f $info.Status, $info.SignerCertificate.Subject, $stamp)
             if (-not $info.TimeStamperCertificate) { throw "missing timestamp on $Path" }
           }
           Show-Signature $exe
           Show-Signature $setup
-
           $installDir = Join-Path $env:LOCALAPPDATA "Programs\Rencord"
-          & $setup /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR="$installDir"
-          if ($LASTEXITCODE -ne 0) { throw "silent install failed: $LASTEXITCODE" }
+          Invoke-Bounded -File $setup -ArgumentList @(
+            "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir"
+          ) -TimeoutSec 180 -Label "silent install"
           $installed = Join-Path $installDir "Rencord.exe"
           if (-not (Test-Path $installed)) { throw "installed exe missing" }
           if (Test-Path (Join-Path $installDir "rencord-stream.exe")) { throw "installer laid down rencord-stream.exe" }
-          $check = New-Object System.Diagnostics.Process
-          $check.StartInfo.FileName = $installed
-          $check.StartInfo.Arguments = "--worker-check"
-          $check.StartInfo.UseShellExecute = $false
-          $check.StartInfo.RedirectStandardOutput = $true
-          $check.Start() | Out-Null
-          if (-not $check.WaitForExit(20000)) {
-            try { $check.Kill() } catch {}
-            throw "worker-check hung"
-          }
-          if ($check.ExitCode -ne 0) { throw "worker-check failed: $($check.ExitCode)" }
+          $checkOut = Join-Path $dist "worker-check.txt"
+          Invoke-Bounded -File $installed -ArgumentList @("--worker-check") -TimeoutSec 20 -Label "worker-check" -RedirectStandardOutput $checkOut
+          $checkText = Get-Content $checkOut -Raw
+          if ($checkText -notmatch "WORKER_CHECK") { throw "worker-check did not print its banner: $checkText" }
           $bannerPath = Join-Path $dist "worker-banner.txt"
-          $psi = New-Object System.Diagnostics.ProcessStartInfo
-          $psi.FileName = $installed
-          $psi.Arguments = "--stream-worker"
-          $psi.RedirectStandardOutput = $true
-          $psi.UseShellExecute = $false
-          $psi.CreateNoWindow = $true
-          $worker = [Diagnostics.Process]::Start($psi)
-          $read = $worker.StandardOutput.ReadLineAsync()
+          $worker = Start-Process -FilePath $installed -ArgumentList @("--stream-worker") -PassThru -NoNewWindow -RedirectStandardOutput $bannerPath
+          $null = Wait-Process -Id $worker.Id -Timeout 20 -ErrorAction SilentlyContinue
           $banner = ""
-          if ($read.Wait(15000)) { $banner = $read.Result }
-          if (-not $worker.HasExited) { $worker.Kill() }
+          if (Test-Path $bannerPath) { $banner = Get-Content $bannerPath -Raw -ErrorAction SilentlyContinue }
+          if (-not $worker.HasExited) { & taskkill.exe /F /T /PID $worker.Id | Out-Null }
           if ($banner -notmatch "RENCORD_STREAM") { throw "installed exe did not enter stream worker mode: $banner" }
           $unins = Get-ChildItem $installDir -Filter "unins*.exe" | Select-Object -First 1
           if (-not $unins) { throw "uninstaller missing" }
           Show-Signature $unins.FullName
-          & $unins.FullName /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
-          if ($LASTEXITCODE -ne 0) { throw "silent uninstall failed: $LASTEXITCODE" }
+          Invoke-Bounded -File $unins.FullName -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -TimeoutSec 180 -Label "silent uninstall"
           if (Test-Path $installed) { throw "uninstall left Rencord.exe behind" }
           Write-Host "SMOKE_OK install worker-check stream-worker uninstall"
-
           $hash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
-          $lines = @("{0}  Rencord-v0.6.0-setup-x64.exe" -f $hash)
-          $files = @($setup)
-          if ($selfSigned) { $files += $cer }
-          foreach ($file in $files) {
-            $name = Split-Path $file -Leaf
-            $digest = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
-            if ($name -ne "Rencord-v0.6.0-setup-x64.exe") {
-              $lines += "{0}  {1}" -f $digest, $name
-            }
+          $lines = @("{0}  Rencord-v$version-setup-x64.exe" -f $hash)
+          if ($selfSigned) {
+            $lines += "{0}  Rencord-signing.cer" -f (Get-FileHash $cer -Algorithm SHA256).Hash.ToLower()
           }
-          $sums = Join-Path $dist "SHA256SUMS.txt"
-          $lines | Set-Content -Encoding ascii $sums
+          $lines | Set-Content -Encoding ascii (Join-Path $dist "SHA256SUMS.txt")
+          $signing = if ($selfSigned) {
+            "self-signed certificate, subject CN=Rabellion, SHA-256, timestamped by $server. SmartScreen can still warn. Choose More info, then Run anyway. Real trust needs an OV or EV certificate, or Azure Trusted Signing. Rencord-signing.cer is attached if you want to trust this build locally."
+          } else {
+            "signed with the repository certificate, SHA-256, timestamped by $server."
+          }
           @"
           Test build for the owner. Windows x64 installer. Unofficial client: Discord's terms can end the account.
 
-          Since v0.5.0: UDP discovery retries a dropped probe and ignores a garbage datagram, for voice and Go Live. The Go Live worker is the same Rencord.exe, started again with --stream-worker, and this build is an installer rather than a loose zip. A QR ticket exchange keeps Discord's reply when it fails. The login window can show an hCaptcha panel in the app.
+          Since v0.5.0: UDP discovery retries a dropped probe and ignores a garbage datagram, for voice and Go Live. The Go Live worker is the same Rencord.exe, started again with --stream-worker, and this build is an installer rather than a loose zip. A QR ticket exchange keeps Discord's reply when it fails. The login window can show an hCaptcha panel in the app. The audit pass keeps the gateway up across short drops and rate limits, and checks the full RTP header.
 
-          The setup installs per user to %LOCALAPPDATA%\Programs\Rencord unless you choose an all-users install. It adds a Start Menu shortcut, an optional desktop shortcut, and an uninstaller. The uninstaller asks before deleting user data in %APPDATA%.
+          The setup installs per user to %LOCALAPPDATA%\Programs\Rencord unless you choose an all-users install. It adds a Start Menu shortcut, an optional desktop shortcut, and an uninstaller. The uninstaller asks before deleting user data in %APPDATA%, and a silent uninstall keeps that data.
 
-          Signing: $(if ($selfSigned) { "self-signed certificate, subject CN=Rabellion, SHA-256, timestamped by $($script:TimestampServer). SmartScreen can still warn. Choose More info, then Run anyway. Real trust needs an OV or EV certificate, or Azure Trusted Signing. Rencord-signing.cer is attached if you want to trust this build locally." } else { "signed with the repository certificate, SHA-256, timestamped by $($script:TimestampServer)." })
+          Signing: $signing
 
-          SHA-256 of Rencord-v0.6.0-setup-x64.exe: $hash
+          SHA-256 of Rencord-v$version-setup-x64.exe: $hash
           "@ | Set-Content -Encoding utf8 (Join-Path $dist "notes.md")
-          Remove-Item $pfx -Force
-          Remove-Item $exe -Force
-          Remove-Item $bannerPath -Force -ErrorAction SilentlyContinue
+          Remove-Item (Join-Path $dist "signing.pfx") -Force -ErrorAction SilentlyContinue
+          Remove-Item $exe -Force -ErrorAction SilentlyContinue
       - name: Publish pre-release
         uses: softprops/action-gh-release@v2
         with:
