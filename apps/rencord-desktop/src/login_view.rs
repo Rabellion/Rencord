@@ -12,7 +12,7 @@ use rencord_auth::{
     AuthClient, AuthError, LoginOutcome, MfaChallenge, MfaMethod, RemoteProgress, AUTH_API_ROOT,
     REMOTE_AUTH_GATEWAY,
 };
-use rencord_desktop::{stacks_login, Palette, ThemeMode};
+use rencord_desktop::{stacks_login, Palette};
 use rencord_model::Token;
 use rencord_platform::{FileSecretStore, SecretStore};
 
@@ -191,7 +191,7 @@ impl RencordWindow {
             .justify_center()
             .gap(px(6.));
         if self.login.phase == LoginPhase::Confirm {
-            row = row.child(wait_spinner());
+            row = row.child(wait_spinner(palette));
         }
         row.child(mono(self.login.status.clone(), palette, 12.))
     }
@@ -202,7 +202,7 @@ impl RencordWindow {
         }
         if let Some(image) = self.login.qr_image.clone() {
             img(image)
-                .size(px(248.))
+                .size(px(278.))
                 .object_fit(ObjectFit::Contain)
                 .into_any_element()
         } else {
@@ -266,6 +266,7 @@ impl RencordWindow {
                 this,
                 "login-refresh",
                 "New code",
+                palette,
                 |view, _window, cx| {
                     view.start_qr(cx);
                 },
@@ -301,6 +302,7 @@ impl RencordWindow {
             this.clone(),
             "login-discord",
             "Log in with Discord",
+            palette,
             |view, _window, cx| view.open_webview(cx),
         ));
         column = column.child(text_button(
@@ -394,6 +396,7 @@ impl RencordWindow {
                     this.clone(),
                     "login-mfa-submit",
                     "Submit code",
+                    palette,
                     |view, window, cx| view.submit_mfa(window, cx),
                 ));
             if mfa.sms {
@@ -419,6 +422,7 @@ impl RencordWindow {
                 this,
                 "login-password-submit",
                 "Continue",
+                palette,
                 |view, window, cx| view.submit_password(window, cx),
             ));
         }
@@ -439,6 +443,7 @@ impl RencordWindow {
                 this,
                 "login-token-submit",
                 "Use token",
+                palette,
                 |view, _window, cx| {
                     view.submit_token(cx);
                 },
@@ -689,6 +694,11 @@ impl RencordWindow {
         let _ = self.session_machine.established(record.user_id.clone());
         self.session_token = Some(token);
         self.shell.set_user(snapshot.user);
+        self.shell.load_appearance();
+        self.shell.consider_discord_appearance(
+            snapshot.discord_theme.as_deref(),
+            snapshot.discord_client_theme.as_deref(),
+        );
         for guild in snapshot.guilds {
             self.shell.session.upsert_guild(guild);
         }
@@ -1005,6 +1015,7 @@ fn accent_button(
     view: Entity<RencordWindow>,
     id: &'static str,
     label: &'static str,
+    palette: Palette,
     action: impl Fn(&mut RencordWindow, &mut Window, &mut Context<RencordWindow>) + 'static,
 ) -> impl IntoElement {
     div()
@@ -1016,8 +1027,8 @@ fn accent_button(
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .bg(rgb(0x4f6bff))
-        .child(ink(label, 0x000000, 14., true))
+        .bg(rgb(palette.accent))
+        .child(ink(label, palette.accent_text, 14., true))
         .on_click(move |_, window, cx| {
             view.update(cx, |this, cx| action(this, window, cx));
         })
@@ -1069,18 +1080,14 @@ fn mono(text: impl AsRef<str>, palette: Palette, size: f32) -> impl IntoElement 
     div()
         .text_size(px(size))
         .text_color(rgb(palette.muted))
-        .font_family(if matches!(palette.mode, ThemeMode::Onyx) {
-            "JetBrains Mono"
-        } else {
-            "Figtree"
-        })
+        .font_family(palette.font_mono)
         .line_height(px(size + 6.))
         .child(text.as_ref().to_owned())
 }
 
 /// The left card is the same square in every sign-in state.
 fn stage(face: impl IntoElement, phase: LoginPhase, palette: Palette) -> impl IntoElement {
-    let code = phase == LoginPhase::Qr;
+    let paper = phase == LoginPhase::Qr;
     div()
         .w(px(280.))
         .h(px(280.))
@@ -1088,7 +1095,7 @@ fn stage(face: impl IntoElement, phase: LoginPhase, palette: Palette) -> impl In
         .rounded(px(12.))
         .border_1()
         .border_color(rgb(palette.line))
-        .bg(rgb(if code { 0xffffff } else { palette.app_bg }))
+        .bg(rgb(if paper { palette.qr_bg } else { palette.app_bg }))
         .flex()
         .items_center()
         .justify_center()
@@ -1125,7 +1132,7 @@ fn hexwave_mark(color: u32, size: f32) -> impl IntoElement {
         .flex_shrink_0()
 }
 
-fn wait_spinner() -> impl IntoElement {
+fn wait_spinner(palette: Palette) -> impl IntoElement {
     let mut dots = div().relative().size(px(16.)).flex_shrink_0();
     for index in 0..8 {
         let angle = index as f32 / 8.0 * std::f32::consts::TAU;
@@ -1138,7 +1145,7 @@ fn wait_spinner() -> impl IntoElement {
                 .top(px(y))
                 .size(px(2.5))
                 .rounded(px(2.))
-                .bg(rgb(0x9aa0c0))
+                .bg(rgb(palette.muted))
                 .with_animation(
                     SharedString::from(format!("login-wait-{index}")),
                     Animation::new(std::time::Duration::from_millis(960)).repeat(),
