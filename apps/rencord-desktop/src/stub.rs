@@ -91,8 +91,8 @@ async fn handle_http(mut stream: TcpStream, scene: StubScene) {
     let Some(line) = text.lines().next() else {
         return;
     };
-    let path = line.split_whitespace().nth(1).unwrap_or("/");
-    let path = path.split('?').next().unwrap_or(path);
+    let target = line.split_whitespace().nth(1).unwrap_or("/");
+    let path = target.split('?').next().unwrap_or(target);
     if path.contains("/avatars/")
         || path.contains("/icons/")
         || path.contains("/banners/")
@@ -108,10 +108,10 @@ async fn handle_http(mut stream: TcpStream, scene: StubScene) {
         let _ = stream.write_all(&bytes).await;
         return;
     }
-    if path.contains("before=") {
+    if target.contains("before=") {
         tokio::time::sleep(Duration::from_millis(1500)).await;
     }
-    let (status, body) = respond(scene, path);
+    let (status, body) = respond(scene, target);
     let header = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -323,5 +323,12 @@ mod tests {
         );
         assert!(page.contains("\"2900\""), "{page}");
         assert!(!page.contains("\"3000\""), "{page}");
+        let target = "/api/v10/channels/100/messages?before=2951&limit=50";
+        let path = target.split('?').next().unwrap_or(target);
+        assert!(target.contains("before="));
+        assert!(!path.contains("before="));
+        let (status, page) = respond(StubScene::Scroll, target);
+        assert!(status.starts_with("200"), "{status}");
+        assert!(page.contains("\"2900\""), "{page}");
     }
 }

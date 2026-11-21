@@ -567,8 +567,13 @@ fn portrait_layout(
     let show_rail = width + 0.5 >= rail_w + CHAT_FLOOR + shell_chrome(2, gap);
     let rail = if show_rail { rail_w } else { 0.0 };
     let channel_room = width - shell_chrome(3, gap) - rail - CHAT_FLOOR;
-    let channels = if channel_room + 0.5 >= CHANNELS_MIN {
-        channel_room.min(240.0)
+    let channels_can = channel_room + 0.5 >= CHANNELS_MIN;
+    let channels = if channels_can && input.show_channels {
+        input
+            .saved
+            .channels
+            .unwrap_or(input.metrics.channels)
+            .clamp(CHANNELS_MIN, channel_room.min(CHANNELS_MAX))
     } else {
         0.0
     };
@@ -591,7 +596,7 @@ fn portrait_layout(
             None
         },
         reading_anchor: input.reading_anchor,
-        channels_as_drawer: channels == 0.0,
+        channels_as_drawer: !channels_can,
         members_as_overlay: true,
         right_as_overlay: kind.is_some(),
         voice_in_chat: true,
