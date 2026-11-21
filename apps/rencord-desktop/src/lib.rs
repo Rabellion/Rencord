@@ -6,6 +6,7 @@ mod icons;
 pub mod layout;
 mod search;
 mod theme;
+mod timefmt;
 
 use rencord_model::{Message, Snowflake, User};
 use rencord_store::Session;
@@ -22,6 +23,7 @@ pub use theme::{
     guild_tile, role_color, theme_file_from_path, token_summary, Density, HdrCurveChoice,
     LayoutKind, Palette, Preferences, Theme, ThemeMode, MOTION_OVERLAY_MS,
 };
+pub use timefmt::{day_changed, now_local, present_time, Presented};
 
 #[derive(Clone, Debug)]
 pub enum Mutation {
@@ -517,13 +519,10 @@ impl Shell {
         let _ = rencord_theme::write_appearance(&path, &self.prefs.to_file());
     }
 
-    /// Use Discord's synced light/dark/client theme as a starting point.
-    /// Nothing here writes appearance back to Discord. A later launch keeps
-    /// the local file unless the user opted in to follow Discord.
+    /// Apply Discord's light/dark theme only when Follow Discord is on.
+    /// A fresh account stays on Onyx Ink. Nothing here writes appearance back.
     pub fn consider_discord_appearance(&mut self, theme: Option<&str>, client: Option<&str>) {
-        let path = rencord_platform::appearance_path(&self.appearance_account());
-        let saved = path.is_file();
-        if !(self.prefs.sync_discord || (!saved && !self.prefs.seeded_from_discord)) {
+        if !self.prefs.sync_discord {
             return;
         }
         if let Some(preset) = rencord_theme::map_discord_appearance(theme, client) {
@@ -1067,6 +1066,26 @@ mod tests {
         shell.begin_reply(Snowflake::new(1000));
         shell.send_local("noted");
         assert!(shell.outline().contains("replying to 1000"));
+    }
+
+    #[test]
+    fn a_fresh_account_stays_on_onyx_ink_when_discord_says_dark() {
+        let mut shell = Shell::login();
+        assert_eq!(shell.prefs.theme, ThemeMode::OnyxInk);
+        shell.consider_discord_appearance(Some("dark"), None);
+        assert_eq!(shell.prefs.theme, ThemeMode::OnyxInk);
+        shell.prefs.sync_discord = true;
+        shell.set_user(User {
+            id: Snowflake::new(4242),
+            username: "ada".into(),
+            global_name: None,
+            discriminator: None,
+            bot: false,
+            avatar: None,
+        });
+        shell.consider_discord_appearance(Some("dark"), None);
+        assert_eq!(shell.prefs.theme, ThemeMode::Dark);
+        let _ = std::fs::remove_file(rencord_platform::appearance_path("4242"));
     }
 
     #[test]
