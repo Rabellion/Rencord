@@ -201,6 +201,7 @@ mod tests {
             },
             content: "notes mention https://example.com and `code`".into(),
             timestamp: "2026-11-19T00:00:00Z".into(),
+            ..Default::default()
         });
         let _ = ChannelKind::GuildText;
         session

@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
 /// Discord snowflake identifier.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Snowflake(pub u64);
 
 impl Snowflake {
@@ -94,7 +94,7 @@ impl fmt::Debug for Token {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     pub id: Snowflake,
     pub username: String,
@@ -197,7 +197,7 @@ pub struct Channel {
     pub recipient_ids: Vec<Snowflake>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub id: Snowflake,
     pub channel_id: Snowflake,
@@ -205,6 +205,149 @@ pub struct Message {
     pub content: String,
     #[serde(default)]
     pub timestamp: String,
+    /// Discord's message type: 0 and 19 are ordinary, 7 is a join, 3 a call.
+    #[serde(default)]
+    pub kind: u8,
+    /// Set when the message has been edited.
+    #[serde(default)]
+    pub edited_timestamp: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+    #[serde(default)]
+    pub embeds: Vec<Embed>,
+    #[serde(default)]
+    pub reactions: Vec<MessageReaction>,
+    /// Users the message mentions, so `<@id>` can be shown as a name.
+    #[serde(default)]
+    pub mentions: Vec<User>,
+    #[serde(default)]
+    pub reply_to: Option<Reply>,
+}
+
+impl Message {
+    /// A system message such as "joined the server" has no text of its own.
+    pub fn is_system(&self) -> bool {
+        !matches!(self.kind, 0 | 19 | 20 | 21)
+    }
+
+    /// Whether `user` is named in the message.
+    pub fn mentions_user(&self, user: Snowflake) -> bool {
+        self.mentions.iter().any(|mentioned| mentioned.id == user)
+    }
+}
+
+/// A file on a message. Field names are Discord's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    #[serde(default)]
+    pub id: Snowflake,
+    #[serde(default)]
+    pub filename: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+}
+
+impl Attachment {
+    pub fn is_image(&self) -> bool {
+        self.content_type
+            .as_deref()
+            .is_some_and(|kind| kind.starts_with("image/"))
+    }
+
+    pub fn is_video(&self) -> bool {
+        self.content_type
+            .as_deref()
+            .is_some_and(|kind| kind.starts_with("video/"))
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbedImage {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+}
+
+impl EmbedImage {
+    /// Discord's proxy copy when there is one, so the original host is not contacted.
+    pub fn best_url(&self) -> &str {
+        self.proxy_url.as_deref().unwrap_or(&self.url)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbedProvider {
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// A link preview or rich embed. Field names are Discord's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Embed {
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub color: Option<u32>,
+    #[serde(default)]
+    pub provider: Option<EmbedProvider>,
+    #[serde(default)]
+    pub thumbnail: Option<EmbedImage>,
+    #[serde(default)]
+    pub image: Option<EmbedImage>,
+    #[serde(default)]
+    pub video: Option<EmbedImage>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReactionEmoji {
+    #[serde(default)]
+    pub id: Option<Snowflake>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// A reaction group on a message, as Discord reports it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageReaction {
+    #[serde(default)]
+    pub count: u32,
+    /// True when the signed-in user reacted.
+    #[serde(default)]
+    pub me: bool,
+    #[serde(default)]
+    pub emoji: ReactionEmoji,
+}
+
+/// What a reply points at. The text and author are there when Discord sent
+/// the original message along, and absent when it was deleted.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reply {
+    pub message_id: Snowflake,
+    #[serde(default)]
+    pub author: Option<User>,
+    #[serde(default)]
+    pub content: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

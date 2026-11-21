@@ -4016,7 +4016,12 @@ fn delete_action(view: Entity<RencordWindow>, id: Snowflake, palette: Palette) -
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| {
                 if let Some(message) = this.shell.delete_local(id) {
-                    this.dispatch_mutation(rencord_desktop::Mutation::Delete { message }, cx);
+                    this.dispatch_mutation(
+                        rencord_desktop::Mutation::Delete {
+                            message: Box::new(message),
+                        },
+                        cx,
+                    );
                 }
                 cx.notify();
             });

@@ -4,7 +4,7 @@
 //! recent messages and the composer draft so a restart can refill the timeline.
 //! Neither store is encrypted. Tokens live in `rencord-platform`, not here.
 
-use rencord_gateway::GatewayEvent;
+use rencord_gateway::{GatewayEvent, MessagePatch};
 use rencord_model::{Channel, ChannelKind, Guild, Message, Snowflake, User};
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
@@ -125,16 +125,8 @@ impl Session {
                     list.retain(|message| message.id != message_id);
                 }
             }
-            GatewayEvent::MessageUpdate(message) => {
-                if let Some(list) = self.messages.get_mut(&message.channel_id) {
-                    if let Some(existing) = list.iter_mut().find(|item| item.id == message.id) {
-                        *existing = message;
-                        return;
-                    }
-                }
-                let channel_id = message.channel_id;
-                self.messages.entry(channel_id).or_default().push(message);
-            }
+            GatewayEvent::MessageUpdate(patch) => self.apply_patch(patch),
+
             GatewayEvent::VoiceState(state) => {
                 if self
                     .user
@@ -215,6 +207,62 @@ impl Session {
         }
     }
 
+    /// A `MESSAGE_UPDATE`. Discord often sends only the fields that changed, so
+    /// those are merged into the stored message instead of replacing it.
+    fn apply_patch(&mut self, patch: MessagePatch) {
+        let existing = self
+            .messages
+            .get_mut(&patch.channel_id)
+            .and_then(|list| list.iter_mut().find(|item| item.id == patch.id));
+        match (existing, patch.full) {
+            (Some(existing), Some(full)) => *existing = full,
+            (Some(existing), None) => {
+                if let Some(content) = patch.content {
+                    existing.content = content;
+                }
+                if let Some(edited) = patch.edited_timestamp {
+                    existing.edited_timestamp = Some(edited);
+                }
+                if let Some(embeds) = patch.embeds {
+                    existing.embeds = embeds;
+                }
+                if let Some(attachments) = patch.attachments {
+                    existing.attachments = attachments;
+                }
+                if let Some(mentions) = patch.mentions {
+                    existing.mentions = mentions;
+                }
+            }
+            // A message that was never loaded is only worth keeping whole.
+            (None, Some(full)) => self.insert_message(full),
+            (None, None) => {}
+        }
+    }
+
+    /// Reaction counts a fetched message already carries. Gateway events keep
+    /// them current from there.
+    fn seed_reactions(&mut self, message: &Message) {
+        if message.reactions.is_empty() || self.reactions.contains_key(&message.id.get()) {
+            return;
+        }
+        let counts: Vec<(String, u32)> = message
+            .reactions
+            .iter()
+            .filter(|reaction| reaction.count > 0)
+            .filter_map(|reaction| {
+                let name = reaction
+                    .emoji
+                    .name
+                    .clone()
+                    .filter(|name| !name.is_empty())?;
+                Some((name, reaction.count))
+            })
+            .collect();
+        if !counts.is_empty() {
+            self.reactions.insert(message.id.get(), counts);
+        }
+    }
+
     fn apply_reaction(&mut self, message_id: u64, emoji: String, add: bool) {
         let list = self.reactions.entry(message_id).or_default();
         if let Some(existing) = list.iter_mut().find(|item| item.0 == emoji) {
@@ -234,6 +282,7 @@ impl Session {
     }
 
     pub fn insert_message(&mut self, message: Message) {
+        self.seed_reactions(&message);
         let list = self.messages.entry(message.channel_id).or_default();
         if list.iter().any(|item| item.id == message.id) {
             return;
@@ -248,6 +297,9 @@ impl Session {
     /// Adds fetched or confirmed messages. Snowflakes grow with time, so the
     /// channel stays in id order with no duplicates however they arrive.
     pub fn merge_history(&mut self, channel_id: Snowflake, messages: Vec<Message>) {
+        for message in &messages {
+            self.seed_reactions(message);
+        }
         let list = self.messages.entry(channel_id).or_default();
         list.extend(messages);
         list.sort_by_key(|message| message.id.get());
@@ -395,6 +447,7 @@ impl Session {
             content: "Hello **Rencord**. Mention <@2>, a [link](https://example.com), and `code`.\n\n```\nfn main() {}\n```"
                 .into(),
             timestamp: "2026-11-20T00:00:00Z".into(),
+            ..Default::default()
         });
         session.insert_message(Message {
             id: Snowflake::new(2000),
@@ -409,6 +462,7 @@ impl Session {
             },
             content: "The voice channel is the one named voice.".into(),
             timestamp: "2026-11-20T00:01:00Z".into(),
+            ..Default::default()
         });
         session.select_guild(Snowflake::new(10));
         session
@@ -508,6 +562,7 @@ mod tests {
             author: session.user.clone().unwrap(),
             content: "live".into(),
             timestamp: "t".into(),
+            ..Default::default()
         }));
         let messages = session.messages_for(Snowflake::new(100));
         assert_eq!(messages.last().unwrap().content, "live");
@@ -524,6 +579,7 @@ mod tests {
             author: author.clone(),
             content: "notes".into(),
             timestamp: "t".into(),
+            ..Default::default()
         }));
         assert!(session.unread.contains(&Snowflake::new(110)));
         session.select_channel(Snowflake::new(110));
@@ -534,6 +590,7 @@ mod tests {
             author,
             content: "back in general".into(),
             timestamp: "t".into(),
+            ..Default::default()
         }));
         assert!(session.unread.contains(&Snowflake::new(100)));
         session.select_guild(Snowflake::new(10));
@@ -551,6 +608,7 @@ mod tests {
             author: author.clone(),
             content: id.to_string(),
             timestamp: "t".into(),
+            ..Default::default()
         };
         // A live message arrives first; history comes back newest-first.
         session.insert_message(at(30));
@@ -581,6 +639,7 @@ mod tests {
             author: author.clone(),
             content: id.to_string(),
             timestamp: "t".into(),
+            ..Default::default()
         };
         for id in 50..4050 {
             session.insert_message(at(id));
@@ -684,5 +743,115 @@ mod tests {
             Some("draft")
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn stored(id: u64, content: &str) -> Message {
+        Message {
+            id: Snowflake::new(id),
+            channel_id: Snowflake::new(8),
+            author: User {
+                id: Snowflake::new(1),
+                username: "ada".into(),
+                ..Default::default()
+            },
+            content: content.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_partial_update_merges_into_the_message_and_keeps_the_rest() {
+        let mut session = Session::default();
+        session.insert_message(stored(5, "see this https://example.test"));
+        session.apply_gateway(GatewayEvent::MessageUpdate(MessagePatch {
+            id: Snowflake::new(5),
+            channel_id: Snowflake::new(8),
+            embeds: Some(vec![rencord_model::Embed {
+                title: Some("Resolved".into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }));
+        let message = &session.messages[&Snowflake::new(8)][0];
+        // The embed arrived, and the text and author were not lost.
+        assert_eq!(message.embeds[0].title.as_deref(), Some("Resolved"));
+        assert_eq!(message.content, "see this https://example.test");
+        assert_eq!(message.author.username, "ada");
+        session.apply_gateway(GatewayEvent::MessageUpdate(MessagePatch {
+            id: Snowflake::new(5),
+            channel_id: Snowflake::new(8),
+            content: Some("edited".into()),
+            edited_timestamp: Some("2026-11-20T01:00:00+00:00".into()),
+            ..Default::default()
+        }));
+        let message = &session.messages[&Snowflake::new(8)][0];
+        assert_eq!(message.content, "edited");
+        assert!(message.edited_timestamp.is_some());
+        assert_eq!(message.embeds.len(), 1);
+    }
+
+    #[test]
+    fn an_update_for_a_message_not_loaded_is_kept_only_when_whole() {
+        let mut session = Session::default();
+        session.apply_gateway(GatewayEvent::MessageUpdate(MessagePatch {
+            id: Snowflake::new(9),
+            channel_id: Snowflake::new(8),
+            embeds: Some(Vec::new()),
+            ..Default::default()
+        }));
+        assert!(session
+            .messages
+            .get(&Snowflake::new(8))
+            .is_none_or(Vec::is_empty));
+        session.apply_gateway(GatewayEvent::MessageUpdate(MessagePatch {
+            id: Snowflake::new(9),
+            channel_id: Snowflake::new(8),
+            full: Some(stored(9, "whole")),
+            ..Default::default()
+        }));
+        assert_eq!(session.messages[&Snowflake::new(8)][0].content, "whole");
+    }
+
+    #[test]
+    fn reactions_on_fetched_history_are_counted_and_stay_live() {
+        let mut session = Session::default();
+        let mut message = stored(5, "popular");
+        message.reactions = vec![
+            rencord_model::MessageReaction {
+                count: 2,
+                me: true,
+                emoji: rencord_model::ReactionEmoji {
+                    id: None,
+                    name: Some("\u{1F44D}".into()),
+                },
+            },
+            rencord_model::MessageReaction {
+                count: 1,
+                me: false,
+                emoji: rencord_model::ReactionEmoji {
+                    id: Some(Snowflake::new(900)),
+                    name: Some("pepe".into()),
+                },
+            },
+            rencord_model::MessageReaction {
+                count: 0,
+                me: false,
+                emoji: rencord_model::ReactionEmoji {
+                    id: None,
+                    name: Some("gone".into()),
+                },
+            },
+        ];
+        session.merge_history(Snowflake::new(8), vec![message]);
+        assert_eq!(
+            session.reactions[&5],
+            vec![("\u{1F44D}".to_owned(), 2), ("pepe".to_owned(), 1)]
+        );
+        session.apply_gateway(GatewayEvent::Reaction {
+            message_id: Snowflake::new(5),
+            emoji: "\u{1F44D}".into(),
+            remove: false,
+        });
+        assert_eq!(session.reactions[&5][0].1, 3);
     }
 }

@@ -4,8 +4,10 @@
 //! browser fingerprint.
 
 use base64::Engine;
-use rencord_model::{ChannelKind, Message, Snowflake, User};
-use serde::{Deserialize, Serialize};
+use rencord_model::{
+    Attachment, ChannelKind, Embed, Message, MessageReaction, Reply, Snowflake, User,
+};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 
 pub const GATEWAY_VERSION: u8 = 10;
@@ -353,6 +355,28 @@ impl WireChannel {
     }
 }
 
+/// A list where an element that does not decode is dropped. One odd attachment
+/// or embed must not cost the whole message, and nothing from another user may
+/// stop a page of history from loading.
+fn lenient_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let values: Option<Vec<Value>> = Option::deserialize(deserializer)?;
+    Ok(values
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect())
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct WireReference {
+    #[serde(default)]
+    pub message_id: Option<Snowflake>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct WireMessage {
     pub id: Snowflake,
@@ -362,17 +386,122 @@ pub struct WireMessage {
     pub content: String,
     #[serde(default)]
     pub timestamp: String,
+    #[serde(default, rename = "type")]
+    pub kind: u64,
+    #[serde(default)]
+    pub edited_timestamp: Option<String>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub attachments: Vec<Attachment>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub embeds: Vec<Embed>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub reactions: Vec<MessageReaction>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub mentions: Vec<User>,
+    #[serde(default)]
+    pub message_reference: Option<WireReference>,
+    /// Kept raw: it is the replied-to message, and it may be null, deleted,
+    /// or missing an author. Only its author and text are read.
+    #[serde(default)]
+    pub referenced_message: Option<Value>,
 }
 
 impl From<WireMessage> for Message {
     fn from(value: WireMessage) -> Self {
+        let reply_to = value
+            .message_reference
+            .and_then(|reference| reference.message_id)
+            .map(|message_id| {
+                let original = value.referenced_message.as_ref();
+                Reply {
+                    message_id,
+                    author: original
+                        .and_then(|message| message.get("author"))
+                        .and_then(|author| serde_json::from_value(author.clone()).ok()),
+                    content: original
+                        .and_then(|message| message.get("content"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                }
+            });
         Message {
             id: value.id,
             channel_id: value.channel_id,
             author: value.author,
             content: value.content,
             timestamp: value.timestamp,
+            kind: u8::try_from(value.kind).unwrap_or(u8::MAX),
+            edited_timestamp: value.edited_timestamp,
+            attachments: value.attachments,
+            embeds: value.embeds,
+            reactions: value.reactions,
+            mentions: value.mentions,
+            reply_to,
         }
+    }
+}
+
+/// What a `MESSAGE_UPDATE` changed. Discord often sends only the changed
+/// fields, such as the embeds once a link has been fetched, with no author.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MessagePatch {
+    pub id: Snowflake,
+    pub channel_id: Snowflake,
+    pub content: Option<String>,
+    pub edited_timestamp: Option<String>,
+    pub embeds: Option<Vec<Embed>>,
+    pub attachments: Option<Vec<Attachment>>,
+    pub mentions: Option<Vec<User>>,
+    /// Set when the update carried the whole message (it had an author).
+    pub full: Option<Message>,
+}
+
+impl MessagePatch {
+    pub fn from_value(data: &Value) -> Result<Self, serde_json::Error> {
+        let id: Snowflake = serde_json::from_value(data.get("id").cloned().unwrap_or(Value::Null))?;
+        let channel_id: Snowflake =
+            serde_json::from_value(data.get("channel_id").cloned().unwrap_or(Value::Null))?;
+        let list = |key: &str| -> Option<Value> { data.get(key).filter(|v| v.is_array()).cloned() };
+        let decode = |key: &str| -> Option<Vec<Value>> {
+            list(key).and_then(|value| serde_json::from_value(value).ok())
+        };
+        Ok(Self {
+            id,
+            channel_id,
+            content: data
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            edited_timestamp: data
+                .get("edited_timestamp")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            embeds: decode("embeds").map(|items| {
+                items
+                    .into_iter()
+                    .filter_map(|item| serde_json::from_value(item).ok())
+                    .collect()
+            }),
+            attachments: decode("attachments").map(|items| {
+                items
+                    .into_iter()
+                    .filter_map(|item| serde_json::from_value(item).ok())
+                    .collect()
+            }),
+            mentions: decode("mentions").map(|items| {
+                items
+                    .into_iter()
+                    .filter_map(|item| serde_json::from_value(item).ok())
+                    .collect()
+            }),
+            full: if data.get("author").is_some() {
+                serde_json::from_value::<WireMessage>(data.clone())
+                    .ok()
+                    .map(Message::from)
+            } else {
+                None
+            },
+        })
     }
 }
 
@@ -680,5 +809,160 @@ mod tests {
         let beat = voice_heartbeat(1_700_000_000_000, 12);
         assert_eq!(beat["d"]["t"], 1_700_000_000_000u64);
         assert_eq!(beat["d"]["seq_ack"], 12);
+    }
+
+    fn wire(value: serde_json::Value) -> Message {
+        Message::from(serde_json::from_value::<WireMessage>(value).unwrap())
+    }
+
+    fn author() -> serde_json::Value {
+        json!({ "id": "42", "username": "ada", "global_name": "Ada", "avatar": "abc123", "bot": false })
+    }
+
+    #[test]
+    fn a_join_message_has_a_type_and_no_text() {
+        let message = wire(json!({
+            "id": "100", "channel_id": "7", "type": 7, "content": "",
+            "timestamp": "2026-11-07T10:00:00.000000+00:00", "author": author(),
+        }));
+        assert_eq!(message.kind, 7);
+        assert!(message.is_system());
+        assert!(message.content.is_empty());
+        let ordinary = wire(json!({
+            "id": "101", "channel_id": "7", "type": 0, "content": "hi", "author": author(),
+        }));
+        assert!(!ordinary.is_system());
+        let reply = wire(json!({
+            "id": "102", "channel_id": "7", "type": 19, "content": "yes", "author": author(),
+        }));
+        assert!(!reply.is_system());
+    }
+
+    #[test]
+    fn a_message_carries_files_embeds_reactions_mentions_a_reply_and_an_edit() {
+        let message = wire(json!({
+            "id": "200", "channel_id": "7", "type": 19, "content": "look <@43>",
+            "timestamp": "2026-11-19T12:00:00.000000+00:00",
+            "edited_timestamp": "2026-11-19T12:05:00.000000+00:00",
+            "author": author(),
+            "mentions": [{ "id": "43", "username": "charles", "global_name": "Charles" }],
+            "attachments": [{
+                "id": "300", "filename": "clip.png", "size": 2048,
+                "url": "https://cdn.discordapp.com/attachments/1/300/clip.png?ex=1&is=2&hm=3&",
+                "proxy_url": "https://media.discordapp.net/attachments/1/300/clip.png?ex=1&is=2&hm=3&",
+                "content_type": "image/png", "width": 640, "height": 360
+            }],
+            "embeds": [{
+                "type": "link", "title": "Release notes", "description": "What changed",
+                "url": "https://example.test/notes", "color": 5198940,
+                "provider": { "name": "Example" },
+                "thumbnail": { "url": "https://example.test/t.png",
+                               "proxy_url": "https://images-ext-1.discordapp.net/external/t.png",
+                               "width": 100, "height": 50 }
+            }],
+            "reactions": [
+                { "count": 2, "me": true, "emoji": { "id": null, "name": "\u{1F44D}" } },
+                { "count": 1, "me": false, "emoji": { "id": "900", "name": "pepe" } }
+            ],
+            "message_reference": { "message_id": "150", "channel_id": "7" },
+            "referenced_message": { "id": "150", "content": "any news?", "author": author() },
+        }));
+        assert_eq!(
+            message.edited_timestamp.as_deref(),
+            Some("2026-11-19T12:05:00.000000+00:00")
+        );
+        assert_eq!(message.mentions.len(), 1);
+        assert!(message.mentions_user(Snowflake::new(43)));
+        assert!(!message.mentions_user(Snowflake::new(99)));
+        let file = &message.attachments[0];
+        assert_eq!(
+            (file.filename.as_str(), file.size, file.width, file.height),
+            ("clip.png", 2048, Some(640), Some(360))
+        );
+        assert!(file.is_image() && !file.is_video());
+        let embed = &message.embeds[0];
+        assert_eq!(embed.kind.as_deref(), Some("link"));
+        assert_eq!(embed.title.as_deref(), Some("Release notes"));
+        assert_eq!(
+            embed.provider.as_ref().and_then(|p| p.name.as_deref()),
+            Some("Example")
+        );
+        assert_eq!(embed.color, Some(5198940));
+        assert_eq!(
+            embed.thumbnail.as_ref().map(|t| t.best_url()),
+            Some("https://images-ext-1.discordapp.net/external/t.png")
+        );
+        assert_eq!(message.reactions.len(), 2);
+        assert!(message.reactions[0].me);
+        assert_eq!(message.reactions[1].emoji.id, Some(Snowflake::new(900)));
+        let reply = message.reply_to.as_ref().unwrap();
+        assert_eq!(reply.message_id, Snowflake::new(150));
+        assert_eq!(reply.content.as_deref(), Some("any news?"));
+        assert_eq!(reply.author.as_ref().map(|u| u.display_name()), Some("Ada"));
+    }
+
+    #[test]
+    fn one_bad_attachment_or_embed_does_not_cost_the_message() {
+        let message = wire(json!({
+            "id": "1", "channel_id": "2", "content": "x", "author": author(),
+            "attachments": [
+                { "id": "5", "filename": "ok.png", "url": "https://cdn.discordapp.com/a/ok.png", "size": 3 },
+                { "id": { "nested": true }, "filename": 4 },
+                7
+            ],
+            "embeds": [ "not an object", { "title": "kept" } ],
+            "reactions": null,
+            "mentions": [ { "no_id_here": true } ],
+        }));
+        assert_eq!(message.attachments.len(), 1);
+        assert_eq!(message.attachments[0].filename, "ok.png");
+        assert_eq!(message.embeds.len(), 1);
+        assert_eq!(message.embeds[0].title.as_deref(), Some("kept"));
+        assert!(message.reactions.is_empty());
+        assert!(message.mentions.is_empty());
+        assert_eq!(message.content, "x");
+    }
+
+    #[test]
+    fn null_sizes_and_a_deleted_reply_decode() {
+        let message = wire(json!({
+            "id": "1", "channel_id": "2", "content": "", "author": author(),
+            "attachments": [{ "id": "5", "filename": "f.bin", "url": "u", "width": null, "height": null, "content_type": null }],
+            "message_reference": { "message_id": "9" },
+            "referenced_message": null,
+        }));
+        assert_eq!(message.attachments[0].width, None);
+        assert!(!message.attachments[0].is_image());
+        let reply = message.reply_to.unwrap();
+        assert_eq!(reply.message_id, Snowflake::new(9));
+        assert!(reply.author.is_none() && reply.content.is_none());
+        // A type larger than a byte maps to a system message, not a crash.
+        let odd = wire(json!({ "id": "1", "channel_id": "2", "type": 4000, "author": author() }));
+        assert!(odd.is_system());
+    }
+
+    #[test]
+    fn a_partial_update_carries_only_what_changed() {
+        let patch = MessagePatch::from_value(&json!({
+            "id": "10", "channel_id": "2",
+            "embeds": [{ "type": "link", "title": "Resolved", "url": "https://example.test" }],
+        }))
+        .unwrap();
+        assert_eq!(patch.id, Snowflake::new(10));
+        assert_eq!(patch.embeds.as_ref().map(|e| e.len()), Some(1));
+        assert_eq!(patch.content, None);
+        assert_eq!(patch.attachments, None);
+        assert!(patch.full.is_none());
+        let full = MessagePatch::from_value(&json!({
+            "id": "10", "channel_id": "2", "content": "edited", "author": author(),
+            "edited_timestamp": "2026-11-20T01:00:00.000000+00:00",
+        }))
+        .unwrap();
+        assert_eq!(full.content.as_deref(), Some("edited"));
+        assert_eq!(
+            full.full.as_ref().map(|m| m.content.as_str()),
+            Some("edited")
+        );
+        assert!(MessagePatch::from_value(&json!({ "embeds": [] })).is_err());
     }
 }

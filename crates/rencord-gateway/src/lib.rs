@@ -12,6 +12,8 @@ use rencord_protocol::{
     GatewayOpcode, HelloData, ReadyData, VoiceServerUpdate, VoiceStateDispatch, WireChannel,
     WireMessage,
 };
+// The store applies these, so it takes the type from here.
+pub use rencord_protocol::MessagePatch;
 use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -51,7 +53,7 @@ pub enum GatewayEvent {
         discord_client_theme: Option<String>,
     },
     MessageCreate(Message),
-    MessageUpdate(Message),
+    MessageUpdate(MessagePatch),
     MessageDelete {
         channel_id: Snowflake,
         message_id: Snowflake,
@@ -329,15 +331,14 @@ fn decode_dispatch(name: &str, data: Value) -> Result<Option<GatewayEvent>, Gate
                 message_id,
             })
         }
-        "MESSAGE_CREATE" | "MESSAGE_UPDATE" => {
+        "MESSAGE_CREATE" => {
             let wire: WireMessage = serde_json::from_value(data)?;
-            let message = Message::from(wire);
-            Some(if name == "MESSAGE_CREATE" {
-                GatewayEvent::MessageCreate(message)
-            } else {
-                GatewayEvent::MessageUpdate(message)
-            })
+            Some(GatewayEvent::MessageCreate(Message::from(wire)))
         }
+        // Often only what changed (an embed resolving), with no author.
+        "MESSAGE_UPDATE" => Some(GatewayEvent::MessageUpdate(MessagePatch::from_value(
+            &data,
+        )?)),
         "VOICE_STATE_UPDATE" => Some(GatewayEvent::VoiceState(serde_json::from_value(data)?)),
         "VOICE_SERVER_UPDATE" => Some(GatewayEvent::VoiceServer(serde_json::from_value(data)?)),
         other if !other.is_empty() => Some(GatewayEvent::Other {
@@ -790,7 +791,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dispatch_that_does_not_decode_is_skipped() {
+    async fn a_bad_dispatch_is_skipped_and_a_partial_update_is_a_patch() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -799,9 +800,11 @@ mod tests {
             socket.send(hello(60000)).await.unwrap();
             first_op(&mut socket).await;
             socket.send(ready("sess", "")).await.unwrap();
-            // A partial update with no author, then a normal message.
-            socket.send(text(r#"{"op":0,"t":"MESSAGE_UPDATE","s":2,"d":{"id":"5","channel_id":"8","embeds":[]}}"#)).await.unwrap();
-            socket.send(text(r#"{"op":0,"t":"MESSAGE_CREATE","s":3,"d":{"id":"6","channel_id":"8","content":"still here","timestamp":"t","author":{"id":"9","username":"ada"}}}"#)).await.unwrap();
+            // A new message with no author cannot be shown and is skipped. A partial
+            // update with no author is normal (an embed resolving) and arrives as a patch.
+            socket.send(text(r#"{"op":0,"t":"MESSAGE_CREATE","s":2,"d":{"id":"4","channel_id":"8","content":"no author"}}"#)).await.unwrap();
+            socket.send(text(r#"{"op":0,"t":"MESSAGE_UPDATE","s":3,"d":{"id":"5","channel_id":"8","embeds":[{"title":"Resolved"}]}}"#)).await.unwrap();
+            socket.send(text(r#"{"op":0,"t":"MESSAGE_CREATE","s":4,"d":{"id":"6","channel_id":"8","content":"still here","timestamp":"t","author":{"id":"9","username":"ada"}}}"#)).await.unwrap();
             tokio::time::sleep(Duration::from_millis(200)).await;
         });
         let (mut events, runner, _commands) = start(format!("ws://{addr}"));
@@ -809,6 +812,14 @@ mod tests {
             next_event(&mut events).await,
             GatewayEvent::Ready { .. }
         ));
+        match next_event(&mut events).await {
+            GatewayEvent::MessageUpdate(patch) => {
+                assert_eq!(patch.id.get(), 5);
+                assert_eq!(patch.embeds.as_ref().map(|e| e.len()), Some(1));
+                assert!(patch.full.is_none());
+            }
+            other => panic!("expected the patch, got {other:?}"),
+        }
         match next_event(&mut events).await {
             GatewayEvent::MessageCreate(message) => assert_eq!(message.content, "still here"),
             other => panic!("unexpected {other:?}"),

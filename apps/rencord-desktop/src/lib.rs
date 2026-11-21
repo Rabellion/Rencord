@@ -40,7 +40,8 @@ pub enum Mutation {
         next: String,
     },
     Delete {
-        message: Message,
+        // Boxed: a message with its files, embeds and reactions is large.
+        message: Box<Message>,
     },
     React {
         channel_id: Snowflake,
@@ -172,6 +173,7 @@ impl Shell {
                     author: ada.clone(),
                     content: "```rust\nfn main() {\n    let answer = 42;\n}\n```".into(),
                     timestamp: "Today at 3:38 PM".into(),
+                    ..Default::default()
                 },
                 Message {
                     id: Snowflake::new(1002),
@@ -179,6 +181,7 @@ impl Shell {
                     author: charles.clone(),
                     content: "replying to 1000: That buffer is the whole point. Mention <@1> if the call drops.".into(),
                     timestamp: "Today at 3:44 PM".into(),
+                    ..Default::default()
                 },
                 Message {
                     id: Snowflake::new(1003),
@@ -186,6 +189,7 @@ impl Shell {
                     author: lovelace,
                     content: "Write-up is here: [jitter notes](https://example.com/jitter). The preview can sit under the link.\nattachment:bench.png".into(),
                     timestamp: "Today at 3:51 PM".into(),
+                    ..Default::default()
                 },
                 Message {
                     id: Snowflake::new(1004),
@@ -193,6 +197,7 @@ impl Shell {
                     author: charles,
                     content: "Shipping the voice dock next. No shop, no quests.".into(),
                     timestamp: "Today at 4:02 PM".into(),
+                    ..Default::default()
                 },
             ],
         );
@@ -235,6 +240,7 @@ impl Shell {
                 author,
                 content,
                 timestamp: format!("2026-11-20T00:{:02}:{:02}Z", (index / 60) % 60, index % 60),
+                ..Default::default()
             });
         }
         shell.session.insert_message(Message {
@@ -243,6 +249,7 @@ impl Shell {
             author: ada,
             content: "```rust\nfn main() {\n    let answer = 42;\n}\n```".into(),
             timestamp: "2026-11-20T01:00:00Z".into(),
+            ..Default::default()
         });
         shell
     }
@@ -319,6 +326,7 @@ impl Shell {
             author,
             content: format!("{prefix}{content}"),
             timestamp: "local".into(),
+            ..Default::default()
         });
         self.session.composer.clear();
         self.note(format!("Queued message in channel {channel_id}"));
@@ -390,7 +398,7 @@ impl Shell {
                 self.note("Edit rolled back");
             }
             Mutation::Delete { message } => {
-                self.session.insert_message(message.clone());
+                self.session.insert_message(Message::clone(message));
                 self.note("Delete rolled back");
             }
             Mutation::React {
