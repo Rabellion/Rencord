@@ -208,6 +208,7 @@ impl Session {
             global_name: Some("Ada".into()),
             discriminator: None,
             bot: false,
+            avatar: None,
         };
         session.user = Some(user.clone());
         session.status_line = "Demo session".into();
@@ -274,6 +275,7 @@ impl Session {
                 global_name: Some("Charles".into()),
                 discriminator: None,
                 bot: false,
+                avatar: None,
             },
             content: "The voice channel is the one named voice.".into(),
             timestamp: "2026-11-20T00:01:00Z".into(),

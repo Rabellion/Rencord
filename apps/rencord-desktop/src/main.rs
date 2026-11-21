@@ -22,7 +22,7 @@ use rencord_desktop::layout::{
 
 use gpui_kit::assets::Assets;
 use gpui_kit::base::{h_flex, v_flex};
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::label::Label;
 use gpui_kit::prelude::FluentBuilder;
@@ -80,9 +80,16 @@ fn big_file_outcome(output: &rencord_upload::JobOutput) -> String {
     }
 }
 
+mod login_view;
+
+use login_view::{LoginModel, LoginPreview};
+
 fn main() {
     PROCESS_START.get_or_init(Instant::now);
     let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--discord-login-window") {
+        std::process::exit(rencord_auth::discord_login_window_main());
+    }
     let demo = args.iter().any(|arg| arg == "--demo");
     let bench = args.iter().any(|arg| arg == "--bench");
     let theme = args
@@ -142,6 +149,15 @@ fn main() {
         .windows(2)
         .find(|pair| pair[0] == "--theme-file")
         .map(|pair| std::path::PathBuf::from(&pair[1]));
+    let preview = args
+        .windows(2)
+        .find(|pair| pair[0] == "--login-preview")
+        .and_then(|pair| match pair[1].as_str() {
+            "qr" => Some(LoginPreview::Qr),
+            "confirm" => Some(LoginPreview::Confirm),
+            "error" => Some(LoginPreview::Error),
+            _ => None,
+        });
     let frame = args
         .windows(2)
         .find(|pair| pair[0] == "--window" || pair[0] == "--size")
@@ -255,7 +271,7 @@ fn main() {
         gpui_kit::open_window(options, cx, move |window, cx| {
             cx.new(|cx| {
                 RencordWindow::new(
-                    demo,
+                    demo && preview.is_none(),
                     bench,
                     theme,
                     layout,
@@ -273,6 +289,7 @@ fn main() {
                     layout_path.clone(),
                     big_file,
                     theme_file,
+                    preview,
                     window,
                     cx,
                 )
@@ -344,6 +361,17 @@ fn monitor_key(window: &Window, cx: &App) -> String {
 struct RencordWindow {
     shell: Shell,
     token_input: Entity<InputState>,
+    email_input: Entity<InputState>,
+    password_input: Entity<InputState>,
+    mfa_input: Entity<InputState>,
+    login: LoginModel,
+    vault: rencord_auth::AccountStore,
+    session_machine: rencord_auth::SessionMachine,
+    session_token: Option<rencord_model::Token>,
+    login_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    remote_generation: u64,
+    booted: bool,
+    preview: Option<LoginPreview>,
     composer: Entity<InputState>,
     search_input: Entity<InputState>,
     palette_input: Entity<InputState>,
@@ -428,6 +456,7 @@ impl RencordWindow {
         layout_path: PathBuf,
         big_file: Option<rencord_upload::Flow>,
         theme_file: Option<std::path::PathBuf>,
+        preview: Option<LoginPreview>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -473,9 +502,10 @@ impl RencordWindow {
         if let Some(flow) = big_file {
             shell.flow = flow;
         }
-        let token_input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("User token (not stored until you connect)")
-        });
+        let token_input = cx.new(|cx| InputState::new(window, cx).placeholder("Token"));
+        let email_input = cx.new(|cx| InputState::new(window, cx).placeholder("Email"));
+        let password_input = cx.new(|cx| InputState::new(window, cx).placeholder("Password"));
+        let mfa_input = cx.new(|cx| InputState::new(window, cx).placeholder("Authentication code"));
         let composer = cx.new(|cx| InputState::new(window, cx).placeholder("Message #general"));
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search this channel"));
@@ -512,9 +542,24 @@ impl RencordWindow {
             .ok();
         })
         .detach();
+        let login = match preview {
+            Some(kind) => LoginModel::preview(kind),
+            None => LoginModel::fresh(),
+        };
         Self {
             shell,
             token_input,
+            email_input,
+            password_input,
+            mfa_input,
+            login,
+            vault: Self::open_vault(),
+            session_machine: rencord_auth::SessionMachine::new(),
+            session_token: None,
+            login_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            remote_generation: 0,
+            booted: preview.is_some(),
+            preview,
             composer,
             search_input,
             palette_input,
@@ -1029,64 +1074,6 @@ impl RencordWindow {
         cx.quit();
     }
 
-    fn connect(&mut self, cx: &mut Context<Self>) {
-        let token = self.token_input.read(cx).value().to_string();
-        let token = token.trim().to_owned();
-        if token.is_empty() {
-            self.shell.note("Token is empty.");
-            cx.notify();
-            return;
-        }
-        if let Err(err) = Shell::remember_token(&token) {
-            self.shell.note(format!("Could not store token: {err}"));
-        }
-        self.shell.note("Connecting to Discord…");
-        cx.notify();
-        let (tx, rx) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("tokio");
-            let outcome = runtime.block_on(fetch_bootstrap(token));
-            let _ = tx.send_blocking(outcome);
-        });
-        cx.spawn(async move |this, cx| {
-            let Ok(outcome) = rx.recv().await else {
-                return;
-            };
-            this.update(cx, |view, cx| {
-                match outcome {
-                    Ok(snapshot) => {
-                        view.shell.set_user(snapshot.user);
-                        view.shell.load_appearance();
-                        view.shell.consider_discord_appearance(
-                            snapshot.discord_theme.as_deref(),
-                            snapshot.discord_client_theme.as_deref(),
-                        );
-                        for guild in snapshot.guilds {
-                            view.shell.session.upsert_guild(guild);
-                        }
-                        for channel in snapshot.channels {
-                            view.shell.session.upsert_channel(channel);
-                        }
-                        if let Some(guild) = view.shell.session.guilds.first().cloned() {
-                            view.shell.session.select_guild(guild.id);
-                        }
-                        view.shell.note(format!(
-                            "REST bootstrap ok. Gateway task: {}",
-                            snapshot.gateway_note
-                        ));
-                    }
-                    Err(err) => view.shell.note(err),
-                }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-    }
-
     fn start_big_file(&mut self, cx: &mut Context<Self>) {
         let dir = rencord_platform::data_dir().join("uploads");
         let prepared = match self.shell.flow.prepare_job(&dir) {
@@ -1205,12 +1192,13 @@ impl RencordWindow {
                 .note("Demo keeps the change locally. A signed-in session would call Discord.");
             return;
         }
-        let Some(token) = Shell::load_token() else {
+        let Some(token) = self.session_token.clone() else {
             self.shell.rollback(&mutation);
             self.shell
-                .note("No token stored. The change was rolled back.");
+                .note("No session stored. The change was rolled back.");
             return;
         };
+        let token = token.expose().to_owned();
         let (tx, rx) = async_channel::bounded(1);
         let outbound = mutation.clone();
         std::thread::spawn(move || {
@@ -1227,12 +1215,17 @@ impl RencordWindow {
                 return;
             };
             this.update(cx, |view, cx| {
-                if let Err(err) = outcome {
-                    view.shell.rollback(&rollback);
-                    view.shell
-                        .note(format!("Discord rejected the change: {err}"));
-                } else {
-                    view.shell.note("Discord accepted the change.");
+                match outcome {
+                    Err(BootError::Unauthorized) => {
+                        view.shell.rollback(&rollback);
+                        view.note_unauthorized(cx);
+                    }
+                    Err(BootError::Other(err)) => {
+                        view.shell.rollback(&rollback);
+                        view.shell
+                            .note(format!("Discord rejected the change: {err}"));
+                    }
+                    Ok(()) => view.shell.note("Discord accepted the change."),
                 }
                 cx.notify();
             })
@@ -1307,24 +1300,35 @@ struct Bootstrap {
     discord_client_theme: Option<String>,
 }
 
-async fn fetch_bootstrap(token: String) -> Result<Bootstrap, String> {
+enum BootError {
+    Unauthorized,
+    Other(String),
+}
+
+fn boot_error(err: rencord_api::ApiError) -> BootError {
+    if err.is_unauthorized() {
+        BootError::Unauthorized
+    } else {
+        BootError::Other(rencord_auth::redact(&err.to_string()))
+    }
+}
+
+async fn fetch_bootstrap(token: String) -> Result<Bootstrap, BootError> {
     let api = rencord_api::DiscordApi::new(rencord_model::Token::new(token.clone()));
-    let user = api.current_user().await.map_err(|err| err.to_string())?;
-    let guilds = api.guilds().await.map_err(|err| err.to_string())?;
-    let mut channels = api
-        .private_channels()
-        .await
-        .map_err(|err| err.to_string())?;
+    let user = api.current_user().await.map_err(boot_error)?;
+    let guilds = api.guilds().await.map_err(boot_error)?;
+    let mut channels = api.private_channels().await.map_err(boot_error)?;
     if let Some(guild) = guilds.first() {
-        let mut guild_channels = api
-            .guild_channels(guild.id)
-            .await
-            .map_err(|err| err.to_string())?;
+        let mut guild_channels = api.guild_channels(guild.id).await.map_err(boot_error)?;
         channels.append(&mut guild_channels);
     }
     let (gateway_note, discord_theme, discord_client_theme) = match spawn_gateway(token).await {
         Ok(hello) => hello,
-        Err(err) => (format!("gateway did not stay up ({err})"), None, None),
+        Err(err) => (
+            format!("gateway did not stay up ({})", rencord_auth::redact(&err)),
+            None,
+            None,
+        ),
     };
     Ok(Bootstrap {
         user,
@@ -1364,7 +1368,14 @@ async fn spawn_gateway(token: String) -> Result<(String, Option<String>, Option<
             discord_theme,
             discord_client_theme,
         )),
-        Some(other) => Ok((format!("first event {other:?}"), None, None)),
+        Some(other) => Ok((
+            format!(
+                "first event {}",
+                rencord_auth::redact(&format!("{other:?}"))
+            ),
+            None,
+            None,
+        )),
         None => Err("gateway closed".into()),
     }
 }
@@ -1389,7 +1400,7 @@ impl Render for RencordWindow {
                 this.grab_screenshot(window, cx);
             });
         }
-        let signed_in = self.shell.session.user.is_some();
+        let signed_in = self.shell.session.user.is_some() && !self.login.adding;
         let root = div()
             .id("rencord-root")
             .role(Role::Document)
@@ -1471,42 +1482,13 @@ impl Render for RencordWindow {
             return root.child(golive::pip(palette)).into_any_element();
         }
         if !signed_in {
-            return root.child(self.login(cx)).into_any_element();
+            return root.child(self.login_screen(window, cx)).into_any_element();
         }
         root.child(self.shell_view(window, cx)).into_any_element()
     }
 }
 
 impl RencordWindow {
-    fn login(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = rencord_desktop::Palette::from_theme(
-            &self.shown,
-            self.shell.prefs.font_px,
-            self.shell.prefs.density,
-        );
-        let this = cx.entity();
-        v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap_3()
-            .bg(rgb(palette.chat))
-            .child(hexwave_mark(72., palette.text))
-            .child(Label::new("Rencord"))
-            .child(Label::new(
-                "Unofficial client. A user token can get the account terminated.",
-            ))
-            .child(div().w(px(420.)).child(Input::new(&self.token_input)))
-            .child(
-                Button::new("connect")
-                    .primary()
-                    .label("Connect")
-                    .on_click(move |_, _, cx| {
-                        this.update(cx, |view, cx| view.connect(cx));
-                    }),
-            )
-    }
-
     fn shell_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = rencord_desktop::Palette::from_theme(
             &self.shown,
@@ -2736,6 +2718,28 @@ impl RencordWindow {
                     &self.shown,
                     self.token_index,
                 ))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(small_button(
+                            this.clone(),
+                            "add-account",
+                            "Add account",
+                            |view, cx| view.add_account(cx),
+                        ))
+                        .child(small_button(this.clone(), "log-out", "Log out", |view, cx| {
+                            view.shell.close_layers();
+                            view.logout(cx);
+                        })),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(palette.faint))
+                        .child(Label::new(
+                            "Sessions stay in the OS keychain. Log out invalidates the token with Discord.",
+                        )),
+                )
                 .child(Label::new("Input device"))
                 .child(device_list(this.clone(), inputs, chosen_in, true, palette))
                 .child(Label::new("Output device"))
@@ -5071,7 +5075,7 @@ fn bench_photo() -> impl IntoElement {
     img(std::sync::Arc::new(image)).size_full()
 }
 
-async fn push_mutation(token: &str, mutation: &rencord_desktop::Mutation) -> Result<(), String> {
+async fn push_mutation(token: &str, mutation: &rencord_desktop::Mutation) -> Result<(), BootError> {
     use rencord_desktop::Mutation;
     let api = rencord_api::DiscordApi::new(rencord_model::Token::new(token.to_owned()));
     match mutation {
@@ -5085,12 +5089,12 @@ async fn push_mutation(token: &str, mutation: &rencord_desktop::Mutation) -> Res
                 api.reply_message(*channel_id, content, *reply)
                     .await
                     .map(|_| ())
-                    .map_err(|err| err.to_string())?;
+                    .map_err(boot_error)?;
             } else {
                 api.send_message(*channel_id, content)
                     .await
                     .map(|_| ())
-                    .map_err(|err| err.to_string())?;
+                    .map_err(boot_error)?;
             }
         }
         Mutation::Edit {
@@ -5102,12 +5106,12 @@ async fn push_mutation(token: &str, mutation: &rencord_desktop::Mutation) -> Res
             api.edit_message(*channel_id, *message_id, next)
                 .await
                 .map(|_| ())
-                .map_err(|err| err.to_string())?;
+                .map_err(boot_error)?;
         }
         Mutation::Delete { message } => {
             api.delete_message(message.channel_id, message.id)
                 .await
-                .map_err(|err| err.to_string())?;
+                .map_err(boot_error)?;
         }
         Mutation::React {
             channel_id,
@@ -5119,11 +5123,11 @@ async fn push_mutation(token: &str, mutation: &rencord_desktop::Mutation) -> Res
             if *remove {
                 api.remove_reaction(*channel_id, id, emoji)
                     .await
-                    .map_err(|err| err.to_string())?;
+                    .map_err(boot_error)?;
             } else {
                 api.add_reaction(*channel_id, id, emoji)
                     .await
-                    .map_err(|err| err.to_string())?;
+                    .map_err(boot_error)?;
             }
         }
     }

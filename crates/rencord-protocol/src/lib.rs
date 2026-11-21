@@ -3,6 +3,7 @@
 //! Rencord identifies itself as Rencord. It does not imitate an official
 //! browser fingerprint.
 
+use base64::Engine;
 use rencord_model::{ChannelKind, Message, Snowflake, User};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -90,16 +91,61 @@ impl GatewayFrame {
     }
 }
 
+pub const CLIENT_VERSION: &str = "0.1.0";
+
+/// Same agent string the REST client sends. Login and the gateway share it.
+pub const USER_AGENT: &str = "Rencord (https://github.com/Rabellion/Rencord, 0.1.0)";
+
+/// Locale in the `en-US` shape Discord expects. `LANG` is the only source.
+pub fn discord_locale() -> String {
+    let raw = std::env::var("LANG").unwrap_or_else(|_| "en-US".into());
+    let code = raw
+        .split(['.', '@'])
+        .next()
+        .unwrap_or("en-US")
+        .replace('_', "-");
+    let safe: String = code
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+        .take(16)
+        .collect();
+    if safe.len() < 2 {
+        "en-US".into()
+    } else {
+        safe
+    }
+}
+
+/// Properties on gateway Identify and, base64-encoded, on `X-Super-Properties`.
+/// The browser and device stay `Rencord`. This does not impersonate the official client.
+pub fn client_properties() -> Value {
+    json!({
+        "os": std::env::consts::OS,
+        "browser": "Rencord",
+        "device": "Rencord",
+        "system_locale": discord_locale(),
+        "browser_user_agent": USER_AGENT,
+        "browser_version": CLIENT_VERSION,
+        "os_version": std::env::consts::OS,
+        "os_arch": std::env::consts::ARCH,
+        "app_arch": std::env::consts::ARCH,
+        "client_version": CLIENT_VERSION,
+        "release_channel": "stable",
+    })
+}
+
+/// Base64 JSON of [`client_properties`] for the `X-Super-Properties` header.
+pub fn super_properties() -> String {
+    let bytes = serde_json::to_vec(&client_properties()).expect("client properties serialize");
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 pub fn identify_payload(token: &str) -> Value {
     json!({
         "op": GatewayOpcode::Identify as u8,
         "d": {
             "token": token,
-            "properties": {
-                "os": std::env::consts::OS,
-                "browser": "Rencord",
-                "device": "Rencord"
-            },
+            "properties": client_properties(),
             "compress": false,
             "large_threshold": 50
         }
@@ -481,8 +527,18 @@ mod tests {
         let payload = identify_payload("token-value");
         let browser = payload["d"]["properties"]["browser"].as_str().unwrap();
         assert_eq!(browser, "Rencord");
+        assert_eq!(payload["d"]["properties"]["device"], "Rencord");
+        assert_eq!(payload["d"]["properties"], client_properties());
         assert_eq!(payload["op"], 2);
         assert!(!payload.to_string().contains("Chrome"));
+        let header = super_properties();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(header.as_bytes())
+            .expect("super properties");
+        let value: Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(value["browser"], "Rencord");
+        assert_eq!(value["browser_user_agent"], USER_AGENT);
+        assert!(!header.contains("token-value"));
     }
 
     #[test]

@@ -22,6 +22,10 @@ the Cargo registry; this file records the ones that matter for attribution.
 | [zip](https://github.com/zip-rs/zip2) | Zip volumes under the upload cap | MIT |
 | [sevenz-rust2](https://github.com/hasenbanck/sevenz-rust2) | 7z volumes under the upload cap | Apache-2.0 |
 | [RustCrypto](https://github.com/RustCrypto) `sha2` and `hmac` | Split-archive hashes and S3 Signature Version 4 | MIT OR Apache-2.0 |
+| [RustCrypto `rsa`](https://github.com/RustCrypto/RSA) | Remote-auth RSA-OAEP key | MIT OR Apache-2.0 |
+| [qrcode](https://github.com/kennytm/qrcode-rust) | Login QR matrix | MIT OR Apache-2.0 |
+| [keyring](https://github.com/hwchen/keyring-rs) | OS keychain for sessions | MIT OR Apache-2.0 |
+| [wry](https://github.com/tauri-apps/wry) | System webview for Discord's login page | Apache-2.0 OR MIT |
 
 ## What was not copied
 
