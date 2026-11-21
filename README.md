@@ -27,10 +27,6 @@
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-informational" alt="Platforms Linux, macOS, and Windows" />
 </p>
 
-<p align="center">
-  Waver is the wordmark above. Hexwave is the app icon. Both live in <a href="assets/brand/README.md">assets/brand</a>.
-</p>
-
 ---
 
 > [!WARNING]
