@@ -30,8 +30,8 @@
 ---
 
 > [!WARNING]
-> **Unofficial client. Discord can terminate the account.**
-> Rencord talks to Discord as your own user. Discord's Terms of Service forbid unauthorized clients and automating a normal user account outside the official OAuth2 and bot API. That can end the account. Nothing in this repository makes that safe or allowed. Read the [disclaimer](#disclaimer) before you paste a token. Use an account you can afford to lose. This project does not solve captchas, scrape, or send bulk messages.
+> **Unofficial client. Use at your own risk.**
+> Rencord talks to Discord as your own user. Discord's Terms of Service forbid unauthorized clients and automating a normal user account outside the official OAuth2 and bot API. That can end the account. Nothing in this repository makes that safe or allowed. Read the [disclaimer](#disclaimer). Use an account you can afford to lose. This project does not solve captchas, scrape, or send bulk messages.
 
 ---
 
