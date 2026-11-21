@@ -171,6 +171,7 @@ fn main() {
             "qr" => Some(LoginPreview::Qr),
             "confirm" => Some(LoginPreview::Confirm),
             "error" => Some(LoginPreview::Error),
+            "captcha" => Some(LoginPreview::Captcha),
             _ => None,
         });
     let frame = args

@@ -19,7 +19,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::crypto::{encode_nonce, RemoteKey};
-use crate::login_api::AuthClient;
+use crate::login_api::{AuthClient, CaptchaSolution};
 use crate::qr::render_qr_png;
 use crate::AuthError;
 
@@ -327,9 +327,14 @@ fn fingerprint_chars_ok(value: &str) -> bool {
 
 #[derive(Clone)]
 pub enum RemoteProgress {
-    Qr { url: String, png: Vec<u8> },
+    Qr {
+        url: String,
+        png: Vec<u8>,
+    },
     Confirm(UserPreview),
     Refreshing,
+    /// The ticket exchange asked for hCaptcha. The RSA key is still held here.
+    Captcha(crate::login_api::CaptchaChallenge),
 }
 
 /// Run the gateway until a token is decrypted, retrying expired or declined
@@ -338,6 +343,7 @@ pub async fn complete_remote_login(
     gateway_url: &str,
     api_root: &str,
     cancel: &AtomicBool,
+    solutions: &mut tokio::sync::mpsc::UnboundedReceiver<Option<CaptchaSolution>>,
     mut on_progress: impl FnMut(RemoteProgress),
 ) -> Result<Token, AuthError> {
     let mut last = AuthError::Disconnected;
@@ -348,7 +354,7 @@ pub async fn complete_remote_login(
         if attempt > 0 {
             on_progress(RemoteProgress::Refreshing);
         }
-        match remote_once(gateway_url, api_root, cancel, &mut on_progress).await {
+        match remote_once(gateway_url, api_root, cancel, solutions, &mut on_progress).await {
             Ok(token) => return Ok(token),
             Err(AuthError::Cancelled) => return Err(AuthError::Cancelled),
             Err(err) => {
@@ -373,6 +379,7 @@ async fn remote_once(
     gateway_url: &str,
     api_root: &str,
     cancel: &AtomicBool,
+    solutions: &mut tokio::sync::mpsc::UnboundedReceiver<Option<CaptchaSolution>>,
     on_progress: &mut impl FnMut(RemoteProgress),
 ) -> Result<Token, AuthError> {
     let mut machine = RemoteMachine::generate()?;
@@ -439,17 +446,38 @@ async fn remote_once(
                                 Step::User(user) => on_progress(RemoteProgress::Confirm(user)),
                                 Step::Ticket(ticket) => {
                                     // pending_login.ticket is plaintext. The
-                                    // 2026 desktop docs still exchange it at
-                                    // POST /api/v9/users/@me/remote-auth/login
-                                    // and decrypt encrypted_token with this key.
+                                    // key stays alive while the person solves
+                                    // hCaptcha, then the same ticket is retried.
                                     let mut client = AuthClient::with_root(api_root.to_owned());
                                     client.prepare().await;
-                                    match client.exchange_remote_ticket(&ticket).await? {
-                                        crate::login_api::RemoteExchange::EncryptedToken(
-                                            encrypted,
-                                        ) => return machine.decrypt_token(&encrypted),
-                                        crate::login_api::RemoteExchange::Captcha(challenge) => {
-                                            return Err(AuthError::Captcha(challenge));
+                                    let mut exchange =
+                                        client.exchange_remote_ticket(&ticket).await?;
+                                    loop {
+                                        match exchange {
+                                            crate::login_api::RemoteExchange::EncryptedToken(
+                                                encrypted,
+                                            ) => {
+                                                return machine.decrypt_token(&encrypted);
+                                            }
+                                            crate::login_api::RemoteExchange::Captcha(
+                                                challenge,
+                                            ) => {
+                                                on_progress(RemoteProgress::Captcha(
+                                                    challenge.clone(),
+                                                ));
+                                                let Some(solution) = solutions.recv().await else {
+                                                    return Err(AuthError::Cancelled);
+                                                };
+                                                let Some(solution) = solution else {
+                                                    return Err(AuthError::Cancelled);
+                                                };
+                                                exchange = client
+                                                    .exchange_remote_ticket_solved(
+                                                        &ticket,
+                                                        Some(&solution),
+                                                    )
+                                                    .await?;
+                                            }
                                         }
                                     }
                                 }
@@ -720,10 +748,12 @@ mod tests {
         });
 
         let mut saw_user = false;
+        let (_solutions_tx, mut solutions_rx) = tokio::sync::mpsc::unbounded_channel();
         let token = complete_remote_login(
             &format!("ws://{gateway_addr}"),
             &format!("http://{http_addr}"),
             &AtomicBool::new(false),
+            &mut solutions_rx,
             |progress| {
                 if let RemoteProgress::Confirm(user) = progress {
                     assert_eq!(user.username, "ada");
