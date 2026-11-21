@@ -5,7 +5,7 @@
 //! caller so it can open Discord's page. This crate does not solve captchas.
 
 use rencord_model::{Token, User};
-use rencord_protocol::{discord_locale, super_properties, USER_AGENT};
+use rencord_protocol::{discord_locale, discord_timezone, super_properties, USER_AGENT};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -89,9 +89,25 @@ impl std::fmt::Debug for LoginOutcome {
     }
 }
 
+/// hCaptcha solution headers. Rencord does not produce these. Discord's page does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptchaSolution {
+    pub key: String,
+    pub rqtoken: Option<String>,
+    pub session_id: Option<String>,
+}
+
+/// Ticket exchange result. The ciphertext is still encrypted with our RSA key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RemoteExchange {
+    EncryptedToken(String),
+    Captcha(CaptchaChallenge),
+}
+
 pub struct AuthClient {
     http: reqwest::Client,
     root: String,
+    fingerprint: Option<String>,
 }
 
 impl AuthClient {
@@ -104,24 +120,96 @@ impl AuthClient {
             .user_agent(USER_AGENT)
             .build()
             .expect("reqwest client builds with rustls");
-        Self { http, root }
+        Self {
+            http,
+            root,
+            fingerprint: None,
+        }
     }
 
-    pub async fn exchange_remote_ticket(&self, ticket: &str) -> Result<String, AuthError> {
+    pub fn with_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.fingerprint = Some(fingerprint.into());
+        self
+    }
+
+    /// `GET /experiments` mints the `X-Fingerprint` Discord expects before login.
+    /// A failure leaves the header off. The ticket exchange still runs.
+    pub async fn prepare(&mut self) {
+        if self.fingerprint.is_some() {
+            return;
+        }
+        let url = format!("{}/experiments", self.root.trim_end_matches('/'));
+        let Ok(response) = self
+            .http
+            .get(url)
+            .headers(auth_headers(None, None))
+            .send()
+            .await
+        else {
+            return;
+        };
+        if !response.status().is_success() {
+            return;
+        }
+        let Ok(bytes) = response.bytes().await else {
+            return;
+        };
+        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+            return;
+        };
+        let Some(fingerprint) = value.get("fingerprint").and_then(|item| item.as_str()) else {
+            return;
+        };
+        if (8..128).contains(&fingerprint.len())
+            && fingerprint
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+        {
+            self.fingerprint = Some(fingerprint.to_owned());
+        }
+    }
+
+    /// Exchange the plaintext `pending_login` ticket.
+    ///
+    /// The path is still `POST /api/v9/users/@me/remote-auth/login` and the
+    /// success field is still `encrypted_token` (docs.discord.food, late 2026).
+    /// A captcha is a 400 with `captcha_key`. Any other body keeps Discord's
+    /// `code` and `message`. The ticket is never copied into the error.
+    pub async fn exchange_remote_ticket(&self, ticket: &str) -> Result<RemoteExchange, AuthError> {
+        self.exchange_remote_ticket_solved(ticket, None).await
+    }
+
+    /// Retry after Discord's page has solved the captcha. The solution is sent
+    /// as `X-Captcha-Key`, `X-Captcha-Rqtoken`, and `X-Captcha-Session-Id`.
+    pub async fn exchange_remote_ticket_solved(
+        &self,
+        ticket: &str,
+        solution: Option<&CaptchaSolution>,
+    ) -> Result<RemoteExchange, AuthError> {
         let value = self
             .post_json(
                 "/users/@me/remote-auth/login",
                 json!({ "ticket": ticket }),
                 None,
+                solution,
             )
             .await?;
-        value
+        if let Some(captcha) = captcha_from(&value) {
+            tracing::debug!(
+                body = %redact(&value.to_string()),
+                "remote auth ticket exchange asked for a captcha"
+            );
+            return Ok(RemoteExchange::Captcha(captcha));
+        }
+        if let Some(token) = value
             .get("encrypted_token")
             .and_then(|item| item.as_str())
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                AuthError::Message("Discord did not return an encrypted session.".into())
-            })
+            .filter(|token| !token.is_empty())
+        {
+            return Ok(RemoteExchange::EncryptedToken(token.to_owned()));
+        }
+        let bytes = serde_json::to_vec(&value).unwrap_or_default();
+        Err(exchange_failure(200, &bytes))
     }
 
     pub async fn login_with_password(
@@ -139,6 +227,7 @@ impl AuthClient {
                     "login_source": Value::Null,
                     "gift_code_sku_id": Value::Null,
                 }),
+                None,
                 None,
             )
             .await?;
@@ -164,14 +253,19 @@ impl AuthClient {
         if let Some(instance) = login_instance_id {
             body["login_instance_id"] = json!(instance);
         }
-        let value = self.post_json(method.path(), body, None).await?;
+        let value = self.post_json(method.path(), body, None, None).await?;
         parse_login_value(&value)
     }
 
     /// Ask Discord to text a code. Returns the already-redacted phone string.
     pub async fn send_sms(&self, ticket: &str) -> Result<String, AuthError> {
         let value = self
-            .post_json("/auth/mfa/sms/send", json!({ "ticket": ticket }), None)
+            .post_json(
+                "/auth/mfa/sms/send",
+                json!({ "ticket": ticket }),
+                None,
+                None,
+            )
             .await?;
         let phone = value
             .get("phone")
@@ -185,7 +279,10 @@ impl AuthClient {
         let response = self
             .http
             .post(url)
-            .headers(auth_headers(Some(token.expose())))
+            .headers(auth_headers(
+                Some(token.expose()),
+                self.fingerprint.as_deref(),
+            ))
             .json(&json!({}))
             .send()
             .await
@@ -206,7 +303,10 @@ impl AuthClient {
         let response = self
             .http
             .get(url)
-            .headers(auth_headers(Some(token.expose())))
+            .headers(auth_headers(
+                Some(token.expose()),
+                self.fingerprint.as_deref(),
+            ))
             .send()
             .await
             .map_err(|_| AuthError::Message("Could not reach Discord.".into()))?;
@@ -230,12 +330,17 @@ impl AuthClient {
         path: &str,
         body: Value,
         token: Option<&str>,
+        captcha: Option<&CaptchaSolution>,
     ) -> Result<Value, AuthError> {
         let url = format!("{}{path}", self.root.trim_end_matches('/'));
+        let mut headers = auth_headers(token, self.fingerprint.as_deref());
+        if let Some(captcha) = captcha {
+            insert_captcha_headers(&mut headers, captcha);
+        }
         let response = self
             .http
             .post(url)
-            .headers(auth_headers(token))
+            .headers(headers)
             .json(&body)
             .send()
             .await
@@ -334,11 +439,20 @@ fn is_captcha(value: &Value) -> bool {
 }
 
 fn captcha_from(value: &Value) -> Option<CaptchaChallenge> {
-    let sitekey = value
-        .get("captcha_sitekey")
-        .and_then(|item| item.as_str())?;
+    let challenged = value.get("captcha_key").is_some()
+        || value
+            .get("captcha_sitekey")
+            .and_then(|item| item.as_str())
+            .is_some();
+    if !challenged {
+        return None;
+    }
     Some(CaptchaChallenge {
-        sitekey: sitekey.to_owned(),
+        sitekey: value
+            .get("captcha_sitekey")
+            .and_then(|item| item.as_str())
+            .unwrap_or("")
+            .to_owned(),
         service: value
             .get("captcha_service")
             .and_then(|item| item.as_str())
@@ -359,23 +473,51 @@ fn captcha_from(value: &Value) -> Option<CaptchaChallenge> {
     })
 }
 
+fn exchange_failure(status: u16, bytes: &[u8]) -> AuthError {
+    log_discord_body(status, bytes);
+    AuthError::Message(discord_error_text(status, bytes))
+}
+
 fn message_error(status: u16, bytes: &[u8]) -> AuthError {
+    log_discord_body(status, bytes);
     if status == 401 {
         return AuthError::Unauthorized;
     }
+    AuthError::Message(discord_error_text(status, bytes))
+}
+
+fn log_discord_body(status: u16, bytes: &[u8]) {
+    let body = String::from_utf8_lossy(bytes);
+    tracing::debug!(status, body = %redact(&body), "discord auth response");
+}
+
+fn discord_error_text(status: u16, bytes: &[u8]) -> String {
     #[derive(Deserialize)]
     struct Body {
         message: Option<String>,
+        code: Option<Value>,
     }
-    let message = serde_json::from_slice::<Body>(bytes)
-        .ok()
+    let parsed = serde_json::from_slice::<Body>(bytes).ok();
+    let code = parsed.as_ref().and_then(|body| {
+        body.code.as_ref().and_then(|code| {
+            code.as_i64()
+                .map(|value| value.to_string())
+                .or_else(|| code.as_str().map(str::to_owned))
+        })
+    });
+    let message = parsed
         .and_then(|body| body.message)
-        .filter(|message| !message.is_empty())
-        .unwrap_or_else(|| format!("Discord returned {status}."));
-    AuthError::Message(redact(&message))
+        .filter(|message| !message.is_empty());
+    let text = match (code, message) {
+        (Some(code), Some(message)) => format!("Discord returned {status} ({code}): {message}"),
+        (None, Some(message)) => format!("Discord returned {status}: {message}"),
+        (Some(code), None) => format!("Discord returned {status} ({code})."),
+        (None, None) => format!("Discord returned {status} and no session."),
+    };
+    redact(&text)
 }
 
-fn auth_headers(token: Option<&str>) -> reqwest::header::HeaderMap {
+fn auth_headers(token: Option<&str>, fingerprint: Option<&str>) -> reqwest::header::HeaderMap {
     use reqwest::header::{
         HeaderMap, HeaderValue, AUTHORIZATION, ORIGIN, REFERER, USER_AGENT as UA,
     };
@@ -389,6 +531,14 @@ fn auth_headers(token: Option<&str>) -> reqwest::header::HeaderMap {
     if let Ok(value) = HeaderValue::from_str(&discord_locale()) {
         headers.insert("X-Discord-Locale", value);
     }
+    if let Ok(value) = HeaderValue::from_str(&discord_timezone()) {
+        headers.insert("X-Discord-Timezone", value);
+    }
+    if let Some(fingerprint) = fingerprint {
+        if let Ok(value) = HeaderValue::from_str(fingerprint) {
+            headers.insert("X-Fingerprint", value);
+        }
+    }
     headers.insert(ORIGIN, HeaderValue::from_static("https://discord.com"));
     headers.insert(
         REFERER,
@@ -400,6 +550,23 @@ fn auth_headers(token: Option<&str>) -> reqwest::header::HeaderMap {
         }
     }
     headers
+}
+
+fn insert_captcha_headers(headers: &mut reqwest::header::HeaderMap, solution: &CaptchaSolution) {
+    use reqwest::header::HeaderValue;
+    if let Ok(value) = HeaderValue::from_str(&solution.key) {
+        headers.insert("X-Captcha-Key", value);
+    }
+    if let Some(token) = &solution.rqtoken {
+        if let Ok(value) = HeaderValue::from_str(token) {
+            headers.insert("X-Captcha-Rqtoken", value);
+        }
+    }
+    if let Some(id) = &solution.session_id {
+        if let Ok(value) = HeaderValue::from_str(id) {
+            headers.insert("X-Captcha-Session-Id", value);
+        }
+    }
 }
 
 /// Download a Discord CDN avatar. Other hosts are refused.
@@ -551,13 +718,22 @@ mod tests {
         assert!(request.await.unwrap().contains("POST /auth/mfa/sms/send "));
 
         let (base, request) = serve(r#"{"encrypted_token":"Y2lwaGVy"}"#, 200).await;
-        let client = AuthClient::with_root(base);
+        let client = AuthClient::with_root(base).with_fingerprint("1084179945133187083.abc");
         let encrypted = client.exchange_remote_ticket("plain-ticket").await.unwrap();
-        assert_eq!(encrypted, "Y2lwaGVy");
+        assert!(matches!(
+            encrypted,
+            RemoteExchange::EncryptedToken(token) if token == "Y2lwaGVy"
+        ));
         let body = request.await.unwrap();
         assert!(body.contains("POST /users/@me/remote-auth/login "));
         assert!(body.contains("\"ticket\":\"plain-ticket\""));
-        assert!(!body.to_ascii_lowercase().contains("authorization:"));
+        let lower = body.to_ascii_lowercase();
+        assert!(!lower.contains("authorization:"));
+        assert!(lower.contains("x-discord-timezone:"));
+        assert!(lower.contains("x-discord-locale:"));
+        assert!(lower.contains("x-fingerprint: 1084179945133187083.abc"));
+        assert!(lower.contains("origin: https://discord.com"));
+        assert!(lower.contains("user-agent: rencord"));
 
         let (base, request) = serve("{}", 204).await;
         let client = AuthClient::with_root(base);
@@ -578,6 +754,97 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, AuthError::Unauthorized));
         assert!(!err.public_message().contains("stale"));
+    }
+
+    #[tokio::test]
+    async fn remote_exchange_reports_captcha_and_retries_with_solved_headers() {
+        let (base, mut requests) = scripted(vec![
+            (
+                400,
+                r#"{"captcha_key":["captcha-required"],"captcha_sitekey":"site-key","captcha_service":"hcaptcha","captcha_rqtoken":"rq-token","captcha_session_id":"sess-1"}"#,
+            ),
+            (200, r#"{"encrypted_token":"Y2lwaGVy"}"#),
+        ])
+        .await;
+        let client = AuthClient::with_root(base);
+        let first = client.exchange_remote_ticket("plain-ticket").await.unwrap();
+        match first {
+            RemoteExchange::Captcha(challenge) => {
+                assert_eq!(challenge.sitekey, "site-key");
+                assert_eq!(challenge.rqtoken.as_deref(), Some("rq-token"));
+                assert!(!format!("{challenge:?}").contains("plain-ticket"));
+            }
+            other => panic!("expected a captcha, got {other:?}"),
+        }
+        let first_request = requests.recv().await.unwrap();
+        assert!(!first_request.to_ascii_lowercase().contains("x-captcha-key"));
+
+        let solved = client
+            .exchange_remote_ticket_solved(
+                "plain-ticket",
+                Some(&CaptchaSolution {
+                    key: "solved-token".into(),
+                    rqtoken: Some("rq-token".into()),
+                    session_id: Some("sess-1".into()),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            solved,
+            RemoteExchange::EncryptedToken(token) if token == "Y2lwaGVy"
+        ));
+        let retry = requests.recv().await.unwrap();
+        let lower = retry.to_ascii_lowercase();
+        assert!(lower.contains("x-captcha-key: solved-token"));
+        assert!(lower.contains("x-captcha-rqtoken: rq-token"));
+        assert!(lower.contains("x-captcha-session-id: sess-1"));
+        assert!(retry.contains("POST /users/@me/remote-auth/login "));
+    }
+
+    #[tokio::test]
+    async fn remote_exchange_keeps_discord_code_and_message_and_redacts_the_log() {
+        let secret = "ODUyODky.GX5Xdp.22jsdSqEiHLUYEJSsjeq_vJKLp";
+        let body = format!(
+            r#"{{"code":50035,"message":"Invalid Form Body {secret}","ticket":"{secret}"}}"#
+        );
+        let (base, _request) = serve_owned(body, 400).await;
+        let client = AuthClient::with_root(base);
+        let recorded = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let _guard = tracing::subscriber::set_default(Capture(recorded.clone()));
+        let err = client
+            .exchange_remote_ticket("plain-ticket")
+            .await
+            .unwrap_err();
+        drop(_guard);
+        let text = err.public_message();
+        assert!(text.contains("50035"), "{text}");
+        assert!(text.contains("Invalid Form Body"), "{text}");
+        assert!(text.contains("[redacted]"), "{text}");
+        assert!(!text.contains("GX5Xdp"), "{text}");
+        assert!(!text.contains("plain-ticket"), "{text}");
+        assert_eq!(err.caption(), "Discord could not finish signing in");
+        let log = recorded.lock().unwrap().clone();
+        assert!(log.contains("50035"), "{log}");
+        assert!(log.contains("[redacted]"), "{log}");
+        assert!(!log.contains("GX5Xdp"), "{log}");
+    }
+
+    #[tokio::test]
+    async fn prepare_reads_the_experiment_fingerprint() {
+        let (base, request) = serve(
+            r#"{"fingerprint":"1084179945133187083.JQddgNMmwJPghoBtFmaH7jTmdsw","assignments":[]}"#,
+            200,
+        )
+        .await;
+        let mut client = AuthClient::with_root(base);
+        client.prepare().await;
+        let seen = request.await.unwrap();
+        assert!(seen.starts_with("GET /experiments "));
+        assert_eq!(
+            client.fingerprint.as_deref(),
+            Some("1084179945133187083.JQddgNMmwJPghoBtFmaH7jTmdsw")
+        );
     }
 
     async fn serve(
@@ -608,5 +875,90 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
         (format!("http://{addr}"), rx)
+    }
+
+    async fn serve_owned(
+        body: String,
+        status: u16,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let mut buf = vec![0u8; 16384];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let _ = tx.send(request);
+            let response = format!(
+                "HTTP/1.1 {status} Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    async fn scripted(
+        steps: Vec<(u16, &'static str)>,
+    ) -> (String, tokio::sync::mpsc::Receiver<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            for (status, body) in steps {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = vec![0u8; 16384];
+                let n = socket.read(&mut buf).await.unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let _ = tx.send(request).await;
+                let reason = if status == 400 { "Bad Request" } else { "OK" };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    struct Capture(std::sync::Arc<std::sync::Mutex<String>>);
+
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::DEBUG
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = Visit(&self.0);
+            event.record(&mut visitor);
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    struct Visit<'a>(&'a std::sync::Mutex<String>);
+
+    impl tracing::field::Visit for Visit<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            let mut guard = self.0.lock().unwrap();
+            guard.push_str(field.name());
+            guard.push('=');
+            guard.push_str(&format!("{value:?}"));
+            guard.push('\n');
+        }
     }
 }

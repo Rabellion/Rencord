@@ -438,9 +438,20 @@ async fn remote_once(
                                 }
                                 Step::User(user) => on_progress(RemoteProgress::Confirm(user)),
                                 Step::Ticket(ticket) => {
-                                    let client = AuthClient::with_root(api_root.to_owned());
-                                    let encrypted = client.exchange_remote_ticket(&ticket).await?;
-                                    return machine.decrypt_token(&encrypted);
+                                    // pending_login.ticket is plaintext. The
+                                    // 2026 desktop docs still exchange it at
+                                    // POST /api/v9/users/@me/remote-auth/login
+                                    // and decrypt encrypted_token with this key.
+                                    let mut client = AuthClient::with_root(api_root.to_owned());
+                                    client.prepare().await;
+                                    match client.exchange_remote_ticket(&ticket).await? {
+                                        crate::login_api::RemoteExchange::EncryptedToken(
+                                            encrypted,
+                                        ) => return machine.decrypt_token(&encrypted),
+                                        crate::login_api::RemoteExchange::Captcha(challenge) => {
+                                            return Err(AuthError::Captcha(challenge));
+                                        }
+                                    }
                                 }
                                 Step::Ack => awaiting_ack = false,
                                 Step::Cancelled => return Err(AuthError::Declined),
@@ -669,25 +680,43 @@ mod tests {
         tokio::spawn(async move {
             let spki = key_rx.await.unwrap();
             let public = RsaPublicKey::from_public_key_der(&spki).unwrap();
-            let (mut stream, _) = http_listener.accept().await.unwrap();
-            let mut buf = vec![0u8; 8192];
-            let n = stream.read(&mut buf).await.unwrap();
-            let request = String::from_utf8_lossy(&buf[..n]);
-            assert!(request.contains("POST /users/@me/remote-auth/login"));
-            assert!(request.contains("\"ticket\":\"plain-ticket\""));
-            let cipher = public
-                .encrypt(
-                    &mut OsRng,
-                    Oaep::new::<Sha256>(),
-                    b"user.session.secret-token",
-                )
-                .unwrap();
-            let body = json!({"encrypted_token": STANDARD.encode(cipher)}).to_string();
-            let response = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream.write_all(response.as_bytes()).await.unwrap();
+            let fingerprint =
+                r#"{"fingerprint":"1084179945133187083.JQddgNMmwJPghoBtFmaH7jTmdsw"}"#;
+            loop {
+                let (mut stream, _) = http_listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 16384];
+                let n = stream.read(&mut buf).await.unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let response_body = if request.starts_with("GET /experiments") {
+                    fingerprint.to_owned()
+                } else {
+                    assert!(request.contains("POST /users/@me/remote-auth/login"));
+                    assert!(request.contains("\"ticket\":\"plain-ticket\""));
+                    let lower = request.to_ascii_lowercase();
+                    assert!(lower.contains("x-discord-timezone:"));
+                    assert!(lower.contains("x-super-properties:"));
+                    assert!(lower.contains(
+                        "x-fingerprint: 1084179945133187083.jqddgnmmwjpghobtfmah7jtmdsw"
+                    ));
+                    assert!(!lower.contains("authorization:"));
+                    let cipher = public
+                        .encrypt(
+                            &mut OsRng,
+                            Oaep::new::<Sha256>(),
+                            b"user.session.secret-token",
+                        )
+                        .unwrap();
+                    json!({"encrypted_token": STANDARD.encode(cipher)}).to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                if request.starts_with("POST ") {
+                    break;
+                }
+            }
         });
 
         let mut saw_user = false;

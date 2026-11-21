@@ -47,6 +47,8 @@ pub enum AuthError {
     Suspended,
     WebviewUnavailable(String),
     Keychain(String),
+    /// Discord challenged the ticket exchange. The webview solves it.
+    Captcha(crate::login_api::CaptchaChallenge),
     Message(String),
 }
 
@@ -74,7 +76,25 @@ impl AuthError {
             Self::Keychain(reason) => format!(
                 "The OS keychain is unavailable ({reason}). Rencord will not write a token to a file."
             ),
+            Self::Captcha(_) => {
+                "Discord asked for a captcha. Continue on Discord's own page. Rencord does not solve captchas.".into()
+            }
             Self::Message(text) => text.clone(),
+        }
+    }
+
+    /// Short line under the login card. A server error is not "the code stopped".
+    pub fn caption(&self) -> &'static str {
+        match self {
+            Self::Expired => "The code expired",
+            Self::Declined | Self::Cancelled => "The login was cancelled",
+            Self::Handshake | Self::Disconnected => "The code stopped",
+            Self::Captcha(_) => "Discord asked for a captcha",
+            Self::Unauthorized
+            | Self::Suspended
+            | Self::WebviewUnavailable(_)
+            | Self::Keychain(_)
+            | Self::Message(_) => "Discord could not finish signing in",
         }
     }
 }

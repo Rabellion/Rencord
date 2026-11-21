@@ -90,8 +90,10 @@ impl LoginModel {
             }
             LoginPreview::Error => {
                 model.phase = LoginPhase::Error;
-                model.error = Some("This login code expired.".into());
-                model.status = "The code expired".into();
+                model.error = Some(
+                    "Discord returned 400 (50035): The remote authentication ticket was not accepted. This message is long enough to wrap inside the card instead of running off both edges.".into(),
+                );
+                model.status = "Discord could not finish signing in".into();
             }
         }
         model
@@ -258,10 +260,14 @@ impl RencordWindow {
             .unwrap_or_else(|| "Discord could not finish signing in.".into());
         let this = cx.entity();
         v_flex()
+            .size_full()
+            .px(px(16.))
+            .py(px(12.))
             .items_center()
             .justify_center()
             .gap(px(12.))
-            .child(ink(message, palette.danger, 15., false))
+            .overflow_hidden()
+            .child(wrapped_ink(message, palette.danger, 14.))
             .child(accent_button(
                 this,
                 "login-refresh",
@@ -590,10 +596,20 @@ impl RencordWindow {
             }
             QrMsg::Done(Ok(token)) => self.begin_session(token, false, cx),
             QrMsg::Done(Err(AuthError::Cancelled)) => {}
+            QrMsg::Done(Err(AuthError::Captcha(_))) => {
+                self.login.status =
+                    "Discord asked for a captcha. Opening Discord's login page.".into();
+                self.login.error = Some(
+                    "Discord asked for a captcha. Continue on Discord's own page. Rencord does not solve captchas.".into(),
+                );
+                cx.notify();
+                self.open_webview(cx);
+                return;
+            }
             QrMsg::Done(Err(err)) => {
                 self.login.phase = LoginPhase::Error;
+                self.login.status = err.caption().into();
                 self.login.error = Some(err.public_message());
-                self.login.status = "The code stopped".into();
             }
         }
         cx.notify();
@@ -1066,6 +1082,18 @@ fn initial_bubble(initial: &str, palette: Palette, size: f32) -> impl IntoElemen
         .items_center()
         .justify_center()
         .child(ink(initial, palette.text, size * 0.38, true))
+}
+
+fn wrapped_ink(text: impl AsRef<str>, color: u32, size: f32) -> impl IntoElement {
+    div()
+        .w_full()
+        .min_w(px(0.))
+        .whitespace_normal()
+        .text_center()
+        .text_size(px(size))
+        .text_color(rgb(color))
+        .line_height(px(size + 6.))
+        .child(text.as_ref().to_owned())
 }
 
 fn ink(text: impl AsRef<str>, color: u32, size: f32, strong: bool) -> impl IntoElement {
