@@ -28,7 +28,7 @@ pub use ffmpeg::{
     estimate_encode_secs, ffmpeg_commands, find_ffmpeg, probe_encoders, select_encoder,
     EncoderChoice, FfmpegPlan,
 };
-pub use flow::{Flow, FlowChoice, Prepared, SheetScreen};
+pub use flow::{compressed_file_name, Flow, FlowChoice, Prepared, SheetScreen};
 pub use limit::{
     detect_limit, fetch_limit, format_bytes, limit_from_json, LimitInput, LimitSource, UploadLimit,
     FREE_LIMIT_BYTES, NITRO_BASIC_LIMIT_BYTES, NITRO_LIMIT_BYTES,

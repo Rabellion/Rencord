@@ -471,13 +471,40 @@ fn screen_name(screen: SheetScreen) -> &'static str {
     }
 }
 
-fn compressed_name(file: &StagedFile) -> String {
-    match file.kind {
-        MediaKind::Image => format!("{}.webp", file.name),
-        MediaKind::Audio => format!("{}.opus", file.name),
-        MediaKind::Video => format!("{}.mkv", file.name),
-        MediaKind::Other => format!("{}.bin", file.name),
+/// `lecture.mp4` becomes `lecture-compressed.mp4`. The container stays when the
+/// encoder can write it; the old extension is not stacked on the new one.
+pub fn compressed_file_name(name: &str, kind: MediaKind) -> String {
+    let (stem, ext) = file_stem(name);
+    let container = match kind {
+        MediaKind::Video => match ext.as_str() {
+            "mp4" | "mkv" | "webm" | "mov" | "m4v" => ext,
+            _ => "mp4".to_owned(),
+        },
+        MediaKind::Image => match ext.as_str() {
+            "jpg" | "jpeg" => "jpg".to_owned(),
+            "png" | "webp" | "gif" | "avif" => "webp".to_owned(),
+            _ => "webp".to_owned(),
+        },
+        MediaKind::Audio => match ext.as_str() {
+            "opus" | "ogg" => ext,
+            _ => "opus".to_owned(),
+        },
+        MediaKind::Other => return format!("{stem}-compressed"),
+    };
+    format!("{stem}-compressed.{container}")
+}
+
+fn file_stem(name: &str) -> (String, String) {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.is_empty() => {
+            (stem.to_owned(), ext.to_ascii_lowercase())
+        }
+        _ => (name.to_owned(), String::new()),
     }
+}
+
+fn compressed_name(file: &StagedFile) -> String {
+    compressed_file_name(&file.name, file.kind)
 }
 
 #[cfg(test)]
@@ -514,6 +541,26 @@ mod tests {
             job,
             Prepared::Job(job) if matches!(job.as_ref(), JobSpec::External { consent: true, .. })
         ));
+    }
+
+    #[test]
+    fn compressed_name_keeps_the_container_and_drops_the_old_extension() {
+        assert_eq!(
+            compressed_file_name("lecture.mp4", MediaKind::Video),
+            "lecture-compressed.mp4"
+        );
+        assert_eq!(
+            compressed_file_name("clip.MKV", MediaKind::Video),
+            "clip-compressed.mkv"
+        );
+        assert_eq!(
+            compressed_file_name("photo.png", MediaKind::Image),
+            "photo-compressed.webp"
+        );
+        assert_eq!(
+            compressed_file_name("voice.wav", MediaKind::Audio),
+            "voice-compressed.opus"
+        );
     }
 
     #[test]

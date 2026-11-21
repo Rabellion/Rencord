@@ -5,7 +5,7 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::*;
 use rencord_desktop::Palette;
-use rencord_upload::{Flow, FlowChoice, MediaKind, ProviderKind, SheetScreen};
+use rencord_upload::{Flow, FlowChoice, ProviderKind, SheetScreen};
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
@@ -186,12 +186,7 @@ fn choose_block(
 fn output_name(flow: &Flow) -> Option<String> {
     let file = flow.staged.as_ref()?;
     match flow.chosen? {
-        FlowChoice::Compress => Some(match file.kind {
-            MediaKind::Image => format!("{}.webp", file.name),
-            MediaKind::Audio => format!("{}.opus", file.name),
-            MediaKind::Video => format!("{}.mkv", file.name),
-            MediaKind::Other => return None,
-        }),
+        FlowChoice::Compress => Some(rencord_upload::compressed_file_name(&file.name, file.kind)),
         FlowChoice::Split => Some(format!(
             "{}.{}.001",
             file.name,
@@ -265,12 +260,11 @@ fn choice_row(
             );
         }
     }
-    h_flex()
+    // Border lives on the outer box. Padding is on the inner row so a selected
+    // stroke cannot shift the radio and icon relative to the other cards.
+    div()
         .id(id)
         .w_full()
-        .gap(px(12.))
-        .px(px(12.))
-        .py(px(12.))
         .rounded(px(8.))
         .border_1()
         .border_color(rgb(border))
@@ -279,7 +273,6 @@ fn choice_row(
         } else {
             palette.chat
         }))
-        .items_center()
         .cursor_pointer()
         .on_click(move |_, _, cx| {
             view.update(cx, |window, cx| {
@@ -289,9 +282,27 @@ fn choice_row(
                 cx.notify();
             });
         })
-        .child(radio(selected, palette))
-        .child(icon(glyph, 18., icon_color))
-        .child(body)
+        .child(
+            h_flex()
+                .w_full()
+                .gap(px(12.))
+                .px(px(16.))
+                .py(px(12.))
+                .items_center()
+                .child(fixed_slot(16., radio(selected, palette)))
+                .child(fixed_slot(18., icon(glyph, 18., icon_color)))
+                .child(body),
+        )
+}
+
+fn fixed_slot(size: f32, child: impl IntoElement) -> impl IntoElement {
+    h_flex()
+        .w(px(size))
+        .h(px(size))
+        .flex_shrink_0()
+        .items_center()
+        .justify_center()
+        .child(child)
 }
 
 fn meta_line(
@@ -491,10 +502,19 @@ fn progress_block(view: Entity<RencordWindow>, flow: &Flow, palette: Palette) ->
         });
     let percent = snap.percent();
     let failed = flow.error.is_some();
+    let title = if failed {
+        failed_title(&snap.phase)
+    } else {
+        snap.phase.clone()
+    };
     let mut column = v_flex()
         .w_full()
         .gap(px(12.))
-        .child(paint(snap.phase.clone(), palette.text, 15.))
+        .child(paint(
+            title,
+            if failed { palette.danger } else { palette.text },
+            15.,
+        ))
         .child(meta(
             format!(
                 "{} / {}  ·  {percent}%",
@@ -506,7 +526,7 @@ fn progress_block(view: Entity<RencordWindow>, flow: &Flow, palette: Palette) ->
             palette,
         ))
         .child(meta(snap.detail.clone(), palette.muted, 11., palette))
-        .child(progress_bar(percent, palette));
+        .child(progress_bar(percent, palette, failed));
     if let Some(error) = &flow.error {
         column = column.child(paint(error.clone(), palette.danger, 13.));
     }
@@ -543,8 +563,25 @@ fn progress_block(view: Entity<RencordWindow>, flow: &Flow, palette: Palette) ->
     column.child(actions)
 }
 
-fn progress_bar(percent: u32, palette: Palette) -> impl IntoElement {
+fn failed_title(phase: &str) -> String {
+    match phase {
+        "Uploading" => "Upload failed".into(),
+        "Compressing" => "Compress failed".into(),
+        "Splitting" => "Split failed".into(),
+        "Sending" => "Send failed".into(),
+        "Reading" => "Read failed".into(),
+        other if other.ends_with("failed") => other.to_owned(),
+        other => format!("{other} failed"),
+    }
+}
+
+fn progress_bar(percent: u32, palette: Palette, failed: bool) -> impl IntoElement {
     let width = 480.0 * (percent as f32) / 100.0;
+    let fill = if failed {
+        palette.danger
+    } else {
+        palette.accent
+    };
     div()
         .w_full()
         .h(px(6.))
@@ -555,7 +592,7 @@ fn progress_bar(percent: u32, palette: Palette) -> impl IntoElement {
                 .w(px(width.max(2.)))
                 .h(px(6.))
                 .rounded(px(3.))
-                .bg(rgb(palette.accent)),
+                .bg(rgb(fill)),
         )
 }
 
