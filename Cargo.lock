@@ -7625,6 +7625,7 @@ name = "rencord-desktop"
 version = "0.6.0"
 dependencies = [
  "async-channel",
+ "chrono",
  "embed-resource",
  "futures-util",
  "gpui-kit",

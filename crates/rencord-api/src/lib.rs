@@ -33,6 +33,34 @@ pub enum ApiError {
     },
 }
 
+/// The line shown in the window. The raw body stays in the debug log.
+pub fn explain_http_failure(kind: &str, status: u16, body: &str) -> String {
+    let said = discord_message(body);
+    if said.is_empty() {
+        format!("Couldn't load {kind} ({status})")
+    } else {
+        format!("Couldn't load {kind}. Discord said: {said} ({status})")
+    }
+}
+
+fn discord_message(body: &str) -> String {
+    let trimmed = body.trim();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        return value
+            .get("message")
+            .and_then(|message| message.as_str())
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .unwrap_or("")
+            .to_owned();
+    }
+    if trimmed.is_empty() || trimmed.starts_with('{') || trimmed.len() > 160 {
+        String::new()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 impl ApiError {
     pub fn is_unauthorized(&self) -> bool {
         matches!(self, Self::Status { status: 401, .. })
@@ -352,6 +380,24 @@ mod tests {
     async fn serve_once(body: &'static str, status: &'static str) -> String {
         let (base, _) = serve_capture(body, status).await;
         base
+    }
+
+    #[test]
+    fn a_failed_fetch_shows_discords_message_not_the_raw_body() {
+        let text = explain_http_failure("messages", 500, r#"{"message":"stub history failed"}"#);
+        assert_eq!(
+            text,
+            "Couldn't load messages. Discord said: stub history failed (500)"
+        );
+        assert!(!text.contains('{'));
+        assert_eq!(
+            explain_http_failure("channels", 500, r#"{"message":"stub channels failed"}"#),
+            "Couldn't load channels. Discord said: stub channels failed (500)"
+        );
+        assert_eq!(
+            explain_http_failure("messages", 500, ""),
+            "Couldn't load messages (500)"
+        );
     }
 
     async fn serve_capture(

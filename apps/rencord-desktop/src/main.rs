@@ -1373,7 +1373,7 @@ impl RencordWindow {
                                     &mut view.requested,
                                     &mut view.failed,
                                     guild,
-                                    rencord_auth::redact(&err.to_string()),
+                                    fetch_failure_text("channels", &err),
                                     true,
                                 );
                             }
@@ -1400,7 +1400,7 @@ impl RencordWindow {
                                     &mut view.requested,
                                     &mut view.failed,
                                     channel,
-                                    rencord_auth::redact(&err.to_string()),
+                                    fetch_failure_text("messages", &err),
                                     true,
                                 );
                             }
@@ -1473,7 +1473,7 @@ impl RencordWindow {
                             &mut view.requested,
                             &mut view.failed,
                             channel,
-                            rencord_auth::redact(&err.to_string()),
+                            fetch_failure_text("messages", &err),
                             false,
                         );
                     }
@@ -2247,6 +2247,7 @@ impl RencordWindow {
                 });
             });
         }
+        let list_now = rencord_desktop::now_local();
         let timeline = list(timeline_state, move |index, _window, _cx| {
             let message_index = if loading_older {
                 if index == 0 {
@@ -2267,11 +2268,19 @@ impl RencordWindow {
             let Some(message) = list_messages.get(message_index).cloned() else {
                 return div().into_any_element();
             };
-            let grouped = message_index > 0
-                && list_messages
-                    .get(message_index - 1)
-                    .is_some_and(|previous| previous.author.id == message.author.id);
-            message_row(
+            let stamp = rencord_desktop::present_time(&message.timestamp, list_now);
+            let previous = message_index
+                .checked_sub(1)
+                .and_then(|index| list_messages.get(index));
+            let show_day = rencord_desktop::day_changed(
+                previous.map(|item| item.timestamp.as_str()),
+                &message.timestamp,
+                list_now,
+            );
+            let grouped = !show_day
+                && message_index > 0
+                && previous.is_some_and(|item| item.author.id == message.author.id);
+            let row = message_row(
                 list_entity.clone(),
                 &message,
                 grouped,
@@ -2283,8 +2292,17 @@ impl RencordWindow {
                 &list_theme,
                 font_px,
                 reveal_hover && message.content.contains("Mention"),
-            )
-            .into_any_element()
+                &stamp,
+                reveal_hover,
+            );
+            if show_day {
+                v_flex()
+                    .child(date_pill(&stamp.day, list_palette))
+                    .child(row)
+                    .into_any_element()
+            } else {
+                row.into_any_element()
+            }
         })
         .size_full();
 
@@ -2412,32 +2430,30 @@ impl RencordWindow {
         if !self.following_tail {
             chat = chat.child(jump_to_present(this.clone(), palette));
         }
-        chat = chat
-            .child(date_pill("Today", palette))
-            .child(message_column(
-                &plan,
-                v_flex()
-                    .size_full()
-                    .children(self.shell.session.selected_channel.and_then(|channel| {
-                        self.failed.get(&channel).cloned().map(|message| {
-                            fetch_error(
-                                this.clone(),
-                                "retry-history",
-                                "retry-history-button",
-                                message,
-                                palette,
-                                move |view, cx| {
-                                    view.failed.remove(&channel);
-                                    if view.requested.contains(&channel) {
-                                        view.scroll_back(cx);
-                                    }
-                                    cx.notify();
-                                },
-                            )
-                        })
-                    }))
-                    .child(timeline),
-            ));
+        chat = chat.child(message_column(
+            &plan,
+            v_flex()
+                .size_full()
+                .children(self.shell.session.selected_channel.and_then(|channel| {
+                    self.failed.get(&channel).cloned().map(|message| {
+                        fetch_error(
+                            this.clone(),
+                            "retry-history",
+                            "retry-history-button",
+                            message,
+                            palette,
+                            move |view, cx| {
+                                view.failed.remove(&channel);
+                                if view.requested.contains(&channel) {
+                                    view.scroll_back(cx);
+                                }
+                                cx.notify();
+                            },
+                        )
+                    })
+                }))
+                .child(timeline),
+        ));
         let hits = self.shell.search_hits();
         if !self.shell.search.trim().is_empty() {
             chat = chat.child(search_hits_bar(this.clone(), &hits, palette));
@@ -3394,7 +3410,6 @@ fn rail_slot(
             .border_1()
             .border_color(rgb(border))
             .cursor_pointer()
-            .overflow_hidden()
             .hover(move |style| style.bg(rgb(hover)))
             .child(mark)
             .on_click(on_click),
@@ -3516,6 +3531,76 @@ fn guild_mark(name: &str) -> String {
         .to_uppercase()
 }
 
+struct TimeTip {
+    text: String,
+    bg: u32,
+    fg: u32,
+    line: u32,
+}
+
+impl Render for TimeTip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(6.))
+            .bg(rgb(self.bg))
+            .border_1()
+            .border_color(rgb(self.line))
+            .text_size(px(12.))
+            .text_color(rgb(self.fg))
+            .child(self.text.clone())
+    }
+}
+
+fn timestamp_label(
+    message_id: u64,
+    stamp: &rencord_desktop::Presented,
+    reveal: bool,
+    palette: Palette,
+) -> impl IntoElement {
+    let full = stamp.full.clone();
+    let bg = palette.elevated;
+    let fg = palette.text;
+    let line = palette.line;
+    let mut label = h_flex()
+        .id(SharedString::from(format!("stamp-{message_id}")))
+        .items_center()
+        .gap(px(6.))
+        .font_family(palette.font_meta)
+        .text_size(px(11.))
+        .text_color(rgb(palette.muted))
+        .child(stamp.short.clone());
+    if full != stamp.short {
+        let hover = full.clone();
+        label = label.tooltip(move |_window, cx| {
+            cx.new(|_| TimeTip {
+                text: hover.clone(),
+                bg,
+                fg,
+                line,
+            })
+            .into()
+        });
+    }
+    if reveal && full != stamp.short {
+        label = label.child(
+            div()
+                .ml(px(8.))
+                .px(px(8.))
+                .py(px(2.))
+                .rounded(px(6.))
+                .bg(rgb(bg))
+                .border_1()
+                .border_color(rgb(line))
+                .text_size(px(12.))
+                .text_color(rgb(fg))
+                .child(full),
+        );
+    }
+    label
+}
+
 #[allow(clippy::too_many_arguments)]
 fn message_row(
     view: Entity<RencordWindow>,
@@ -3526,6 +3611,8 @@ fn message_row(
     theme: &rencord_desktop::Theme,
     font_px: f32,
     pin_actions: bool,
+    stamp: &rencord_desktop::Presented,
+    reveal_time: bool,
 ) -> impl IntoElement {
     let id = message.id;
     let onyx = palette.ink_chrome;
@@ -3564,13 +3651,12 @@ fn message_row(
                         .text_color(rgb(role))
                         .child(name.clone()),
                 )
-                .child(
-                    div()
-                        .font_family(palette.font_meta)
-                        .text_size(px(11.))
-                        .text_color(rgb(palette.muted))
-                        .child(message.timestamp.clone()),
-                ),
+                .child(timestamp_label(
+                    message.id.get(),
+                    stamp,
+                    reveal_time,
+                    palette,
+                )),
         );
     }
     if let Some(note) = reply_note {
@@ -4224,7 +4310,6 @@ fn hexwave_mark(size: f32, ink: u32, scale: f32) -> impl IntoElement {
     img(std::sync::Arc::new(image))
         .size(px(size))
         .flex_shrink_0()
-        .object_fit(ObjectFit::Fill)
 }
 
 fn icon(name: &str, size: f32, color: u32) -> Svg {
@@ -4853,6 +4938,22 @@ fn bench_photo() -> impl IntoElement {
         include_bytes!("../../../docs/design/fixtures/bench.png").to_vec(),
     );
     img(std::sync::Arc::new(image)).size_full()
+}
+
+fn fetch_failure_text(kind: &str, err: &rencord_api::ApiError) -> String {
+    tracing::debug!(
+        "{kind} fetch failed: {}",
+        rencord_auth::redact(&err.to_string())
+    );
+    match err {
+        rencord_api::ApiError::Status { status, body } => {
+            rencord_auth::redact(&rencord_api::explain_http_failure(kind, *status, body))
+        }
+        other => format!(
+            "Couldn't load {kind}. {}",
+            rencord_auth::redact(&other.to_string())
+        ),
+    }
 }
 
 fn record_fetch_failure(
