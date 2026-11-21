@@ -101,6 +101,18 @@ impl DiscordApi {
         Ok(wires.into_iter().map(Message::from).collect())
     }
 
+    /// Older history. `before` is the oldest id already shown.
+    pub async fn messages_before(
+        &self,
+        channel_id: Snowflake,
+        before: Snowflake,
+        limit: u32,
+    ) -> Result<Vec<Message>, ApiError> {
+        let path = format!("/channels/{channel_id}/messages?before={before}&limit={limit}");
+        let wires: Vec<WireMessage> = self.get_json(&path, "messages").await?;
+        Ok(wires.into_iter().map(Message::from).collect())
+    }
+
     pub async fn send_message(
         &self,
         channel_id: Snowflake,
@@ -375,6 +387,27 @@ mod tests {
         let user = api.current_user().await.unwrap();
         assert_eq!(user.display_name(), "Ada Lovelace");
         assert_eq!(user.id.get(), 42);
+    }
+
+    #[tokio::test]
+    async fn older_history_asks_for_messages_before_the_oldest_id() {
+        let (base, request) = serve_capture(
+            r#"[{"id":"10","channel_id":"8","content":"older","timestamp":"t","author":{"id":"9","username":"ada"}}]"#,
+            "200 OK",
+        )
+        .await;
+        let api = DiscordApi::with_base(Token::new("test-token"), base);
+        let page = api
+            .messages_before(Snowflake::new(8), Snowflake::new(20), 50)
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].id.get(), 10);
+        let seen = request.await.unwrap();
+        assert!(
+            seen.contains("/channels/8/messages?before=20&limit=50"),
+            "{seen}"
+        );
     }
 
     #[tokio::test]

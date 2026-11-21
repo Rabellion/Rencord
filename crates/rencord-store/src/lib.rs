@@ -166,6 +166,27 @@ impl Session {
         }
     }
 
+    /// Older pages stay at the front. Past 4000 messages, the newest (the far
+    /// end of a scroll-back) are dropped so the page just loaded remains.
+    pub fn merge_older(&mut self, channel_id: Snowflake, messages: Vec<Message>) -> usize {
+        let list = self.messages.entry(channel_id).or_default();
+        let known: std::collections::HashSet<u64> =
+            list.iter().map(|message| message.id.get()).collect();
+        list.extend(messages);
+        list.sort_by_key(|message| message.id.get());
+        list.dedup_by_key(|message| message.id.get());
+        let prepended = list
+            .iter()
+            .take_while(|message| !known.contains(&message.id.get()))
+            .count();
+        if list.len() > MESSAGE_CAP {
+            let overflow = list.len() - MESSAGE_CAP;
+            let end = list.len();
+            list.drain(end - overflow..);
+        }
+        prepended
+    }
+
     pub fn guild_channels(&self, guild_id: Snowflake) -> Vec<&Channel> {
         let mut channels: Vec<_> = self
             .channels
@@ -417,6 +438,40 @@ mod tests {
             .map(|m| m.id.get())
             .collect();
         assert_eq!(ids, [10, 20, 30]);
+    }
+
+    #[test]
+    fn older_history_keeps_the_new_page_and_trims_the_newest() {
+        let mut session = Session::default();
+        let channel = Snowflake::new(7);
+        let author = User {
+            id: Snowflake::new(1),
+            username: "ada".into(),
+            global_name: None,
+            discriminator: None,
+            bot: false,
+            avatar: None,
+        };
+        let at = |id: u64| Message {
+            id: Snowflake::new(id),
+            channel_id: channel,
+            author: author.clone(),
+            content: id.to_string(),
+            timestamp: "t".into(),
+        };
+        for id in 50..4050 {
+            session.insert_message(at(id));
+        }
+        let prepended = session.merge_older(channel, vec![at(1), at(2), at(3)]);
+        assert_eq!(prepended, 3);
+        let ids: Vec<u64> = session
+            .messages_for(channel)
+            .iter()
+            .map(|message| message.id.get())
+            .collect();
+        assert_eq!(ids.len(), 4000);
+        assert_eq!(ids[0], 1);
+        assert_eq!(*ids.last().unwrap(), 4046);
     }
 
     #[test]
