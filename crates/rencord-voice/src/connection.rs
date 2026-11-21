@@ -5,8 +5,10 @@
 //! address. Tests point it at a local stub. A real Discord voice server was
 //! not used.
 
-use crate::crypto::{discovery_request, parse_discovery_response};
-use crate::dave::DaveEngine;
+use crate::dave::{DaveEngine, ScriptedDave};
+use crate::discovery::{
+    bind_for, discover, server_addr, DiscoveryError, DiscoverySchedule, MediaRole, PathWatch,
+};
 use crate::mixer::GainMixer;
 use crate::opus::FRAME_SAMPLES;
 use crate::pipeline::{PipelineError, VoicePipeline};
@@ -22,6 +24,11 @@ use tokio_tungstenite::{
 
 type VoiceSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
+struct FailedOpen {
+    error: VoiceLinkError,
+    dave: DaveEngine,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum VoiceLinkError {
     #[error("websocket: {0}")]
@@ -34,8 +41,8 @@ pub enum VoiceLinkError {
     Protocol(String),
     #[error("pipeline: {0}")]
     Pipeline(#[from] PipelineError),
-    #[error("discovery response was not understood")]
-    Discovery,
+    #[error("{0}")]
+    DiscoveryFailed(DiscoveryError),
 }
 
 impl From<tokio_tungstenite::tungstenite::Error> for VoiceLinkError {
@@ -102,6 +109,8 @@ pub struct LiveCall {
     pub muted: bool,
     pub deafened: bool,
     pub seq_ack: u64,
+    pub role: MediaRole,
+    pub probes: u32,
     target: VoiceTarget,
     write: futures_util::stream::SplitSink<VoiceSocket, WsMessage>,
     read: futures_util::stream::SplitStream<VoiceSocket>,
@@ -109,6 +118,8 @@ pub struct LiveCall {
     server_udp: SocketAddr,
     session: VoiceSession,
     audio: CallAudio,
+    path: PathWatch,
+    schedule: DiscoverySchedule,
 }
 
 impl LiveCall {
@@ -116,8 +127,102 @@ impl LiveCall {
         target: VoiceTarget,
         dave: DaveEngine,
     ) -> Result<Self, VoiceLinkError> {
-        let (socket, _) = connect_async(&target.ws_url).await?;
+        Self::connect_role(
+            MediaRole::Voice,
+            target,
+            dave,
+            DiscoverySchedule::production(),
+        )
+        .await
+    }
+
+    /// Go Live uses the same handshake, discovery, and keepalive as voice.
+    pub async fn connect_stream(
+        target: VoiceTarget,
+        dave: DaveEngine,
+    ) -> Result<Self, VoiceLinkError> {
+        Self::connect_role(
+            MediaRole::Stream,
+            target,
+            dave,
+            DiscoverySchedule::production(),
+        )
+        .await
+    }
+
+    async fn connect_role(
+        role: MediaRole,
+        target: VoiceTarget,
+        dave: DaveEngine,
+        schedule: DiscoverySchedule,
+    ) -> Result<Self, VoiceLinkError> {
+        let mut dave = dave;
+        let mut probes = 0u32;
+        let mut server = SocketAddr::from(([0, 0, 0, 0], 0));
+        for attempt in 1..=2 {
+            match Self::open_once(role, &target, dave, schedule.clone()).await {
+                Ok(call) => return Ok(call),
+                Err(failed) => {
+                    dave = failed.dave;
+                    if let VoiceLinkError::DiscoveryFailed(DiscoveryError::Failed {
+                        probes: sent,
+                        server: addr,
+                        ..
+                    }) = failed.error
+                    {
+                        probes += sent;
+                        server = addr;
+                        if attempt == 2 {
+                            return Err(VoiceLinkError::DiscoveryFailed(DiscoveryError::failed(
+                                role, server, probes, 2,
+                            )));
+                        }
+                    } else {
+                        return Err(failed.error);
+                    }
+                }
+            }
+        }
+        Err(VoiceLinkError::DiscoveryFailed(DiscoveryError::failed(
+            role, server, probes, 2,
+        )))
+    }
+
+    async fn open_once(
+        role: MediaRole,
+        target: &VoiceTarget,
+        dave: DaveEngine,
+        schedule: DiscoverySchedule,
+    ) -> Result<Self, FailedOpen> {
+        let opened = match connect_async(&target.ws_url).await {
+            Ok(opened) => opened,
+            Err(err) => {
+                return Err(FailedOpen {
+                    error: err.into(),
+                    dave,
+                })
+            }
+        };
+        let (socket, _) = opened;
         let (write, read) = socket.split();
+        let udp = match UdpSocket::bind("127.0.0.1:0").await {
+            Ok(udp) => udp,
+            Err(err) => {
+                return Err(FailedOpen {
+                    error: err.into(),
+                    dave,
+                })
+            }
+        };
+        let audio = match CallAudio::new(1, &[7; 32]) {
+            Ok(audio) => audio,
+            Err(err) => {
+                return Err(FailedOpen {
+                    error: err.into(),
+                    dave,
+                })
+            }
+        };
         let mut call = Self {
             phase: VoicePhase::Idle,
             ssrc: 0,
@@ -126,6 +231,8 @@ impl LiveCall {
             muted: false,
             deafened: false,
             seq_ack: 0,
+            role,
+            probes: 0,
             session: VoiceSession::new(
                 target.server_id.clone(),
                 target.user_id.clone(),
@@ -133,15 +240,29 @@ impl LiveCall {
                 target.token.clone(),
                 dave,
             ),
-            target,
+            target: target.clone(),
             write,
             read,
-            udp: UdpSocket::bind("127.0.0.1:0").await?,
+            udp,
             server_udp: SocketAddr::from(([127, 0, 0, 1], 1)),
-            audio: CallAudio::new(1, &[7; 32])?,
+            audio,
+            path: PathWatch::new(),
+            schedule,
         };
-        call.finish_handshake(false).await?;
+        if let Err(error) = call.finish_handshake(false).await {
+            return Err(FailedOpen {
+                error,
+                dave: call.take_dave(),
+            });
+        }
         Ok(call)
+    }
+
+    fn take_dave(&mut self) -> DaveEngine {
+        std::mem::replace(
+            &mut self.session.dave,
+            DaveEngine::Scripted(ScriptedDave::default()),
+        )
     }
 
     pub fn set_muted(&mut self, muted: bool) {
@@ -171,26 +292,75 @@ impl LiveCall {
     }
 
     pub async fn recv_speaker(&mut self, wait: Duration) -> Result<Vec<i16>, VoiceLinkError> {
+        let deadline = tokio::time::Instant::now() + wait;
         let mut buf = vec![0u8; 2048];
-        let read = tokio::time::timeout(wait, self.udp.recv(&mut buf))
-            .await
-            .map_err(|_| VoiceLinkError::Timeout("udp audio"))??;
-        if self.deafened {
-            return Ok(vec![0; FRAME_SAMPLES]);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(VoiceLinkError::Timeout("udp audio"));
+            }
+            let read = tokio::time::timeout(remaining, self.udp.recv(&mut buf))
+                .await
+                .map_err(|_| VoiceLinkError::Timeout("udp audio"))??;
+            self.path.inbound();
+            if read < 12 {
+                continue;
+            }
+            if self.deafened {
+                return Ok(vec![0; FRAME_SAMPLES]);
+            }
+            self.seq_ack = self.seq_ack.wrapping_add(1);
+            return self
+                .audio
+                .on_rtp(&buf[..read], self.seq_ack.saturating_mul(20), self.ssrc)
+                .map_err(VoiceLinkError::from);
         }
-        self.seq_ack = self.seq_ack.wrapping_add(1);
-        self.audio
-            .on_rtp(&buf[..read], self.seq_ack.saturating_mul(20), self.ssrc)
-            .map_err(VoiceLinkError::from)
     }
 
-    /// Drop the websocket and resume the same UDP media path.
+    /// Send Discord's UDP ping when it is due, and resume when the path is quiet.
+    pub async fn maintain(&mut self) -> Result<(), VoiceLinkError> {
+        if self.path.dead() {
+            self.resume_gateway().await?;
+            self.path.inbound();
+            return Ok(());
+        }
+        if self.path.keepalive_due() {
+            let packet = self.path.next_keepalive();
+            self.udp.send(&packet).await?;
+        }
+        Ok(())
+    }
+
+    /// Drop the websocket and resume the same media role.
     pub async fn resume_gateway(&mut self) -> Result<(), VoiceLinkError> {
-        let (socket, _) = connect_async(&self.target.ws_url).await?;
-        let (write, read) = socket.split();
-        self.write = write;
-        self.read = read;
-        self.finish_handshake(true).await
+        let mut probes = 0u32;
+        let mut server = self.server_udp;
+        for attempt in 1..=2 {
+            let (socket, _) = connect_async(&self.target.ws_url).await?;
+            let (write, read) = socket.split();
+            self.write = write;
+            self.read = read;
+            match self.finish_handshake(true).await {
+                Ok(()) => return Ok(()),
+                Err(VoiceLinkError::DiscoveryFailed(DiscoveryError::Failed {
+                    probes: sent,
+                    server: addr,
+                    ..
+                })) => {
+                    probes += sent;
+                    server = addr;
+                    if attempt == 2 {
+                        return Err(VoiceLinkError::DiscoveryFailed(DiscoveryError::failed(
+                            self.role, server, probes, 2,
+                        )));
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(VoiceLinkError::DiscoveryFailed(DiscoveryError::failed(
+            self.role, server, probes, 2,
+        )))
     }
 
     async fn finish_handshake(&mut self, resume: bool) -> Result<(), VoiceLinkError> {
@@ -215,25 +385,28 @@ impl LiveCall {
             self.send_json(message).await?;
         }
         self.ssrc = ready.ssrc;
-        self.server_udp = format!("{}:{}", ready.ip, ready.port)
-            .parse()
-            .map_err(|err| VoiceLinkError::Protocol(format!("{err}")))?;
-        self.udp
-            .send_to(&discovery_request(self.ssrc), self.server_udp)
-            .await?;
-        let mut discovery = [0u8; 74];
-        let size = tokio::time::timeout(Duration::from_secs(2), self.udp.recv(&mut discovery))
-            .await
-            .map_err(|_| VoiceLinkError::Timeout("ip discovery"))??;
-        let (address, port) =
-            parse_discovery_response(&discovery[..size]).ok_or(VoiceLinkError::Discovery)?;
-        self.external_address = address.clone();
-        self.external_port = port;
+        self.server_udp = server_addr(&ready.ip, ready.port).map_err(VoiceLinkError::Protocol)?;
+        self.udp = bind_for(self.server_udp).await?;
+        let discovered = discover(
+            &self.udp,
+            self.server_udp,
+            self.ssrc,
+            self.role,
+            &self.schedule,
+        )
+        .await
+        .map_err(VoiceLinkError::DiscoveryFailed)?;
+        self.probes = discovered.probes;
+        self.external_address = discovered.address.clone();
+        self.external_port = discovered.port;
+        self.path.inbound();
         self.udp
             .connect(self.server_udp)
             .await
             .map_err(VoiceLinkError::Udp)?;
-        let select = self.session.select_protocol_message(&address, port);
+        let select = self
+            .session
+            .select_protocol_message(&self.external_address, self.external_port);
         self.send_json(select).await?;
         let description = self.read_frame("session description").await?;
         if description.op != VoiceOpcode::SessionDescription {
@@ -317,7 +490,9 @@ mod tests {
                 };
                 if n >= 74 && buf[1] == 1 && buf[3] == 70 {
                     let mut response = [0u8; 74];
-                    response[..8].copy_from_slice(&buf[..8]);
+                    response[1] = 2;
+                    response[3] = 70;
+                    response[4..8].copy_from_slice(&buf[4..8]);
                     let ip = b"127.0.0.1";
                     response[8..8 + ip.len()].copy_from_slice(ip);
                     response[72..74].copy_from_slice(&peer.port().to_be_bytes());
@@ -458,5 +633,169 @@ mod tests {
 
         call.resume_gateway().await.unwrap();
         assert_eq!(call.phase, VoicePhase::Connected);
+    }
+
+    fn quick_schedule() -> DiscoverySchedule {
+        DiscoverySchedule {
+            gaps: vec![Duration::from_millis(10), Duration::from_millis(10)],
+            deadline: Duration::from_millis(40),
+        }
+    }
+
+    async fn answering_udp() -> std::net::SocketAddr {
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = udp.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 256];
+            loop {
+                let Ok((n, peer)) = udp.recv_from(&mut buf).await else {
+                    break;
+                };
+                if n >= 8 && buf[1] == 1 {
+                    let mut response = [0u8; 74];
+                    response[1] = 2;
+                    response[3] = 70;
+                    response[4..8].copy_from_slice(&buf[4..8]);
+                    let ip = b"127.0.0.1";
+                    response[8..8 + ip.len()].copy_from_slice(ip);
+                    response[72..74].copy_from_slice(&peer.port().to_be_bytes());
+                    let _ = udp.send_to(&response, peer).await;
+                }
+            }
+        });
+        addr
+    }
+
+    async fn silent_udp() -> std::net::SocketAddr {
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = udp.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 64];
+            while udp.recv_from(&mut buf).await.is_ok() {}
+        });
+        addr
+    }
+
+    async fn ready_server(ports: Vec<std::net::SocketAddr>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for udp in ports {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = accept_async(stream).await.unwrap();
+                socket
+                    .send(WsMessage::Text(
+                        r#"{"op":8,"d":{"heartbeat_interval":45000}}"#.into(),
+                    ))
+                    .await
+                    .unwrap();
+                let first = socket.next().await.unwrap().unwrap().into_text().unwrap();
+                let resumed = first.contains("\"op\":7");
+                socket
+                    .send(WsMessage::Text(
+                        format!(
+                            r#"{{"op":2,"d":{{"ssrc":77,"ip":"{}","port":{},"modes":["aead_xchacha20_poly1305_rtpsize"]}}}}"#,
+                            udp.ip(),
+                            udp.port()
+                        )
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                if resumed {
+                    continue;
+                }
+                let next = socket.next().await;
+                let Some(Ok(message)) = next else {
+                    continue;
+                };
+                let select = message.into_text().unwrap();
+                if !select.contains("aead_xchacha20_poly1305_rtpsize") {
+                    continue;
+                }
+                let mut key = vec![0u8; 32];
+                key[0] = 9;
+                socket
+                    .send(WsMessage::Text(
+                        serde_json::json!({
+                            "op": 4,
+                            "d": {
+                                "mode": "aead_xchacha20_poly1305_rtpsize",
+                                "secret_key": key
+                            }
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                let _ = socket.next().await;
+            }
+        });
+        format!("ws://{addr}")
+    }
+
+    #[tokio::test]
+    async fn stream_retries_discovery_once_then_connects() {
+        let dead = silent_udp().await;
+        let live = answering_udp().await;
+        let ws_url = ready_server(vec![dead, live]).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let call = LiveCall::connect_role(
+            MediaRole::Stream,
+            VoiceTarget {
+                ws_url,
+                server_id: "10".into(),
+                user_id: "1".into(),
+                session_id: "stream-sess".into(),
+                token: "stream-token".into(),
+            },
+            DaveEngine::Scripted(ScriptedDave::default()),
+            quick_schedule(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(call.role, MediaRole::Stream);
+        assert_eq!(call.external_address, "127.0.0.1");
+        assert!(call.external_port > 0);
+        assert_eq!(call.phase, VoicePhase::TransportOnly);
+    }
+
+    #[tokio::test]
+    async fn voice_discovery_reports_probe_count_when_both_attempts_are_silent() {
+        let first = silent_udp().await;
+        let second = silent_udp().await;
+        let ws_url = ready_server(vec![first, second]).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let err = match LiveCall::connect_role(
+            MediaRole::Voice,
+            VoiceTarget {
+                ws_url,
+                server_id: "10".into(),
+                user_id: "1".into(),
+                session_id: "voice-sess".into(),
+                token: "voice-token".into(),
+            },
+            DaveEngine::Scripted(ScriptedDave::default()),
+            quick_schedule(),
+        )
+        .await
+        {
+            Ok(_) => panic!("silent servers should fail discovery"),
+            Err(err) => err,
+        };
+        let text = err.to_string();
+        assert!(text.contains("voice UDP discovery failed"), "{text}");
+        assert!(text.contains("2 connection attempts"), "{text}");
+        assert!(text.contains("probes"), "{text}");
+        assert!(text.contains("mobile hotspot is a good test"), "{text}");
+        let VoiceLinkError::DiscoveryFailed(DiscoveryError::Failed {
+            probes, attempts, ..
+        }) = err
+        else {
+            panic!("{text}");
+        };
+        assert_eq!(attempts, 2);
+        assert!(probes >= 4, "probes {probes}");
     }
 }
