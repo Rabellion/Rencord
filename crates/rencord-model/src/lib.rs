@@ -114,7 +114,7 @@ impl User {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelKind {
     GuildText,
@@ -125,6 +125,7 @@ pub enum ChannelKind {
     GuildAnnouncement,
     GuildForum,
     PublicThread,
+    #[default]
     Other,
 }
 
@@ -181,7 +182,7 @@ pub struct Guild {
     pub icon: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Channel {
     pub id: Snowflake,
     pub name: String,
@@ -195,6 +196,9 @@ pub struct Channel {
     /// DM / group DM recipients. Empty for guild channels.
     #[serde(default)]
     pub recipient_ids: Vec<Snowflake>,
+    /// The same people with their avatars, for the DM list.
+    #[serde(default)]
+    pub recipients: Vec<User>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

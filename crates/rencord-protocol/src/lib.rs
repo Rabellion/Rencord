@@ -350,7 +350,8 @@ impl WireChannel {
             guild_id: self.guild_id,
             parent_id: self.parent_id,
             position: self.position,
-            recipient_ids: self.recipients.into_iter().map(|user| user.id).collect(),
+            recipient_ids: self.recipients.iter().map(|user| user.id).collect(),
+            recipients: self.recipients,
         }
     }
 }

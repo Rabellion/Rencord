@@ -412,6 +412,7 @@ impl Session {
             parent_id: None,
             position: 0,
             recipient_ids: Vec::new(),
+            ..Default::default()
         });
         session.upsert_channel(Channel {
             id: Snowflake::new(101),
@@ -421,6 +422,7 @@ impl Session {
             parent_id: None,
             position: 1,
             recipient_ids: Vec::new(),
+            ..Default::default()
         });
         session.upsert_channel(Channel {
             id: Snowflake::new(110),
@@ -430,6 +432,7 @@ impl Session {
             parent_id: None,
             position: 0,
             recipient_ids: Vec::new(),
+            ..Default::default()
         });
         session.upsert_channel(Channel {
             id: Snowflake::new(200),
@@ -439,6 +442,7 @@ impl Session {
             parent_id: None,
             position: 0,
             recipient_ids: vec![Snowflake::new(2)],
+            ..Default::default()
         });
         session.insert_message(Message {
             id: Snowflake::new(1000),
@@ -692,6 +696,7 @@ mod tests {
                 parent_id: None,
                 position: 0,
                 recipient_ids: Vec::new(),
+                ..Default::default()
             }],
         });
         assert_eq!(session.guilds[0].name, "Analytical Engines");
@@ -705,6 +710,7 @@ mod tests {
             parent_id: None,
             position: 1,
             recipient_ids: Vec::new(),
+            ..Default::default()
         }));
         assert_eq!(session.channels[&Snowflake::new(100)].name, "lounge");
         session.apply_gateway(GatewayEvent::Reaction {
