@@ -217,6 +217,15 @@ impl AuthClient {
         login: &str,
         password: &str,
     ) -> Result<LoginOutcome, AuthError> {
+        self.login_with_password_solved(login, password, None).await
+    }
+
+    pub async fn login_with_password_solved(
+        &self,
+        login: &str,
+        password: &str,
+        solution: Option<&CaptchaSolution>,
+    ) -> Result<LoginOutcome, AuthError> {
         let value = self
             .post_json(
                 "/auth/login",
@@ -228,7 +237,7 @@ impl AuthClient {
                     "gift_code_sku_id": Value::Null,
                 }),
                 None,
-                None,
+                solution,
             )
             .await?;
         parse_login_value(&value)
@@ -244,6 +253,18 @@ impl AuthClient {
         login_instance_id: Option<&str>,
         code: &str,
     ) -> Result<LoginOutcome, AuthError> {
+        self.submit_mfa_solved(method, ticket, login_instance_id, code, None)
+            .await
+    }
+
+    pub async fn submit_mfa_solved(
+        &self,
+        method: MfaMethod,
+        ticket: &str,
+        login_instance_id: Option<&str>,
+        code: &str,
+        solution: Option<&CaptchaSolution>,
+    ) -> Result<LoginOutcome, AuthError> {
         let mut body = json!({
             "ticket": ticket,
             "code": code,
@@ -253,7 +274,7 @@ impl AuthClient {
         if let Some(instance) = login_instance_id {
             body["login_instance_id"] = json!(instance);
         }
-        let value = self.post_json(method.path(), body, None, None).await?;
+        let value = self.post_json(method.path(), body, None, solution).await?;
         parse_login_value(&value)
     }
 
@@ -800,6 +821,50 @@ mod tests {
         assert!(lower.contains("x-captcha-rqtoken: rq-token"));
         assert!(lower.contains("x-captcha-session-id: sess-1"));
         assert!(retry.contains("POST /users/@me/remote-auth/login "));
+    }
+
+    #[tokio::test]
+    async fn password_login_retries_with_the_captcha_headers() {
+        let (base, mut requests) = scripted(vec![
+            (
+                400,
+                r#"{"captcha_key":["captcha-required"],"captcha_sitekey":"site-key","captcha_service":"hcaptcha","captcha_rqtoken":"rq-token","captcha_session_id":"sess-9","captcha_rqdata":"rq-data"}"#,
+            ),
+            (200, r#"{"token":"user.session.secret-token","user_id":"9"}"#),
+        ])
+        .await;
+        let client = AuthClient::with_root(base);
+        let first = client
+            .login_with_password("ada@example.com", "test-password")
+            .await
+            .unwrap();
+        let LoginOutcome::Captcha(challenge) = first else {
+            panic!("expected a captcha");
+        };
+        assert_eq!(challenge.sitekey, "site-key");
+        assert_eq!(challenge.rqdata.as_deref(), Some("rq-data"));
+        assert_eq!(challenge.session_id.as_deref(), Some("sess-9"));
+        let _ = requests.recv().await.unwrap();
+        let solved = client
+            .login_with_password_solved(
+                "ada@example.com",
+                "test-password",
+                Some(&CaptchaSolution {
+                    key: "solved-token".into(),
+                    rqtoken: challenge.rqtoken.clone(),
+                    session_id: challenge.session_id.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(solved, LoginOutcome::Session { .. }));
+        let retry = requests.recv().await.unwrap();
+        let lower = retry.to_ascii_lowercase();
+        assert!(lower.contains("post /auth/login "));
+        assert!(lower.contains("x-captcha-key: solved-token"));
+        assert!(lower.contains("x-captcha-rqtoken: rq-token"));
+        assert!(lower.contains("x-captcha-session-id: sess-9"));
+        assert!(!format!("{solved:?}").contains("secret-token"));
     }
 
     #[tokio::test]

@@ -7600,6 +7600,7 @@ dependencies = [
  "keyring",
  "qrcode",
  "rand 0.8.8",
+ "raw-window-handle",
  "rencord-model",
  "rencord-protocol",
  "reqwest",
@@ -7614,6 +7615,8 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "webview2-com",
+ "windows 0.61.3",
  "wry",
 ]
 

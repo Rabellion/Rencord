@@ -7,6 +7,8 @@
 //! stored in the OS keychain. Nothing in this crate prints a token, a
 //! password, or a ticket.
 
+mod captcha_host;
+mod captcha_page;
 mod crypto;
 mod login_api;
 mod qr;
@@ -16,9 +18,16 @@ mod session;
 mod vault;
 mod webview;
 
+pub use captcha_host::{
+    dismiss_embedded_captcha, embedded_captcha_available, present_embedded_captcha,
+    reload_embedded_captcha,
+};
+pub use captcha_page::WidgetEvent;
 pub use crypto::RemoteKey;
 pub use login_api::fetch_avatar;
-pub use login_api::{AuthClient, CaptchaChallenge, LoginOutcome, MfaChallenge, MfaMethod};
+pub use login_api::{
+    AuthClient, CaptchaChallenge, CaptchaSolution, LoginOutcome, MfaChallenge, MfaMethod,
+};
 pub use qr::{hexwave_png, render_qr_image, render_qr_png, QrImage};
 pub use redact::redact;
 pub use remote::{

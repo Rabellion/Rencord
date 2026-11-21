@@ -8,9 +8,10 @@ use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::*;
 use rencord_auth::{
-    complete_remote_login, fetch_avatar, redact, render_qr_png, AccountRecord, AccountStore,
-    AuthClient, AuthError, LoginOutcome, MfaChallenge, MfaMethod, RemoteProgress, AUTH_API_ROOT,
-    REMOTE_AUTH_GATEWAY,
+    complete_remote_login, dismiss_embedded_captcha, embedded_captcha_available, fetch_avatar,
+    present_embedded_captcha, redact, reload_embedded_captcha, render_qr_png, AccountRecord,
+    AccountStore, AuthClient, AuthError, CaptchaChallenge, CaptchaSolution, LoginOutcome,
+    MfaChallenge, MfaMethod, RemoteProgress, WidgetEvent, AUTH_API_ROOT, REMOTE_AUTH_GATEWAY,
 };
 use rencord_desktop::{stacks_login, Palette};
 use rencord_model::Token;
@@ -30,6 +31,7 @@ pub enum LoginPreview {
     Qr,
     Confirm,
     Error,
+    Captcha,
 }
 
 pub struct LoginModel {
@@ -49,6 +51,27 @@ pub struct LoginModel {
     pub accounts: Vec<AccountRecord>,
     pub busy: bool,
     pub adding: bool,
+    pub captcha: Option<CaptchaChallenge>,
+    pub captcha_mock: bool,
+    pub captcha_note: Option<String>,
+    captcha_wait: Option<CaptchaWait>,
+    captcha_tx: Option<tokio::sync::mpsc::UnboundedSender<Option<CaptchaSolution>>>,
+    captcha_attached: bool,
+}
+
+#[derive(Clone)]
+enum CaptchaWait {
+    Remote,
+    Password {
+        email: String,
+        password: String,
+    },
+    Mfa {
+        method: MfaMethod,
+        ticket: String,
+        instance: Option<String>,
+        code: String,
+    },
 }
 
 impl LoginModel {
@@ -70,6 +93,12 @@ impl LoginModel {
             accounts: Vec::new(),
             busy: false,
             adding: false,
+            captcha: None,
+            captcha_mock: false,
+            captcha_note: None,
+            captcha_wait: None,
+            captcha_tx: None,
+            captcha_attached: false,
         }
     }
 
@@ -94,6 +123,18 @@ impl LoginModel {
                     "Discord returned 400 (50035): The remote authentication ticket was not accepted. This message is long enough to wrap inside the card instead of running off both edges.".into(),
                 );
                 model.status = "Discord could not finish signing in".into();
+            }
+            LoginPreview::Captcha => {
+                model.captcha = Some(CaptchaChallenge {
+                    sitekey: "preview-sitekey".into(),
+                    service: "hcaptcha".into(),
+                    session_id: None,
+                    rqdata: None,
+                    rqtoken: None,
+                });
+                model.captcha_mock = true;
+                model.captcha_attached = true;
+                model.status = "Discord asked for a captcha.".into();
             }
         }
         model
@@ -144,7 +185,10 @@ impl RencordWindow {
                 .child(copy)
                 .into_any_element()
         };
-        v_flex()
+        if self.login.captcha.is_some() {
+            self.attach_captcha_host(window, cx);
+        }
+        let screen = v_flex()
             .id("login-screen")
             .size_full()
             .overflow_y_scroll()
@@ -155,7 +199,12 @@ impl RencordWindow {
             .py(px(32.))
             .bg(rgb(palette.app_bg))
             .child(row)
-            .child(self.account_row(cx, palette))
+            .child(self.account_row(cx, palette));
+        let mut root = div().relative().size_full().child(screen);
+        if self.login.captcha.is_some() {
+            root = root.child(self.captcha_overlay(cx, palette));
+        }
+        root
     }
 
     fn login_card(&mut self, cx: &mut Context<Self>, palette: Palette) -> impl IntoElement {
@@ -535,7 +584,10 @@ impl RencordWindow {
         self.login.status = "Waiting for Discord…".into();
         self.login.qr_png.clear();
         self.login.qr_image = None;
+        self.clear_captcha_panel();
         let (tx, rx) = async_channel::bounded(16);
+        let (solution_tx, mut solution_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.login.captcha_tx = Some(solution_tx);
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -545,6 +597,7 @@ impl RencordWindow {
                 REMOTE_AUTH_GATEWAY,
                 AUTH_API_ROOT,
                 &cancel,
+                &mut solution_rx,
                 |progress| {
                     let _ = tx.send_blocking(QrMsg::Progress(progress));
                 },
@@ -594,17 +647,18 @@ impl RencordWindow {
                 self.login.qr_png.clear();
                 self.login.qr_image = None;
             }
-            QrMsg::Done(Ok(token)) => self.begin_session(token, false, cx),
+            QrMsg::Progress(RemoteProgress::Captcha(challenge)) => {
+                self.login.captcha_wait = Some(CaptchaWait::Remote);
+                self.show_captcha(challenge);
+            }
+            QrMsg::Done(Ok(token)) => {
+                self.clear_captcha_panel();
+                self.begin_session(token, false, cx);
+            }
             QrMsg::Done(Err(AuthError::Cancelled)) => {}
-            QrMsg::Done(Err(AuthError::Captcha(_))) => {
-                self.login.status =
-                    "Discord asked for a captcha. Opening Discord's login page.".into();
-                self.login.error = Some(
-                    "Discord asked for a captcha. Continue on Discord's own page. Rencord does not solve captchas.".into(),
-                );
-                cx.notify();
-                self.open_webview(cx);
-                return;
+            QrMsg::Done(Err(AuthError::Captcha(challenge))) => {
+                self.login.captcha_wait = Some(CaptchaWait::Remote);
+                self.show_captcha(challenge);
             }
             QrMsg::Done(Err(err)) => {
                 self.login.phase = LoginPhase::Error;
@@ -756,6 +810,10 @@ impl RencordWindow {
             cx.notify();
             return;
         }
+        self.login.captcha_wait = Some(CaptchaWait::Password {
+            email: email.clone(),
+            password: password.clone(),
+        });
         self.login.busy = true;
         self.login.error = None;
         self.login.status = "Asking Discord…".into();
@@ -801,6 +859,12 @@ impl RencordWindow {
         } else {
             MfaMethod::Totp
         };
+        self.login.captcha_wait = Some(CaptchaWait::Mfa {
+            method,
+            ticket: challenge.ticket.clone(),
+            instance: challenge.login_instance_id.clone(),
+            code: code.clone(),
+        });
         self.login.busy = true;
         cx.notify();
         let ticket = challenge.ticket.clone();
@@ -870,25 +934,23 @@ impl RencordWindow {
         match outcome {
             Ok(LoginOutcome::Session { token, .. }) => {
                 self.login.mfa = None;
+                self.clear_captcha_panel();
                 self.begin_session(token, false, cx);
             }
             Ok(LoginOutcome::Mfa(challenge)) => {
+                self.login.captcha_wait = None;
                 self.login.mfa = Some(challenge);
                 self.login.password_open = true;
                 self.login.other_open = true;
                 self.login.status = "Discord asked for a second step.".into();
                 cx.notify();
             }
-            Ok(LoginOutcome::Captcha(_)) => {
-                self.login.status =
-                    "Discord asked for a captcha. Opening Discord's login page.".into();
-                self.login.error = Some(
-                    "Discord asked for a captcha. Continue on Discord's own page. Rencord does not solve captchas.".into(),
-                );
+            Ok(LoginOutcome::Captcha(challenge)) => {
+                self.show_captcha(challenge);
                 cx.notify();
-                self.open_webview(cx);
             }
             Err(err) => {
+                self.login.captcha_wait = None;
                 self.login.error = Some(err.public_message());
                 self.login.status = "Discord did not accept that".into();
                 if matches!(err, AuthError::WebviewUnavailable(_)) {
@@ -934,6 +996,271 @@ impl RencordWindow {
             .ok();
         })
         .detach();
+    }
+
+    fn show_captcha(&mut self, challenge: CaptchaChallenge) {
+        dismiss_embedded_captcha();
+        self.login.captcha = Some(challenge);
+        self.login.captcha_mock = false;
+        self.login.captcha_attached = false;
+        self.login.captcha_note = None;
+        self.login.status = "Discord asked for a captcha.".into();
+        self.login.error = None;
+    }
+
+    fn clear_captcha_panel(&mut self) {
+        dismiss_embedded_captcha();
+        self.login.captcha = None;
+        self.login.captcha_mock = false;
+        self.login.captcha_note = None;
+        self.login.captcha_wait = None;
+        self.login.captcha_attached = false;
+        if let Some(tx) = self.login.captcha_tx.take() {
+            let _ = tx.send(None);
+        }
+    }
+
+    fn attach_captcha_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.login.captcha_mock || self.login.captcha_attached {
+            return;
+        }
+        let Some(challenge) = self.login.captcha.clone() else {
+            return;
+        };
+        self.login.captcha_attached = true;
+        if !embedded_captcha_available() {
+            self.login.captcha_note = Some(
+                "This build cannot embed hCaptcha in the window. Continue on Discord's page."
+                    .into(),
+            );
+            return;
+        }
+        let size = window.viewport_size();
+        let panel_w = 440.0_f32;
+        let panel_h = 520.0_f32;
+        let x = (size.width.as_f32() - panel_w) / 2.0 + 28.0;
+        let y = (size.height.as_f32() - panel_h) / 2.0 + 96.0;
+        let (tx, rx) = async_channel::bounded(4);
+        let opened = present_embedded_captcha(
+            window,
+            x,
+            y,
+            panel_w - 56.0,
+            320.0,
+            &challenge,
+            move |event| {
+                let _ = tx.try_send(event);
+            },
+        );
+        if let Err(message) = opened {
+            self.login.captcha_note = Some(message);
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = rx.recv().await {
+                this.update(cx, |view, cx| view.on_widget_event(event, cx))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn on_widget_event(&mut self, event: WidgetEvent, cx: &mut Context<Self>) {
+        match event {
+            WidgetEvent::Solved(token) => self.retry_with_solution(token, cx),
+            WidgetEvent::Expired => {
+                self.login.captcha_note = Some("The check expired. Try it again.".into());
+                cx.notify();
+            }
+            WidgetEvent::Error => {
+                self.login.captcha_note =
+                    Some("hCaptcha did not accept this window. Continue on Discord's page.".into());
+                cx.notify();
+            }
+            WidgetEvent::Closed => {
+                self.finish_captcha_without_token();
+                cx.notify();
+            }
+        }
+    }
+
+    fn retry_with_solution(&mut self, token: String, cx: &mut Context<Self>) {
+        let Some(challenge) = self.login.captcha.clone() else {
+            return;
+        };
+        let solution = CaptchaSolution {
+            key: token,
+            rqtoken: challenge.rqtoken.clone(),
+            session_id: challenge.session_id.clone(),
+        };
+        dismiss_embedded_captcha();
+        self.login.captcha = None;
+        self.login.captcha_attached = false;
+        self.login.captcha_note = None;
+        self.login.status = "Sending the captcha to Discord…".into();
+        match self.login.captcha_wait.clone() {
+            Some(CaptchaWait::Remote) => {
+                if let Some(tx) = &self.login.captcha_tx {
+                    let _ = tx.send(Some(solution));
+                }
+            }
+            Some(CaptchaWait::Password { email, password }) => {
+                self.login.busy = true;
+                let (tx, rx) = async_channel::bounded(1);
+                std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("tokio");
+                    let outcome = runtime.block_on(AuthClient::new().login_with_password_solved(
+                        &email,
+                        &password,
+                        Some(&solution),
+                    ));
+                    let _ = tx.send_blocking(outcome);
+                });
+                cx.spawn(async move |this, cx| {
+                    let Ok(outcome) = rx.recv().await else {
+                        return;
+                    };
+                    this.update(cx, |view, cx| {
+                        view.login.busy = false;
+                        view.apply_login_outcome(outcome, cx);
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            Some(CaptchaWait::Mfa {
+                method,
+                ticket,
+                instance,
+                code,
+            }) => {
+                self.login.busy = true;
+                let (tx, rx) = async_channel::bounded(1);
+                std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("tokio");
+                    let outcome = runtime.block_on(AuthClient::new().submit_mfa_solved(
+                        method,
+                        &ticket,
+                        instance.as_deref(),
+                        &code,
+                        Some(&solution),
+                    ));
+                    let _ = tx.send_blocking(outcome);
+                });
+                cx.spawn(async move |this, cx| {
+                    let Ok(outcome) = rx.recv().await else {
+                        return;
+                    };
+                    this.update(cx, |view, cx| {
+                        view.login.busy = false;
+                        view.apply_login_outcome(outcome, cx);
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            None => {
+                self.login.captcha_note =
+                    Some("The captcha was solved, but the login to retry is gone.".into());
+                self.login.captcha = Some(challenge);
+            }
+        }
+        cx.notify();
+    }
+
+    fn finish_captcha_without_token(&mut self) {
+        dismiss_embedded_captcha();
+        if matches!(self.login.captcha_wait, Some(CaptchaWait::Remote)) {
+            if let Some(tx) = &self.login.captcha_tx {
+                let _ = tx.send(None);
+            }
+        }
+        self.login.captcha = None;
+        self.login.captcha_mock = false;
+        self.login.captcha_attached = false;
+        self.login.captcha_wait = None;
+        self.login.captcha_note = None;
+        self.login.status = "The captcha was closed.".into();
+    }
+
+    fn captcha_overlay(&mut self, cx: &mut Context<Self>, palette: Palette) -> impl IntoElement {
+        let this = cx.entity();
+        let note = self.login.captcha_note.clone();
+        let mock = self.login.captcha_mock;
+        let mut card = v_flex()
+            .w(px(440.))
+            .p(px(24.))
+            .gap(px(14.))
+            .rounded(px(12.))
+            .border_1()
+            .border_color(rgb(palette.line))
+            .bg(rgb(palette.elevated))
+            .child(ink("Confirm you're human", palette.text, 20., true))
+            .child(ink(
+                "Discord asked for a check. Rencord does not solve it.",
+                palette.muted,
+                14.,
+                false,
+            ));
+        if let Some(note) = note {
+            card = card.child(wrapped_ink(note, palette.danger, 14.));
+        }
+        if mock {
+            card = card.child(mock_hcaptcha(palette));
+        } else {
+            card = card.h(px(520.)).child(div().w_full().h(px(320.)));
+        }
+        card = card.child(
+            h_flex()
+                .gap(px(12.))
+                .child(accent_button(
+                    this.clone(),
+                    "captcha-retry",
+                    "Try again",
+                    palette,
+                    |view, _window, cx| {
+                        view.login.captcha_note = None;
+                        reload_embedded_captcha();
+                        cx.notify();
+                    },
+                ))
+                .child(text_button(
+                    this.clone(),
+                    "captcha-discord-page",
+                    "Use Discord's page",
+                    palette,
+                    |view, _window, cx| {
+                        view.finish_captcha_without_token();
+                        view.open_webview(cx);
+                    },
+                ))
+                .child(text_button(
+                    this,
+                    "captcha-close",
+                    "Close",
+                    palette,
+                    |view, _window, cx| {
+                        view.finish_captcha_without_token();
+                        cx.notify();
+                    },
+                )),
+        );
+        div()
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(palette.overlay))
+            .child(card)
     }
 
     fn switch_account(&mut self, user_id: &str, cx: &mut Context<Self>) {
@@ -1082,6 +1409,34 @@ fn initial_bubble(initial: &str, palette: Palette, size: f32) -> impl IntoElemen
         .items_center()
         .justify_center()
         .child(ink(initial, palette.text, size * 0.38, true))
+}
+
+fn mock_hcaptcha(palette: Palette) -> impl IntoElement {
+    h_flex()
+        .w(px(304.))
+        .h(px(76.))
+        .px(px(14.))
+        .items_center()
+        .gap(px(12.))
+        .rounded(px(4.))
+        .border_1()
+        .border_color(rgb(palette.line))
+        .bg(rgb(palette.app_bg))
+        .child(
+            div()
+                .size(px(28.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(rgb(palette.muted)),
+        )
+        .child(ink("I am human", palette.text, 16., false))
+        .child(
+            div()
+                .flex_1()
+                .flex()
+                .justify_end()
+                .child(ink("hCaptcha", palette.muted, 12., true)),
+        )
 }
 
 fn wrapped_ink(text: impl AsRef<str>, color: u32, size: f32) -> impl IntoElement {
