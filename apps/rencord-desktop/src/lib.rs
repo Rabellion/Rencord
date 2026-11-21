@@ -325,6 +325,23 @@ impl Shell {
 
     /// Swaps the optimistic copy of a sent message for the one Discord stored,
     /// so the gateway's echo of the same message does not show twice.
+    pub fn mirror_reaction(&mut self, message_id: u64) {
+        let Some(list) = self.session.reactions.get(&message_id) else {
+            self.reactions.remove(&message_id);
+            return;
+        };
+        self.reactions.insert(
+            message_id,
+            list.iter()
+                .map(|(emoji, count)| Reaction {
+                    emoji: emoji.clone(),
+                    count: *count,
+                    mine: false,
+                })
+                .collect(),
+        );
+    }
+
     pub fn confirm_create(&mut self, mutation: &Mutation, sent: Message) {
         if let Mutation::Create {
             local_id,

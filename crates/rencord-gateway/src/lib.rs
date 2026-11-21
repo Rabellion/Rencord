@@ -9,7 +9,8 @@ use futures_util::{SinkExt, StreamExt};
 use rencord_model::{Message, Snowflake, User};
 use rencord_protocol::{
     heartbeat_payload, identify_payload, resume_payload, voice_state_update, GatewayFrame,
-    GatewayOpcode, HelloData, ReadyData, VoiceServerUpdate, VoiceStateDispatch, WireMessage,
+    GatewayOpcode, HelloData, ReadyData, VoiceServerUpdate, VoiceStateDispatch, WireChannel,
+    WireMessage,
 };
 use serde_json::Value;
 use std::time::Duration;
@@ -45,7 +46,7 @@ pub enum GatewayEvent {
     Ready {
         session_id: String,
         user: User,
-        guild_ids: Vec<Snowflake>,
+        guilds: Vec<rencord_protocol::ReadyGuild>,
         discord_theme: Option<String>,
         discord_client_theme: Option<String>,
     },
@@ -54,6 +55,20 @@ pub enum GatewayEvent {
     MessageDelete {
         channel_id: Snowflake,
         message_id: Snowflake,
+    },
+    GuildUpsert {
+        id: Snowflake,
+        name: Option<String>,
+        icon: Option<String>,
+        channels: Vec<rencord_model::Channel>,
+    },
+    GuildDelete(Snowflake),
+    ChannelUpsert(rencord_model::Channel),
+    ChannelDelete(Snowflake),
+    Reaction {
+        message_id: Snowflake,
+        emoji: String,
+        remove: bool,
     },
     VoiceState(VoiceStateDispatch),
     VoiceServer(VoiceServerUpdate),
@@ -288,7 +303,7 @@ fn decode_dispatch(name: &str, data: Value) -> Result<Option<GatewayEvent>, Gate
             Some(GatewayEvent::Ready {
                 session_id: ready.session_id,
                 user: ready.user,
-                guild_ids: ready.guilds.into_iter().map(|guild| guild.id).collect(),
+                guilds: ready.guilds,
                 discord_theme: ready
                     .user_settings
                     .as_ref()
@@ -299,6 +314,11 @@ fn decode_dispatch(name: &str, data: Value) -> Result<Option<GatewayEvent>, Gate
                     .and_then(|settings| settings.client_theme.clone()),
             })
         }
+        "GUILD_CREATE" | "GUILD_UPDATE" => guild_upsert(&data)?,
+        "GUILD_DELETE" => snowflake_field(&data, "id")?.map(GatewayEvent::GuildDelete),
+        "CHANNEL_CREATE" | "CHANNEL_UPDATE" => channel_upsert(&data)?,
+        "CHANNEL_DELETE" => snowflake_field(&data, "id")?.map(GatewayEvent::ChannelDelete),
+        "MESSAGE_REACTION_ADD" | "MESSAGE_REACTION_REMOVE" => reaction(name, &data)?,
         "MESSAGE_DELETE" => {
             let channel_id = data.get("channel_id").cloned().unwrap_or(Value::Null);
             let message_id = data.get("id").cloned().unwrap_or(Value::Null);
@@ -326,6 +346,74 @@ fn decode_dispatch(name: &str, data: Value) -> Result<Option<GatewayEvent>, Gate
         _ => None,
     };
     Ok(event)
+}
+
+fn snowflake_field(data: &Value, key: &str) -> Result<Option<Snowflake>, GatewayError> {
+    match data.get(key) {
+        Some(value) => Ok(Some(serde_json::from_value(value.clone())?)),
+        None => Ok(None),
+    }
+}
+
+fn guild_upsert(data: &Value) -> Result<Option<GatewayEvent>, GatewayError> {
+    let Some(id) = snowflake_field(data, "id")? else {
+        return Ok(None);
+    };
+    let name = data
+        .get("name")
+        .and_then(|value| value.as_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+    let icon = data
+        .get("icon")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+    let mut channels = Vec::new();
+    if let Some(list) = data.get("channels").and_then(|value| value.as_array()) {
+        for item in list {
+            let Ok(wire) = serde_json::from_value::<WireChannel>(item.clone()) else {
+                continue;
+            };
+            let mut channel = wire.into_channel();
+            if channel.guild_id.is_none() {
+                channel.guild_id = Some(id);
+            }
+            channels.push(channel);
+        }
+    }
+    Ok(Some(GatewayEvent::GuildUpsert {
+        id,
+        name,
+        icon,
+        channels,
+    }))
+}
+
+fn channel_upsert(data: &Value) -> Result<Option<GatewayEvent>, GatewayError> {
+    let Ok(wire) = serde_json::from_value::<WireChannel>(data.clone()) else {
+        return Ok(None);
+    };
+    Ok(Some(GatewayEvent::ChannelUpsert(wire.into_channel())))
+}
+
+fn reaction(name: &str, data: &Value) -> Result<Option<GatewayEvent>, GatewayError> {
+    let Some(message_id) = snowflake_field(data, "message_id")? else {
+        return Ok(None);
+    };
+    let emoji = data
+        .get("emoji")
+        .and_then(|emoji| emoji.get("name"))
+        .and_then(|name| name.as_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+    let Some(emoji) = emoji else {
+        return Ok(None);
+    };
+    Ok(Some(GatewayEvent::Reaction {
+        message_id,
+        emoji,
+        remove: name == "MESSAGE_REACTION_REMOVE",
+    }))
 }
 
 /// Discord's `zlib-stream` transport appends `00 00 ff ff` between messages.
@@ -449,7 +537,7 @@ mod tests {
             GatewayEvent::Ready {
                 session_id,
                 user,
-                guild_ids,
+                guilds,
                 discord_theme,
                 discord_client_theme,
             } => {
@@ -457,7 +545,7 @@ mod tests {
                 assert!(discord_client_theme.is_none());
                 assert_eq!(session_id, "sess");
                 assert_eq!(user.username, "ada");
-                assert_eq!(guild_ids[0].get(), 100);
+                assert_eq!(guilds[0].id.get(), 100);
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -818,5 +906,45 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn guild_create_keeps_the_name_icon_and_channels() {
+        let event = decode_dispatch(
+            "GUILD_CREATE",
+            serde_json::json!({
+                "id": "10",
+                "name": "Analytical Engines",
+                "icon": "abc",
+                "channels": [{"id": "100", "type": 0, "name": "general"}]
+            }),
+        )
+        .unwrap();
+        match event {
+            Some(GatewayEvent::GuildUpsert {
+                id,
+                name,
+                icon,
+                channels,
+            }) => {
+                assert_eq!(id.get(), 10);
+                assert_eq!(name.as_deref(), Some("Analytical Engines"));
+                assert_eq!(icon.as_deref(), Some("abc"));
+                assert_eq!(channels[0].name, "general");
+                assert_eq!(channels[0].guild_id, Some(Snowflake::new(10)));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let gone = decode_dispatch("GUILD_DELETE", serde_json::json!({"id": "10"})).unwrap();
+        assert!(matches!(gone, Some(GatewayEvent::GuildDelete(id)) if id.get() == 10));
+        let reaction = decode_dispatch(
+            "MESSAGE_REACTION_ADD",
+            serde_json::json!({"message_id": "5", "emoji": {"name": "wave"}}),
+        )
+        .unwrap();
+        assert!(matches!(
+            reaction,
+            Some(GatewayEvent::Reaction { remove: false, .. })
+        ));
     }
 }
