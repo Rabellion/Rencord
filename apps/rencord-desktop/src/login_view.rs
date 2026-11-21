@@ -1028,7 +1028,7 @@ fn accent_button(
         .justify_center()
         .cursor_pointer()
         .bg(rgb(palette.accent))
-        .child(ink(label, palette.accent_text, 14., true))
+        .child(ink(label, palette.on_accent, 14., true))
         .on_click(move |_, window, cx| {
             view.update(cx, |this, cx| action(this, window, cx));
         })

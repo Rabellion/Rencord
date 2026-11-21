@@ -125,7 +125,7 @@ Layout presets A, B, and C are compared in [DIRECTIONS.md](DIRECTIONS.md). A is 
 
 ## Sign in
 
-The welcome screen is Onyx Ink: a black canvas, a white QR card, and a column with the wordmark, **Log in with Discord**, and Other options. The accent button is `#4F6BFF` with black ink. Hints and the disclaimer are JetBrains Mono. Avatars stay round.
+The welcome screen is Onyx Ink: a black canvas, a white QR card, and a column with the wordmark, **Log in with Discord**, and Other options. The accent button is `#4F6BFF` with white ink from `accent.on`. Banners keep Onyx Ink's black `accent.fg`. Hints and the disclaimer are JetBrains Mono. Avatars stay round.
 
 The QR encodes `https://discord.com/ra/<fingerprint>` at error-correction level H, with the Hexwave mark in the center: a hex speech bubble, voice bars knocked out, and the middle bar in `#4F6BFF`. The same mark sits to the left of the Rencord wordmark. The left card stays 280 px square in the code, confirm, and expired states. After a scan the card shows the avatar and the name. The line under it says it is waiting for approval, and "Not you? Use a new code" starts again.
 

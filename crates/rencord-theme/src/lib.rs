@@ -47,6 +47,7 @@ mod tests {
         assert_eq!(theme.colors.bg_chat.to_u32(), 0x000000);
         assert_eq!(theme.colors.accent.to_u32(), 0x4f6bff);
         assert_eq!(theme.colors.accent_fg.to_u32(), 0x000000);
+        assert_eq!(theme.colors.accent_on.to_u32(), 0xffffff);
         assert_eq!(theme.colors.text_link.to_u32(), 0xa8b8ff);
         assert_eq!(theme.colors.border_hairline.to_u32(), 0x15152a);
         assert!(theme.metrics.ink_chrome);

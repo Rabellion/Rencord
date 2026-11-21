@@ -86,6 +86,7 @@ pub fn derive_theme(
     colors.text_secondary = ensure_contrast(muted.mix(text, 0.35), chat, 4.5);
     colors.accent = accent_fill;
     colors.accent_fg = accent_fg;
+    colors.accent_on = crate::preset::on_accent(accent_fill, accent_fg);
     colors.border_accent = accent_fill;
     colors.text_mention = ensure_contrast(colors.text_mention, colors.bg_mention, 4.5);
     colors.syntax_keyword = link;

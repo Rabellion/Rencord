@@ -94,6 +94,7 @@ color_bag! {
     border_hover => "border.hover",
     accent => "accent",
     accent_fg => "accent.fg",
+    accent_on => "accent.on",
     danger => "danger",
     positive => "positive",
     status_online => "status.online",
@@ -440,6 +441,7 @@ impl Theme {
         self.colors.border_strong = self.colors.border_strong.mix(text, 0.28);
         self.colors.accent_fg = best_ink(self.colors.accent);
         self.colors.accent_fg = ensure_contrast(self.colors.accent_fg, self.colors.accent, 4.5);
+        self.colors.accent_on = crate::preset::on_accent(self.colors.accent, self.colors.accent_fg);
         for field in [
             &mut self.colors.status_online,
             &mut self.colors.status_idle,
@@ -483,6 +485,7 @@ impl Theme {
             ensure_contrast(self.colors.text_mention, self.colors.bg_mention, 4.5);
         self.colors.accent_fg =
             ensure_contrast(best_ink(self.colors.accent), self.colors.accent, 4.5);
+        self.colors.accent_on = crate::preset::on_accent(self.colors.accent, self.colors.accent_fg);
         self.metrics.saturation = scale;
         self
     }

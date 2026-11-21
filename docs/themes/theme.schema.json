@@ -64,6 +64,7 @@
         "border.hover": { "$ref": "#/$defs/hex" },
         "accent": { "$ref": "#/$defs/hex" },
         "accent.fg": { "$ref": "#/$defs/hex" },
+        "accent.on": { "$ref": "#/$defs/hex" },
         "danger": { "$ref": "#/$defs/hex" },
         "positive": { "$ref": "#/$defs/hex" },
         "status.online": { "$ref": "#/$defs/hex" },
