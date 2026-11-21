@@ -200,6 +200,7 @@ mod tests {
                 avatar: None,
             },
             content: "notes mention https://example.com and `code`".into(),
+            kind: 0,
             timestamp: "2026-11-19T00:00:00Z".into(),
         });
         let _ = ChannelKind::GuildText;

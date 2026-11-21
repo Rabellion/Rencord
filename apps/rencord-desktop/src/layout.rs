@@ -204,7 +204,7 @@ pub enum SplitEdge {
     Right,
 }
 
-/// Theme-facing column defaults. The rail is 68 px. A gap above zero is the floating-panel option.
+/// Theme-facing column defaults. The rail is 72 px. A gap above zero is the floating-panel option.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ColumnMetrics {
     pub rail: f32,
@@ -216,9 +216,9 @@ pub struct ColumnMetrics {
 impl ColumnMetrics {
     pub fn onyx() -> Self {
         Self {
-            rail: 68.0,
-            channels: 216.0,
-            members: 176.0,
+            rail: 72.0,
+            channels: 240.0,
+            members: 240.0,
             gap: 0.0,
         }
     }
