@@ -33,3 +33,23 @@ rencord-voice = { workspace = true, features = ["cpal"] }
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+image = { version = "0.25.1", default-features = false, features = ["png"] }
+
+[build-dependencies]
+embed-resource = "3.0.12"
+
+[package.metadata.bundle]
+name = "Rencord"
+identifier = "app.rencord.desktop"
+icon = ["../../assets/brand/hexwave.icns"]
+short_description = "Native Discord client"
+long_description = "A native Discord desktop client in Rust. The interface is GPUI."
+
+[package.metadata.packager]
+product-name = "Rencord"
+identifier = "app.rencord.desktop"
+icons = [
+    "../../assets/brand/hexwave.icns",
+    "../../assets/brand/hexwave.ico",
+    "../../assets/brand/hexwave-icon-1024.png",
+]

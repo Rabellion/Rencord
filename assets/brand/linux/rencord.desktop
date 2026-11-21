@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Rencord
+GenericName=Discord client
+Comment=Native Discord desktop client
+Exec=rencord
+Icon=rencord
+Terminal=false
+Categories=Network;InstantMessaging;
+StartupWMClass=rencord
+Keywords=discord;chat;voice;
