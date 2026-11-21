@@ -9,8 +9,11 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-thiserror.workspace = true
+flate2.workspace = true
+pollster = "0.4"
 serde_json.workspace = true
+thiserror.workspace = true
+wgpu = "30"
 
 [dev-dependencies]
 naga = { version = "25", default-features = false, features = ["wgsl-in"] }
@@ -18,3 +21,7 @@ naga = { version = "25", default-features = false, features = ["wgsl-in"] }
 [[bench]]
 name = "throughput"
 harness = false
+
+[[bin]]
+name = "hdr-compare"
+path = "src/bin/compare.rs"

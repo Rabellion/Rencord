@@ -33,7 +33,16 @@ Hable uses the Uncharted 2 coefficients (A 0.15, B 0.50, C 0.10, D 0.20, E 0.02,
 
 The default master for the settings preview is BT.2020 PQ at 1 000 cd/m² into BT.709 at 100 cd/m². The curve is selectable: BT.2390, Hable, ACES. It starts on BT.2390.
 
-The shader in `shader.rs` is the GPU program. Tests check that `naga` accepts it and that the ST 2084 constants in the source match the CPU. Nothing in CI submits the workgroup. `GpuToneMapper` therefore returns the CPU pixels and says so.
+The shader in `shader.rs` is submitted with wgpu on Vulkan, Metal, or D3D12. `GpuToneMapper` uses that dispatch and falls back to the CPU mapper when `request_adapter` fails. A unit test compares the GPU pixels with the same f32 formulas on the CPU and requires a max error under 0.002. If no adapter exists the test prints a skip line and passes, which is what CI does.
+
+On this machine the only adapter is lavapipe (software Vulkan, LLVM 20.1.2). Release, one submit plus readback, pipeline already built:
+
+| Frame | Time |
+| --- | ---: |
+| 1920×1080 | 50.4 ms |
+| 3840×2160 | 241 ms |
+
+The error against the CPU formula on 34 pixels was 0.000024. A mid-range GPU budget of under 2 ms at 1080p and under 4 ms at 4K was not measured, because no such GPU is attached. Lavapipe is faster than the CPU BT.2390 path (91.8 ms at 1080p) and still too slow for a live frame.
 
 The picture path does not call the f64 reference per pixel. PQ encode and decode use a 4096-entry table (log-spaced for the forward curve, uniform in PQ for the inverse). The knee itself is still the EETF. A neutral 100 cd/m² pixel stays within 0.002 of the f64 display-linear value.
 
@@ -60,7 +69,7 @@ A viewer is HDR-capable only when all of these are true:
 
 When some Rencord peers asked for HDR and the track still has to be SDR, `DeliveryPlan::side_channel_hdr` is true. That means a 10-bit access unit *may* be built for a Rencord-only transport. This crate does not transmit it.
 
-`rencord-media::planned_pixel_path` is the hook the Go Live crate calls into `HdrSignal`. It is stricter than `select_pixel_path`: a Rencord viewer that did not advertise receive stays on SDR. `output_path`, which the running worker uses, is unchanged and still tone-maps every HDR frame to 8-bit. Turning Send on in settings does not switch that encode.
+`rencord-media::planned_pixel_path` is the hook the Go Live crate calls into `HdrSignal`. It is stricter than `select_pixel_path`: a Rencord viewer that did not advertise receive stays on SDR. `output_path` is still the SDR decision. `GoLive::send_frame` tone-maps an HDR preview with the GPU shader (CPU if wgpu has no adapter) before the existing 8-bit software encode. When `hdr_send` is set it also calls `Hdr10Encoder`. The reference encoder writes `RHDR` plus HDR10 SEI. `UnlinkedHdr10Encoder` is the NVENC, AMF, QSV, VideoToolbox, and VA-API implementation of that trait: it returns not-linked and does not duplicate their session code.
 
 ### Where the bytes go
 

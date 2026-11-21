@@ -407,10 +407,11 @@ fn apply_f32(matrix: [[f32; 3]; 3], value: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-/// GPU-side program. The WGSL is the tone-map the presenter would dispatch.
-/// Executing it needs a GPU adapter, which this crate does not open.
+/// GPU tone-map. `map_into` submits the WGSL compute shader when wgpu can see
+/// a Vulkan, Metal, or D3D12 adapter, and uses the CPU mapper otherwise.
 pub struct GpuToneMapper {
     curve: ToneCurve,
+    params: ToneMapParams,
     shader: String,
     cpu: CpuToneMapper,
 }
@@ -421,6 +422,7 @@ impl GpuToneMapper {
             curve: params.curve,
             shader: crate::shader::tonemap_wgsl(),
             cpu: CpuToneMapper::new(params),
+            params,
         }
     }
 
@@ -428,10 +430,22 @@ impl GpuToneMapper {
         &self.shader
     }
 
-    /// No wgpu device is linked. Callers that need pixels use the CPU mapper,
-    /// which is the numerical reference for the shader.
-    pub fn dispatch_status(&self) -> &'static str {
-        "WGSL compute shader is generated and parsed in tests. No GPU adapter is opened, so dispatch falls back to the CPU reference."
+    pub fn dispatch_status(&self) -> String {
+        match crate::gpu::adapter_report() {
+            Ok(report) => format!(
+                "wgpu {} on {} ({}). Per-frame submit uses the WGSL compute shader.",
+                report.backend,
+                report.name,
+                if report.software {
+                    "software adapter"
+                } else {
+                    "hardware adapter"
+                }
+            ),
+            Err(_) => {
+                "No Vulkan, Metal, or D3D12 adapter. Dispatch falls back to the CPU mapper.".into()
+            }
+        }
     }
 }
 
@@ -441,11 +455,22 @@ impl ToneMapper for GpuToneMapper {
     }
 
     fn map_display_linear(&self, rgb_nits: [f32; 3]) -> [f32; 3] {
-        self.cpu.map_display_linear(rgb_nits)
+        match crate::gpu::dispatch(&self.params, &[rgb_nits]) {
+            Ok(result) => result.pixels.first().copied().unwrap_or([0.0, 0.0, 0.0]),
+            Err(_) => self.cpu.map_display_linear(rgb_nits),
+        }
     }
 
     fn map_into(&self, src: &[[f32; 3]], dst: &mut [[f32; 3]]) {
-        self.cpu.map_into(src, dst);
+        let count = src.len().min(dst.len());
+        match crate::gpu::dispatch(&self.params, &src[..count]) {
+            Ok(result) => {
+                for (index, pixel) in result.pixels.into_iter().enumerate() {
+                    dst[index] = pixel;
+                }
+            }
+            Err(_) => self.cpu.map_into(&src[..count], &mut dst[..count]),
+        }
     }
 }
 

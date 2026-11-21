@@ -57,6 +57,8 @@ pub struct CapturedColorDesc {
     /// Protocol min_lum, which is cd/m² times 10 000.
     pub wayland_min_lum_scaled: Option<u32>,
     pub pipewire_caps: Option<String>,
+    /// `DXGI_FORMAT_*` when the capture desc came from a Windows texture.
+    pub dxgi_format: Option<u32>,
     pub edid: Option<Vec<u8>>,
     pub mastering_max_nits: Option<f32>,
     pub mastering_min_nits: Option<f32>,
@@ -516,6 +518,116 @@ fn colorimetry_from_wayland(desc: &CapturedColorDesc) -> SourceColorimetry {
         min_nits: min,
         peak_assumed: assumed && transfer.is_hdr(),
     }
+}
+
+/// Pixel layout a capture backend can hand the tone-mapper.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CapturePixelFormat {
+    /// 8-bit BGRA. The SDR preview path.
+    Bgra8,
+    /// `DXGI_FORMAT_R16G16B16A16_FLOAT` (10). scRGB, 1.0 = 80 cd/m².
+    DxgiRgba16Float,
+    /// `DXGI_FORMAT_R10G10B10A2_UNORM` (24). PQ in the 10-bit channels.
+    DxgiR10G10B10A2,
+    /// ScreenCaptureKit `x420` / `xf20` 10-bit 4:2:0. Reported, not unpacked here.
+    SckYuv42010,
+    /// PipeWire `P010`.
+    PipeWireP010,
+}
+
+pub const DXGI_FORMAT_R16G16B16A16_FLOAT: u32 = 10;
+pub const DXGI_FORMAT_R10G10B10A2_UNORM: u32 = 24;
+
+pub fn capture_pixel_format(desc: &CapturedColorDesc) -> CapturePixelFormat {
+    if desc.dxgi_format == Some(DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        return CapturePixelFormat::DxgiRgba16Float;
+    }
+    if desc.dxgi_format == Some(DXGI_FORMAT_R10G10B10A2_UNORM) {
+        return CapturePixelFormat::DxgiR10G10B10A2;
+    }
+    if let Some(format) = desc.apple_pixel_format {
+        if matches!(
+            format,
+            apple::YUV420_10_VIDEO | apple::YUV420_10_FULL | apple::RGB_10_LE
+        ) {
+            return CapturePixelFormat::SckYuv42010;
+        }
+    }
+    if desc
+        .pipewire_caps
+        .as_deref()
+        .is_some_and(|caps| caps.to_ascii_lowercase().contains("p010"))
+    {
+        return CapturePixelFormat::PipeWireP010;
+    }
+    CapturePixelFormat::Bgra8
+}
+
+/// scRGB half-float or 10-bit PQ texels to linear cd/m² RGB.
+pub fn samples_to_nits(format: CapturePixelFormat, bytes: &[u8]) -> Result<Vec<[f32; 3]>, String> {
+    match format {
+        CapturePixelFormat::DxgiRgba16Float => {
+            if bytes.len() % 8 != 0 {
+                return Err("R16G16B16A16_FLOAT length is not a multiple of 8".into());
+            }
+            let mut out = Vec::with_capacity(bytes.len() / 8);
+            for pixel in bytes.chunks_exact(8) {
+                let r = f16_to_f32(u16::from_le_bytes([pixel[0], pixel[1]]));
+                let g = f16_to_f32(u16::from_le_bytes([pixel[2], pixel[3]]));
+                let b = f16_to_f32(u16::from_le_bytes([pixel[4], pixel[5]]));
+                out.push([r * 80.0, g * 80.0, b * 80.0]);
+            }
+            Ok(out)
+        }
+        CapturePixelFormat::DxgiR10G10B10A2 => {
+            if bytes.len() % 4 != 0 {
+                return Err("R10G10B10A2 length is not a multiple of 4".into());
+            }
+            let mut out = Vec::with_capacity(bytes.len() / 4);
+            for pixel in bytes.chunks_exact(4) {
+                let packed = u32::from_le_bytes(pixel.try_into().unwrap());
+                let channel = |shift: u32| {
+                    let code = ((packed >> shift) & 0x3ff) as u16;
+                    crate::color::pq_eotf(crate::color::dequantize_pq_10(
+                        code,
+                        crate::color::QuantRange::Full,
+                    )) as f32
+                };
+                out.push([channel(0), channel(10), channel(20)]);
+            }
+            Ok(out)
+        }
+        CapturePixelFormat::Bgra8
+        | CapturePixelFormat::SckYuv42010
+        | CapturePixelFormat::PipeWireP010 => Err(format!(
+            "{format:?} is not a packed RGB texel this function expands"
+        )),
+    }
+}
+
+fn f16_to_f32(bits: u16) -> f32 {
+    let sign = (bits >> 15) & 1;
+    let exp = (bits >> 10) & 0x1f;
+    let frac = bits & 0x3ff;
+    let out = if exp == 0 {
+        if frac == 0 {
+            (sign as u32) << 31
+        } else {
+            let mut mantissa = frac;
+            let mut exponent = 127 - 14;
+            while mantissa & 0x400 == 0 {
+                mantissa <<= 1;
+                exponent -= 1;
+            }
+            mantissa &= 0x3ff;
+            ((sign as u32) << 31) | (exponent << 23) | ((mantissa as u32) << 13)
+        }
+    } else if exp == 31 {
+        ((sign as u32) << 31) | (0xff << 23) | ((frac as u32) << 13)
+    } else {
+        ((sign as u32) << 31) | (((exp as u32) + (127 - 15)) << 23) | ((frac as u32) << 13)
+    };
+    f32::from_bits(out)
 }
 
 pub fn parse_pipewire_caps(caps: &str) -> SourceColorimetry {
@@ -1017,5 +1129,61 @@ mod tests {
             .iter()
             .any(|note| note.contains("WAYLAND")));
         assert!(HostProbe::system().probe().is_ok());
+    }
+
+    #[test]
+    fn capture_formats_expand_scrgb_and_pq10() {
+        let float = CapturedColorDesc {
+            dxgi_format: Some(DXGI_FORMAT_R16G16B16A16_FLOAT),
+            ..CapturedColorDesc::default()
+        };
+        assert_eq!(
+            capture_pixel_format(&float),
+            CapturePixelFormat::DxgiRgba16Float
+        );
+        let one = f16_to_f32(0x3c00);
+        assert!((one - 1.0).abs() < 1e-4, "{one}");
+        let bytes = 0x3c00u16.to_le_bytes();
+        let mut packed = Vec::new();
+        for _ in 0..4 {
+            packed.extend_from_slice(&bytes);
+        }
+        let nits = samples_to_nits(CapturePixelFormat::DxgiRgba16Float, &packed).unwrap();
+        assert!((nits[0][0] - 80.0).abs() < 0.1, "{nits:?}");
+        let ten = CapturedColorDesc {
+            dxgi_format: Some(DXGI_FORMAT_R10G10B10A2_UNORM),
+            ..CapturedColorDesc::default()
+        };
+        assert_eq!(
+            capture_pixel_format(&ten),
+            CapturePixelFormat::DxgiR10G10B10A2
+        );
+        let code = crate::color::quantize_pq_10(
+            crate::color::pq_oetf(1000.0),
+            crate::color::QuantRange::Full,
+        ) as u32;
+        let word = code | (code << 10) | (code << 20) | (3 << 30);
+        let expanded =
+            samples_to_nits(CapturePixelFormat::DxgiR10G10B10A2, &word.to_le_bytes()).unwrap();
+        assert!(
+            (expanded[0][0] - 1000.0).abs() < 8.0,
+            "{expanded:?} code {code}"
+        );
+        let apple = CapturedColorDesc {
+            apple_pixel_format: Some(apple::YUV420_10_VIDEO),
+            ..CapturedColorDesc::default()
+        };
+        assert_eq!(
+            capture_pixel_format(&apple),
+            CapturePixelFormat::SckYuv42010
+        );
+        let pipe = CapturedColorDesc {
+            pipewire_caps: Some("video/x-raw,format=P010".into()),
+            ..CapturedColorDesc::default()
+        };
+        assert_eq!(
+            capture_pixel_format(&pipe),
+            CapturePixelFormat::PipeWireP010
+        );
     }
 }

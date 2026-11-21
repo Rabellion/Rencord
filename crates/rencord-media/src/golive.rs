@@ -43,6 +43,10 @@ pub struct GoLive {
     pub rtt_ms: u32,
     sequence: u16,
     timestamp: u32,
+    /// When set, an HDR source also produces a 10-bit sidecar.
+    pub hdr_send: bool,
+    pub last_hdr10: Option<Vec<u8>>,
+    pub tone_map: &'static str,
 }
 
 impl Default for GoLive {
@@ -63,6 +67,9 @@ impl GoLive {
             rtt_ms: 0,
             sequence: 1,
             timestamp: 0,
+            hdr_send: false,
+            last_hdr10: None,
+            tone_map: "sdr",
         }
     }
 
@@ -117,7 +124,11 @@ impl GoLive {
         if self.phase != StreamPhase::Live {
             return Err("stream is not live".into());
         }
-        let unit = encode_software(frame, self.bitrate_kbps);
+        let prepared =
+            crate::hdr_link::prepare_frame(frame, self.hdr_send, rencord_hdr::ToneCurve::Bt2390)?;
+        self.tone_map = prepared.tone_map;
+        self.last_hdr10 = prepared.hdr10;
+        let unit = encode_software(&prepared.sdr, self.bitrate_kbps);
         let mut packets = Vec::new();
         for (index, nal) in unit.nal_units.iter().enumerate() {
             let last = index + 1 == unit.nal_units.len();

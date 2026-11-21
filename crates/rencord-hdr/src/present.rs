@@ -203,6 +203,70 @@ pub fn surface_name(mode: PresentMode) -> &'static str {
     }
 }
 
+/// wgpu texture format the shell should request. No window surface is created here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SwapchainFormat {
+    Bgra8,
+    /// PQ 10-bit, `wgpu::TextureFormat::Rgb10a2Unorm` when the compositor allows it.
+    Rgb10a2Unorm,
+    /// scRGB, `wgpu::TextureFormat::Rgba16Float`.
+    Rgba16Float,
+}
+
+pub fn swapchain_format(
+    receive_hdr: bool,
+    display: &SourceColorimetry,
+    stream_is_hdr: bool,
+) -> SwapchainFormat {
+    match decide_presentation(receive_hdr, display, stream_is_hdr) {
+        PresentMode::Hdr10 => SwapchainFormat::Rgb10a2Unorm,
+        PresentMode::ScRgb => SwapchainFormat::Rgba16Float,
+        PresentMode::Sdr | PresentMode::ToneMappedSdr { .. } => SwapchainFormat::Bgra8,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlatformDecoder {
+    /// D3D11 video processor / DXVA on Windows.
+    D3d11va,
+    VideoToolbox,
+    Vaapi,
+    /// Uncompressed `RHDR` from this crate.
+    Reference,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecoderStatus {
+    pub decoder: PlatformDecoder,
+    pub linked: bool,
+    pub detail: &'static str,
+}
+
+pub fn platform_decoders() -> &'static [DecoderStatus] {
+    &[
+        DecoderStatus {
+            decoder: PlatformDecoder::D3d11va,
+            linked: false,
+            detail: "D3D11VA/DXVA is the Windows 10-bit decode path. It is not opened from this process.",
+        },
+        DecoderStatus {
+            decoder: PlatformDecoder::VideoToolbox,
+            linked: false,
+            detail: "VideoToolbox is the macOS 10-bit decode path. It is not opened from this process.",
+        },
+        DecoderStatus {
+            decoder: PlatformDecoder::Vaapi,
+            linked: false,
+            detail: "VA-API can decode HEVC Main10 when a render node exists. The decode session is not linked.",
+        },
+        DecoderStatus {
+            decoder: PlatformDecoder::Reference,
+            linked: true,
+            detail: "RHDR access units decode to 10-bit PQ samples. Compressed HEVC and AV1 do not.",
+        },
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,5 +397,23 @@ mod tests {
             open_access_unit(&[0, 0, 0, 1, 0x26, 0x01, 0x00]),
             Err(PresentError::CompressedNotLinked)
         ));
+    }
+
+    #[test]
+    fn hdr_display_asks_for_a_10bit_swapchain_and_only_rhdr_is_linked() {
+        assert_eq!(
+            swapchain_format(true, &display_pq(), true),
+            SwapchainFormat::Rgb10a2Unorm
+        );
+        assert_eq!(
+            swapchain_format(false, &display_pq(), true),
+            SwapchainFormat::Bgra8
+        );
+        let linked: Vec<_> = platform_decoders()
+            .iter()
+            .filter(|status| status.linked)
+            .map(|status| status.decoder)
+            .collect();
+        assert_eq!(linked, vec![PlatformDecoder::Reference]);
     }
 }
