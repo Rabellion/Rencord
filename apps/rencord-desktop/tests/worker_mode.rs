@@ -16,7 +16,8 @@ fn worker_check_names_this_binary() {
         String::from_utf8_lossy(&output.stderr)
     );
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("WORKER_CHECK 0.6.0"), "{text}");
+    let expected = format!("WORKER_CHECK {}", env!("CARGO_PKG_VERSION"));
+    assert!(text.contains(&expected), "{text}");
     assert!(text.contains("STREAM_WORKER --stream-worker"), "{text}");
 }
 
