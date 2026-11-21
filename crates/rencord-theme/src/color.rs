@@ -336,6 +336,12 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
+/// Discord's six default avatar colors, indexed by `(id >> 22) % 6`.
+pub fn default_avatar_fill(index: u8) -> u32 {
+    const FILLS: [u32; 6] = [0x5865f2, 0x57f287, 0xfee75c, 0xed4245, 0xeb459e, 0x3ba55d];
+    FILLS[usize::from(index) % FILLS.len()]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

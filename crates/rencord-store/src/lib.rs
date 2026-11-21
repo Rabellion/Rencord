@@ -4,6 +4,9 @@
 //! recent messages and the composer draft so a restart can refill the timeline.
 //! Neither store is encrypted. Tokens live in `rencord-platform`, not here.
 
+mod members;
+
+pub use members::{apply_member_list, RosterGroup, RosterMember};
 use rencord_gateway::GatewayEvent;
 use rencord_model::{Channel, ChannelKind, Guild, Message, Snowflake, User};
 use rusqlite::{params, Connection};
@@ -38,6 +41,8 @@ pub struct Session {
     pub reactions: HashMap<u64, Vec<(String, u32)>>,
     /// Channels with a message that arrived while they were not on screen.
     pub unread: HashSet<Snowflake>,
+    /// Role groups for the guild currently subscribed with opcode 14.
+    pub roster: Vec<RosterGroup>,
 }
 
 impl Default for Session {
@@ -57,6 +62,7 @@ impl Default for Session {
             discord_client_theme: None,
             reactions: HashMap::new(),
             unread: HashSet::new(),
+            roster: Vec::new(),
         }
     }
 }
@@ -159,6 +165,9 @@ impl Session {
             GatewayEvent::Resumed => {
                 self.status_line = "Gateway resumed".to_owned();
             }
+            GatewayEvent::MemberList(data) => {
+                apply_member_list(&mut self.roster, &data);
+            }
             GatewayEvent::Other { name } => {
                 self.status_line = format!("Event {name}");
             }
@@ -200,6 +209,7 @@ impl Session {
             id,
             name: name.unwrap_or_else(|| format!("Guild {id}")),
             icon,
+            banner: None,
         });
     }
 
@@ -359,11 +369,13 @@ impl Session {
             id: Snowflake::new(10),
             name: "Analytical Engines".into(),
             icon: None,
+            banner: None,
         });
         session.upsert_guild(Guild {
             id: Snowflake::new(11),
             name: "Difference Club".into(),
             icon: None,
+            banner: None,
         });
         session.upsert_channel(Channel {
             id: Snowflake::new(100),
@@ -373,6 +385,7 @@ impl Session {
             parent_id: None,
             position: 0,
             recipient_ids: Vec::new(),
+            avatar: None,
         });
         session.upsert_channel(Channel {
             id: Snowflake::new(101),
@@ -382,6 +395,7 @@ impl Session {
             parent_id: None,
             position: 1,
             recipient_ids: Vec::new(),
+            avatar: None,
         });
         session.upsert_channel(Channel {
             id: Snowflake::new(110),
@@ -391,6 +405,7 @@ impl Session {
             parent_id: None,
             position: 0,
             recipient_ids: Vec::new(),
+            avatar: None,
         });
         session.upsert_channel(Channel {
             id: Snowflake::new(200),
@@ -400,6 +415,7 @@ impl Session {
             parent_id: None,
             position: 0,
             recipient_ids: vec![Snowflake::new(2)],
+            avatar: None,
         });
         session.insert_message(Message {
             id: Snowflake::new(1000),
@@ -653,6 +669,7 @@ mod tests {
                 parent_id: None,
                 position: 0,
                 recipient_ids: Vec::new(),
+                avatar: None,
             }],
         });
         assert_eq!(session.guilds[0].name, "Analytical Engines");
@@ -666,6 +683,7 @@ mod tests {
             parent_id: None,
             position: 1,
             recipient_ids: Vec::new(),
+            avatar: None,
         }));
         assert_eq!(session.channels[&Snowflake::new(100)].name, "lounge");
         session.apply_gateway(GatewayEvent::Reaction {
