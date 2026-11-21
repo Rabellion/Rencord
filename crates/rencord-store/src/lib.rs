@@ -153,6 +153,19 @@ impl Session {
         }
     }
 
+    /// Adds fetched or confirmed messages. Snowflakes grow with time, so the
+    /// channel stays in id order with no duplicates however they arrive.
+    pub fn merge_history(&mut self, channel_id: Snowflake, messages: Vec<Message>) {
+        let list = self.messages.entry(channel_id).or_default();
+        list.extend(messages);
+        list.sort_by_key(|message| message.id.get());
+        list.dedup_by_key(|message| message.id.get());
+        if list.len() > MESSAGE_CAP {
+            let overflow = list.len() - MESSAGE_CAP;
+            list.drain(0..overflow);
+        }
+    }
+
     pub fn guild_channels(&self, guild_id: Snowflake) -> Vec<&Channel> {
         let mut channels: Vec<_> = self
             .channels
@@ -381,6 +394,29 @@ mod tests {
         }));
         let messages = session.messages_for(Snowflake::new(100));
         assert_eq!(messages.last().unwrap().content, "live");
+    }
+
+    #[test]
+    fn history_merges_in_order_without_duplicates() {
+        let mut session = Session::demo();
+        let channel = Snowflake::new(500);
+        let author = session.user.clone().unwrap();
+        let at = |id: u64| Message {
+            id: Snowflake::new(id),
+            channel_id: channel,
+            author: author.clone(),
+            content: id.to_string(),
+            timestamp: "t".into(),
+        };
+        // A live message arrives first; history comes back newest-first.
+        session.insert_message(at(30));
+        session.merge_history(channel, vec![at(30), at(20), at(10)]);
+        let ids: Vec<u64> = session
+            .messages_for(channel)
+            .iter()
+            .map(|m| m.id.get())
+            .collect();
+        assert_eq!(ids, [10, 20, 30]);
     }
 
     #[test]

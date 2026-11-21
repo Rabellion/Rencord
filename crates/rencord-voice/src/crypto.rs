@@ -1,9 +1,11 @@
 //! RTP helpers and Discord `aead_xchacha20_poly1305_rtpsize`.
 //!
-//! Layout, matching the published voice encryption mode: the 12-byte RTP header
-//! is additional authenticated data, the Opus payload is ciphertext, a 16-byte
-//! tag follows, and a 4-byte big-endian nonce suffix is appended. The
-//! XChaCha20 nonce is those four bytes followed by twenty zero bytes.
+//! Layout, matching the published voice encryption mode: the RTP header is
+//! additional authenticated data, the Opus payload is ciphertext, a 16-byte
+//! tag follows, and a 4-byte big-endian nonce suffix is appended. The header is
+//! 12 bytes, plus 4 bytes per CSRC, plus the 4-byte extension header when the X
+//! bit is set; the extension body is encrypted. The XChaCha20 nonce is the
+//! suffix followed by twenty zero bytes.
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
@@ -93,13 +95,20 @@ fn open_packet(key: &[u8; 32], packet: &[u8]) -> Result<OpenedPacket, CryptoErro
     if packet.len() < RTP_HEADER_LEN + 16 + 4 {
         return Err(CryptoError::Truncated);
     }
-    let header = &packet[..RTP_HEADER_LEN];
+    // Everything up to the extension body is authenticated header.
+    let csrcs = usize::from(packet[0] & 0x0F);
+    let has_extension = packet[0] & 0x10 != 0;
+    let header_len = RTP_HEADER_LEN + 4 * csrcs + if has_extension { 4 } else { 0 };
+    if packet.len() < header_len + 16 + 4 {
+        return Err(CryptoError::Truncated);
+    }
+    let header = &packet[..header_len];
     let suffix = &packet[packet.len() - 4..];
-    let ciphertext = &packet[RTP_HEADER_LEN..packet.len() - 4];
+    let ciphertext = &packet[header_len..packet.len() - 4];
     let mut nonce = XNonce::default();
     nonce[..4].copy_from_slice(suffix);
     let cipher = XChaCha20Poly1305::new(key.into());
-    let opus = cipher
+    let mut opus = cipher
         .decrypt(
             &nonce,
             Payload {
@@ -108,6 +117,15 @@ fn open_packet(key: &[u8; 32], packet: &[u8]) -> Result<OpenedPacket, CryptoErro
             },
         )
         .map_err(|_| CryptoError::Auth)?;
+    if has_extension {
+        // The length is in 32-bit words and counts the body only.
+        let words = u16::from_be_bytes([header[header_len - 2], header[header_len - 1]]);
+        let body = usize::from(words) * 4;
+        if opus.len() < body {
+            return Err(CryptoError::Truncated);
+        }
+        opus.drain(..body);
+    }
     let sequence = u16::from_be_bytes([header[2], header[3]]);
     let timestamp = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
     let ssrc = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
@@ -177,6 +195,57 @@ mod tests {
         let last = tampered.len() - 5;
         tampered[last] ^= 0x01;
         assert_eq!(cipher.open(&tampered), Err(CryptoError::Auth));
+    }
+
+    /// Seals `plaintext` after an RTP header with `csrcs` CSRC entries and,
+    /// when `ext_words` is `Some`, an extension header. The extension body
+    /// is the first bytes of the plaintext, as Discord sends it.
+    fn packet_with_extension(csrcs: u8, ext_words: Option<u16>, plaintext: &[u8]) -> Vec<u8> {
+        let mut header = rtp_header(9, 1920, 55).to_vec();
+        header[0] = 0x80 | csrcs | if ext_words.is_some() { 0x10 } else { 0 };
+        header.extend(std::iter::repeat_n(0xCC, 4 * usize::from(csrcs)));
+        if let Some(words) = ext_words {
+            header.extend_from_slice(&[0xBE, 0xDE]);
+            header.extend_from_slice(&words.to_be_bytes());
+        }
+        seal_with_counter(&[7u8; 32], 3, &header, plaintext)
+    }
+
+    #[test]
+    fn extension_header_is_authenticated_and_its_body_is_stripped() {
+        let cipher = TransportCipher::new([7u8; 32]);
+        // First byte 0x90: version 2, X bit set. Body is one word.
+        let mut plaintext = vec![0x11, 0x22, 0x33, 0x44];
+        plaintext.extend_from_slice(b"opus-frame");
+        let packet = packet_with_extension(0, Some(1), &plaintext);
+        assert_eq!(packet[0], 0x90);
+        let opened = cipher.open(&packet).unwrap();
+        assert_eq!(opened.opus, b"opus-frame");
+        assert_eq!(
+            (opened.sequence, opened.timestamp, opened.ssrc),
+            (9, 1920, 55)
+        );
+    }
+
+    #[test]
+    fn csrc_entries_are_part_of_the_authenticated_header() {
+        let cipher = TransportCipher::new([7u8; 32]);
+        let packet = packet_with_extension(2, None, b"opus-frame");
+        assert_eq!(packet[0], 0x82);
+        assert_eq!(cipher.open(&packet).unwrap().opus, b"opus-frame");
+        // CSRCs and an extension together.
+        let mut plaintext = vec![0; 8];
+        plaintext.extend_from_slice(b"opus-frame");
+        let both = packet_with_extension(1, Some(2), &plaintext);
+        assert_eq!(cipher.open(&both).unwrap().opus, b"opus-frame");
+    }
+
+    #[test]
+    fn an_extension_longer_than_the_payload_is_rejected() {
+        let cipher = TransportCipher::new([7u8; 32]);
+        // Declares a 40-byte body but carries only 6 bytes of plaintext.
+        let packet = packet_with_extension(0, Some(10), b"short!");
+        assert_eq!(cipher.open(&packet), Err(CryptoError::Truncated));
     }
 
     #[test]

@@ -7,8 +7,8 @@
 
 use crate::dave::{DaveEngine, DaveOps, OutgoingCommit};
 use rencord_protocol::{
-    voice_heartbeat, voice_identify, voice_select_protocol, voice_speaking, SessionDescription,
-    VoiceFrame, VoiceHello, VoiceOpcode, VoiceReady, TRANSPORT_MODE,
+    voice_identify, voice_select_protocol, voice_speaking, SessionDescription, VoiceFrame,
+    VoiceHello, VoiceOpcode, VoiceReady, TRANSPORT_MODE,
 };
 use serde_json::{json, Value};
 
@@ -204,9 +204,6 @@ impl VoiceSession {
                     self.fail(frame.op as u8, err);
                 }
             }
-            VoiceOpcode::Heartbeat => {
-                outgoing.push(voice_heartbeat(self.ssrc.unwrap_or(0) as u64));
-            }
             _ => {}
         }
         outgoing
@@ -281,6 +278,7 @@ mod tests {
         let mut key = vec![0u8; 32];
         key[0] = 4;
         let description = VoiceFrame {
+            seq: None,
             op: VoiceOpcode::SessionDescription,
             data: serde_json::json!({
                 "mode": "aead_xchacha20_poly1305_rtpsize",
@@ -299,14 +297,17 @@ mod tests {
         voice.phase = VoicePhase::Connected;
         voice.secret_key = Some(vec![1; 32]);
         voice.handle(VoiceFrame {
+            seq: None,
             op: VoiceOpcode::MlsExternalSender,
             data: serde_json::json!({"data": [1, 2, 3]}),
         });
         voice.handle(VoiceFrame {
+            seq: None,
             op: VoiceOpcode::DavePrepareTransition,
             data: serde_json::json!({"transition_id": 7, "protocol_version": 1}),
         });
         voice.handle(VoiceFrame {
+            seq: None,
             op: VoiceOpcode::DaveExecuteTransition,
             data: serde_json::json!({"transition_id": 7}),
         });
@@ -324,6 +325,7 @@ mod tests {
         // Welcome with empty bytes is still forwarded. Scripted accepts it.
         // A transport key remains installed either way.
         voice.handle(VoiceFrame {
+            seq: None,
             op: VoiceOpcode::MlsWelcome,
             data: serde_json::json!({"data": []}),
         });

@@ -81,6 +81,7 @@ fn big_file_outcome(output: &rencord_upload::JobOutput) -> String {
 }
 
 mod login_view;
+mod net;
 
 use login_view::{LoginModel, LoginPreview};
 
@@ -386,6 +387,12 @@ struct RencordWindow {
     vault: rencord_auth::AccountStore,
     session_machine: rencord_auth::SessionMachine,
     session_token: Option<rencord_model::Token>,
+    /// REST client for the signed-in session; shared so rate limits are tracked.
+    api: Option<Arc<rencord_api::DiscordApi>>,
+    /// Dropping this shuts the live gateway down.
+    gateway: Option<tokio::sync::mpsc::Sender<rencord_gateway::GatewayCommand>>,
+    /// Guilds and channels whose channels or history were already requested.
+    requested: HashSet<Snowflake>,
     login_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     remote_generation: u64,
     booted: bool,
@@ -592,6 +599,9 @@ impl RencordWindow {
             vault: Self::open_vault(),
             session_machine: rencord_auth::SessionMachine::new(),
             session_token: None,
+            api: None,
+            gateway: None,
+            requested: HashSet::new(),
             login_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             remote_generation: 0,
             booted: preview.is_some(),
@@ -1215,46 +1225,113 @@ impl RencordWindow {
                 .note("Demo keeps the change locally. A signed-in session would call Discord.");
             return;
         }
-        let Some(token) = self.session_token.clone() else {
+        let Some(api) = self.api.clone() else {
             self.shell.rollback(&mutation);
             self.shell
                 .note("No session stored. The change was rolled back.");
             return;
         };
-        let token = token.expose().to_owned();
-        let (tx, rx) = async_channel::bounded(1);
         let outbound = mutation.clone();
-        std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("tokio");
-            let outcome = runtime.block_on(push_mutation(&token, &outbound));
-            let _ = tx.send_blocking(outcome);
-        });
-        let rollback = mutation;
+        let task = net::runtime().spawn(async move { net::push_mutation(&api, &outbound).await });
         cx.spawn(async move |this, cx| {
-            let Ok(outcome) = rx.recv().await else {
+            let Ok(outcome) = task.await else {
                 return;
             };
             this.update(cx, |view, cx| {
                 match outcome {
-                    Err(BootError::Unauthorized) => {
-                        view.shell.rollback(&rollback);
+                    Err(net::BootError::Unauthorized) => {
+                        view.shell.rollback(&mutation);
                         view.note_unauthorized(cx);
                     }
-                    Err(BootError::Other(err)) => {
-                        view.shell.rollback(&rollback);
+                    Err(net::BootError::Other(err)) => {
+                        view.shell.rollback(&mutation);
                         view.shell
                             .note(format!("Discord rejected the change: {err}"));
                     }
-                    Ok(()) => view.shell.note("Discord accepted the change."),
+                    Ok(sent) => {
+                        if let Some(sent) = sent {
+                            view.shell.confirm_create(&mutation, sent);
+                        }
+                        view.shell.note("Discord accepted the change.");
+                    }
                 }
                 cx.notify();
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Ends the live side of a session: the gateway stops when its sender drops.
+    fn drop_live_session(&mut self) {
+        self.session_token = None;
+        self.api = None;
+        self.gateway = None;
+        self.requested.clear();
+    }
+
+    /// Loads what the selection needs the first time it is shown: a guild's
+    /// channels and a channel's recent history. Runs from render, so every way
+    /// of changing the selection (click, keys, switcher, search) is covered.
+    fn load_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.api.clone() else {
+            return;
+        };
+        if let Some(guild) = self.shell.session.selected_guild {
+            if self.shell.session.guild_channels(guild).is_empty() && self.requested.insert(guild) {
+                let api = api.clone();
+                let task = net::runtime().spawn(async move { api.guild_channels(guild).await });
+                cx.spawn(async move |this, cx| {
+                    let Ok(result) = task.await else {
+                        return;
+                    };
+                    this.update(cx, |view, cx| {
+                        match result {
+                            Ok(channels) => {
+                                for channel in channels {
+                                    view.shell.session.upsert_channel(channel);
+                                }
+                                let session = &mut view.shell.session;
+                                if session.selected_guild == Some(guild)
+                                    && session.selected_channel.is_none()
+                                {
+                                    session.select_guild(guild);
+                                }
+                            }
+                            Err(err) => view.shell.note(format!(
+                                "Could not load channels: {}",
+                                rencord_auth::redact(&err.to_string())
+                            )),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+        if let Some(channel) = self.shell.session.selected_channel {
+            if self.requested.insert(channel) {
+                let task = net::runtime().spawn(async move { api.messages(channel, 50).await });
+                cx.spawn(async move |this, cx| {
+                    let Ok(result) = task.await else {
+                        return;
+                    };
+                    this.update(cx, |view, cx| {
+                        match result {
+                            Ok(history) => view.shell.session.merge_history(channel, history),
+                            Err(err) => view.shell.note(format!(
+                                "Could not load history: {}",
+                                rencord_auth::redact(&err.to_string())
+                            )),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
     }
 
     fn reopen_audio(&mut self) {
@@ -1314,98 +1391,10 @@ impl RencordWindow {
     }
 }
 
-struct Bootstrap {
-    user: rencord_model::User,
-    guilds: Vec<rencord_model::Guild>,
-    channels: Vec<rencord_model::Channel>,
-    gateway_note: String,
-    discord_theme: Option<String>,
-    discord_client_theme: Option<String>,
-}
-
-enum BootError {
-    Unauthorized,
-    Other(String),
-}
-
-fn boot_error(err: rencord_api::ApiError) -> BootError {
-    if err.is_unauthorized() {
-        BootError::Unauthorized
-    } else {
-        BootError::Other(rencord_auth::redact(&err.to_string()))
-    }
-}
-
-async fn fetch_bootstrap(token: String) -> Result<Bootstrap, BootError> {
-    let api = rencord_api::DiscordApi::new(rencord_model::Token::new(token.clone()));
-    let user = api.current_user().await.map_err(boot_error)?;
-    let guilds = api.guilds().await.map_err(boot_error)?;
-    let mut channels = api.private_channels().await.map_err(boot_error)?;
-    if let Some(guild) = guilds.first() {
-        let mut guild_channels = api.guild_channels(guild.id).await.map_err(boot_error)?;
-        channels.append(&mut guild_channels);
-    }
-    let (gateway_note, discord_theme, discord_client_theme) = match spawn_gateway(token).await {
-        Ok(hello) => hello,
-        Err(err) => (
-            format!("gateway did not stay up ({})", rencord_auth::redact(&err)),
-            None,
-            None,
-        ),
-    };
-    Ok(Bootstrap {
-        user,
-        guilds,
-        channels,
-        gateway_note,
-        discord_theme,
-        discord_client_theme,
-    })
-}
-
-async fn spawn_gateway(token: String) -> Result<(String, Option<String>, Option<String>), String> {
-    let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(32);
-    let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
-    tokio::spawn(async move {
-        let _ = rencord_gateway::run(
-            rencord_gateway::GatewayConfig {
-                url: "wss://gateway.discord.gg/?v=10&encoding=json".into(),
-                token,
-            },
-            events_tx,
-            cmd_rx,
-        )
-        .await;
-    });
-    let first = tokio::time::timeout(std::time::Duration::from_secs(8), events_rx.recv())
-        .await
-        .map_err(|_| "timed out waiting for the gateway".to_string())?;
-    match first {
-        Some(rencord_gateway::GatewayEvent::Ready {
-            session_id,
-            discord_theme,
-            discord_client_theme,
-            ..
-        }) => Ok((
-            format!("ready, session {session_id}"),
-            discord_theme,
-            discord_client_theme,
-        )),
-        Some(other) => Ok((
-            format!(
-                "first event {}",
-                rencord_auth::redact(&format!("{other:?}"))
-            ),
-            None,
-            None,
-        )),
-        None => Err("gateway closed".into()),
-    }
-}
-
 impl Render for RencordWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_queries(cx);
+        self.load_selection(cx);
         self.tick_theme(window, cx);
         let palette = rencord_desktop::Palette::from_theme(
             &self.shown,
@@ -4437,65 +4426,6 @@ fn bench_photo() -> impl IntoElement {
         include_bytes!("../../../docs/design/fixtures/bench.png").to_vec(),
     );
     img(std::sync::Arc::new(image)).size_full()
-}
-
-async fn push_mutation(token: &str, mutation: &rencord_desktop::Mutation) -> Result<(), BootError> {
-    use rencord_desktop::Mutation;
-    let api = rencord_api::DiscordApi::new(rencord_model::Token::new(token.to_owned()));
-    match mutation {
-        Mutation::Create {
-            channel_id,
-            content,
-            reply_to,
-            ..
-        } => {
-            if let Some(reply) = reply_to {
-                api.reply_message(*channel_id, content, *reply)
-                    .await
-                    .map(|_| ())
-                    .map_err(boot_error)?;
-            } else {
-                api.send_message(*channel_id, content)
-                    .await
-                    .map(|_| ())
-                    .map_err(boot_error)?;
-            }
-        }
-        Mutation::Edit {
-            channel_id,
-            message_id,
-            next,
-            ..
-        } => {
-            api.edit_message(*channel_id, *message_id, next)
-                .await
-                .map(|_| ())
-                .map_err(boot_error)?;
-        }
-        Mutation::Delete { message } => {
-            api.delete_message(message.channel_id, message.id)
-                .await
-                .map_err(boot_error)?;
-        }
-        Mutation::React {
-            channel_id,
-            message_id,
-            emoji,
-            remove,
-        } => {
-            let id = rencord_model::Snowflake::new(*message_id);
-            if *remove {
-                api.remove_reaction(*channel_id, id, emoji)
-                    .await
-                    .map_err(boot_error)?;
-            } else {
-                api.add_reaction(*channel_id, id, emoji)
-                    .await
-                    .map_err(boot_error)?;
-            }
-        }
-    }
-    Ok(())
 }
 
 fn rss_kib() -> u64 {

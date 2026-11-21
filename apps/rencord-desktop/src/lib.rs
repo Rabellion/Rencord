@@ -323,6 +323,22 @@ impl Shell {
         })
     }
 
+    /// Swaps the optimistic copy of a sent message for the one Discord stored,
+    /// so the gateway's echo of the same message does not show twice.
+    pub fn confirm_create(&mut self, mutation: &Mutation, sent: Message) {
+        if let Mutation::Create {
+            local_id,
+            channel_id,
+            ..
+        } = mutation
+        {
+            if let Some(list) = self.session.messages.get_mut(channel_id) {
+                list.retain(|message| message.id != *local_id);
+            }
+            self.session.merge_history(*channel_id, vec![sent]);
+        }
+    }
+
     pub fn rollback(&mut self, mutation: &Mutation) {
         match mutation {
             Mutation::Create {
@@ -941,6 +957,28 @@ mod tests {
         assert!(outline.contains("#voice"));
         assert!(outline.contains("Charles"));
         assert!(outline.contains("fn main()"));
+    }
+
+    #[test]
+    fn a_confirmed_send_shows_once_even_when_the_gateway_echoes_first() {
+        let mut shell = Shell::demo();
+        let channel = shell.session.selected_channel.unwrap();
+        let mutation = shell.send_local("hello").expect("create");
+        let mut stored = shell.session.messages_for(channel).last().unwrap().clone();
+        stored.id = Snowflake::new(stored.id.get() + 1_000);
+        shell.session.insert_message(stored.clone()); // gateway echo
+        shell.confirm_create(&mutation, stored.clone());
+        let copies = shell
+            .session
+            .messages_for(channel)
+            .iter()
+            .filter(|message| message.content == "hello")
+            .count();
+        assert_eq!(copies, 1);
+        assert_eq!(
+            shell.session.messages_for(channel).last().unwrap().id,
+            stored.id
+        );
     }
 
     #[test]

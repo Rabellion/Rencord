@@ -12,6 +12,8 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const USER_AGENT: &str = rencord_protocol::USER_AGENT;
+/// Longest rate-limit wait the client absorbs itself. Longer ones go back to the caller.
+const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -214,52 +216,70 @@ impl DiscordApi {
         body: Option<&(impl serde::Serialize + ?Sized)>,
     ) -> Result<Vec<u8>, ApiError> {
         let route = route_key(method, path);
-        self.wait_for_bucket(&route)?;
         let url = format!("{}{path}", self.base.trim_end_matches('/'));
-        let mut request = self
-            .http
-            .request(method.parse().expect("method"), url)
-            .header("Authorization", self.token.expose())
-            .header("User-Agent", USER_AGENT)
-            .header("X-Super-Properties", rencord_protocol::super_properties())
-            .header("X-Discord-Locale", rencord_protocol::discord_locale());
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-        let response = request.send().await?;
-        let status = response.status();
-        self.observe_limits(&route, &response);
-        if status.as_u16() == 429 {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<f64>().ok())
-                .map(Duration::from_secs_f64)
-                .unwrap_or(Duration::from_secs(1));
-            return Err(ApiError::RateLimited { route, retry_after });
-        }
-        let bytes = response.bytes().await?.to_vec();
-        if !status.is_success() {
-            return Err(ApiError::Status {
-                status: status.as_u16(),
-                body: String::from_utf8_lossy(&bytes).into_owned(),
-            });
-        }
-        Ok(bytes)
-    }
-
-    fn wait_for_bucket(&self, route: &str) -> Result<(), ApiError> {
-        let buckets = self.buckets.lock().expect("bucket lock");
-        if let Some(bucket) = buckets.get(route) {
-            if bucket.remaining == 0 && Instant::now() < bucket.reset_at {
-                return Err(ApiError::RateLimited {
-                    route: route.to_owned(),
-                    retry_after: bucket.reset_at.saturating_duration_since(Instant::now()),
+        let mut retried = false;
+        loop {
+            self.wait_for_bucket(&route).await?;
+            let mut request = self
+                .http
+                .request(method.parse().expect("method"), url.as_str())
+                .header("Authorization", self.token.expose())
+                .header("User-Agent", USER_AGENT)
+                .header("X-Super-Properties", rencord_protocol::super_properties())
+                .header("X-Discord-Locale", rencord_protocol::discord_locale());
+            if let Some(body) = body {
+                request = request.json(body);
+            }
+            let response = request.send().await?;
+            let status = response.status();
+            self.observe_limits(&route, &response);
+            if status.as_u16() == 429 {
+                let retry_after = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse::<f64>().ok())
+                    .map(Duration::from_secs_f64)
+                    .unwrap_or(Duration::from_secs(1));
+                // A 429 means nothing was created, so one retry cannot duplicate a send.
+                if !retried && retry_after <= MAX_RATE_LIMIT_WAIT {
+                    retried = true;
+                    tokio::time::sleep(retry_after).await;
+                    continue;
+                }
+                return Err(ApiError::RateLimited { route, retry_after });
+            }
+            let bytes = response.bytes().await?.to_vec();
+            if !status.is_success() {
+                return Err(ApiError::Status {
+                    status: status.as_u16(),
+                    body: String::from_utf8_lossy(&bytes).into_owned(),
                 });
             }
+            return Ok(bytes);
         }
-        Ok(())
+    }
+
+    /// Waits out an exhausted bucket instead of sending a request Discord will refuse.
+    async fn wait_for_bucket(&self, route: &str) -> Result<(), ApiError> {
+        let wait = {
+            let buckets = self.buckets.lock().expect("bucket lock");
+            buckets
+                .get(route)
+                .filter(|bucket| bucket.remaining == 0)
+                .map(|bucket| bucket.reset_at.saturating_duration_since(Instant::now()))
+        };
+        match wait {
+            Some(wait) if wait > MAX_RATE_LIMIT_WAIT => Err(ApiError::RateLimited {
+                route: route.to_owned(),
+                retry_after: wait,
+            }),
+            Some(wait) => {
+                tokio::time::sleep(wait).await;
+                Ok(())
+            }
+            None => Ok(()),
+        }
     }
 
     fn observe_limits(&self, route: &str, response: &reqwest::Response) {
@@ -404,6 +424,83 @@ mod tests {
         let err = api.current_user().await.unwrap_err();
         assert!(err.is_unauthorized());
         assert!(!err.to_string().contains("stale-token"));
+    }
+
+    /// Answers each connection with the next canned response, recording requests.
+    async fn serve_sequence(
+        responses: Vec<String>,
+    ) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 8192];
+                let n = socket.read(&mut buf).await.unwrap();
+                log.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (format!("http://{addr}"), seen)
+    }
+
+    fn reply(status: &str, extra: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n{extra}connection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn a_short_429_is_waited_out_and_retried_once() {
+        let message = r#"{"id":"7","channel_id":"3","content":"hi","timestamp":"t","author":{"id":"1","username":"ada"}}"#;
+        let (base, seen) = serve_sequence(vec![
+            reply("429 Too Many Requests", "retry-after: 0.05\r\n", "{}"),
+            reply("200 OK", "", message),
+        ])
+        .await;
+        let api = DiscordApi::with_base(Token::new("test-token"), base);
+        let sent = api.send_message(Snowflake::new(3), "hi").await.unwrap();
+        assert_eq!(sent.id.get(), 7);
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_long_429_goes_back_to_the_caller() {
+        let (base, seen) = serve_sequence(vec![reply(
+            "429 Too Many Requests",
+            "retry-after: 60\r\n",
+            "{}",
+        )])
+        .await;
+        let api = DiscordApi::with_base(Token::new("test-token"), base);
+        let err = api.send_message(Snowflake::new(3), "hi").await.unwrap_err();
+        assert!(matches!(err, ApiError::RateLimited { .. }), "{err}");
+        assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_empty_bucket_waits_for_its_reset() {
+        let user = r#"{"id":"1","username":"ada"}"#;
+        let (base, seen) = serve_sequence(vec![
+            reply(
+                "200 OK",
+                "x-ratelimit-remaining: 0\r\nx-ratelimit-reset-after: 0.2\r\n",
+                user,
+            ),
+            reply("200 OK", "", user),
+        ])
+        .await;
+        let api = DiscordApi::with_base(Token::new("test-token"), base);
+        api.current_user().await.unwrap();
+        let started = Instant::now();
+        api.current_user().await.unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        assert_eq!(seen.lock().unwrap().len(), 2);
     }
 
     #[test]
