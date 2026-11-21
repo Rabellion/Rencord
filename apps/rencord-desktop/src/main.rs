@@ -615,6 +615,15 @@ impl RencordWindow {
             Some(kind) => LoginModel::preview(kind),
             None => LoginModel::fresh(),
         };
+        // Older builds saved the upload host's secret key in this file; remove it.
+        if let Err(err) = rencord_upload::scrub_saved_secret(
+            &rencord_platform::data_dir().join("upload-settings.json"),
+        ) {
+            tracing::warn!(
+                "could not remove a saved upload secret: {}",
+                rencord_auth::redact(&err.to_string())
+            );
+        }
         Self {
             shell,
             token_input,
