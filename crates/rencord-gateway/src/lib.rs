@@ -42,6 +42,31 @@ impl From<tokio_tungstenite::tungstenite::Error> for GatewayError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadyRead {
+    pub channel_id: u64,
+    pub last_message_id: u64,
+    pub mention_count: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadyPresence {
+    pub user_id: u64,
+    pub status: String,
+    pub activity: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadyVoice {
+    pub guild_id: Option<u64>,
+    pub channel_id: Option<u64>,
+    pub user_id: u64,
+    pub name: String,
+    pub avatar: Option<String>,
+    pub mute: bool,
+    pub deaf: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GatewayEvent {
     Ready {
         session_id: String,
@@ -49,6 +74,9 @@ pub enum GatewayEvent {
         guilds: Vec<rencord_protocol::ReadyGuild>,
         discord_theme: Option<String>,
         discord_client_theme: Option<String>,
+        read_state: Vec<ReadyRead>,
+        presences: Vec<ReadyPresence>,
+        voice_states: Vec<ReadyVoice>,
     },
     MessageCreate(Message),
     MessageUpdate(Message),
@@ -154,6 +182,135 @@ fn resume_url(base: &str, configured: &str) -> String {
         .map(|(_, query)| query)
         .unwrap_or("v=10&encoding=json");
     format!("{}/?{query}", base.trim_end_matches('/'))
+}
+
+fn snowflake_u64(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_str()
+        .and_then(|text| text.parse().ok())
+        .or_else(|| value.as_u64())
+}
+
+fn ready_reads(data: &serde_json::Value) -> Vec<ReadyRead> {
+    let entries = data
+        .get("read_state")
+        .and_then(|state| state.get("entries").or(Some(state)))
+        .and_then(|entries| entries.as_array());
+    let Some(entries) = entries else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let channel_id = snowflake_u64(entry.get("id")?)?;
+            let last_message_id = entry
+                .get("last_message_id")
+                .and_then(snowflake_u64)
+                .unwrap_or(0);
+            let mention_count = entry
+                .get("mention_count")
+                .and_then(|count| count.as_u64())
+                .unwrap_or(0) as u32;
+            Some(ReadyRead {
+                channel_id,
+                last_message_id,
+                mention_count,
+            })
+        })
+        .collect()
+}
+
+fn activity_text(presence: &serde_json::Value) -> String {
+    let Some(activity) = presence
+        .get("activities")
+        .and_then(|activities| activities.as_array())
+        .and_then(|activities| activities.first())
+    else {
+        return String::new();
+    };
+    let name = activity
+        .get("name")
+        .and_then(|name| name.as_str())
+        .unwrap_or("");
+    match activity
+        .get("type")
+        .and_then(|kind| kind.as_u64())
+        .unwrap_or(0)
+    {
+        4 => activity
+            .get("state")
+            .and_then(|state| state.as_str())
+            .unwrap_or("Custom status")
+            .to_owned(),
+        0 if !name.is_empty() => format!("Playing {name}"),
+        2 if !name.is_empty() => format!("Listening to {name}"),
+        _ => name.to_owned(),
+    }
+}
+
+fn ready_presences(data: &serde_json::Value) -> Vec<ReadyPresence> {
+    let Some(presences) = data
+        .get("presences")
+        .and_then(|presences| presences.as_array())
+    else {
+        return Vec::new();
+    };
+    presences
+        .iter()
+        .filter_map(|presence| {
+            let user_id = snowflake_u64(presence.get("user")?.get("id")?)?;
+            let status = presence
+                .get("status")
+                .and_then(|status| status.as_str())
+                .unwrap_or("offline")
+                .to_owned();
+            Some(ReadyPresence {
+                user_id,
+                status,
+                activity: activity_text(presence),
+            })
+        })
+        .collect()
+}
+
+fn ready_voices(data: &serde_json::Value) -> Vec<ReadyVoice> {
+    let Some(states) = data
+        .get("voice_states")
+        .and_then(|states| states.as_array())
+    else {
+        return Vec::new();
+    };
+    states
+        .iter()
+        .filter_map(|state| {
+            let user_id = snowflake_u64(state.get("user_id")?)?;
+            let user = state.get("member").and_then(|member| member.get("user"));
+            let name = user
+                .and_then(|user| user.get("global_name").or_else(|| user.get("username")))
+                .and_then(|name| name.as_str())
+                .unwrap_or("Member")
+                .to_owned();
+            let avatar = user
+                .and_then(|user| user.get("avatar"))
+                .and_then(|avatar| avatar.as_str())
+                .map(str::to_owned);
+            Some(ReadyVoice {
+                guild_id: state.get("guild_id").and_then(snowflake_u64),
+                channel_id: state.get("channel_id").and_then(snowflake_u64),
+                user_id,
+                name,
+                avatar,
+                mute: state
+                    .get("self_mute")
+                    .and_then(|mute| mute.as_bool())
+                    .unwrap_or(false),
+                deaf: state
+                    .get("self_deaf")
+                    .and_then(|deaf| deaf.as_bool())
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
 }
 
 async fn next_beat(ticker: &mut Option<tokio::time::Interval>) {
@@ -319,6 +476,9 @@ async fn run_socket(
 fn decode_dispatch(name: &str, data: Value) -> Result<Option<GatewayEvent>, GatewayError> {
     let event = match name {
         "READY" => {
+            let read_state = ready_reads(&data);
+            let presences = ready_presences(&data);
+            let voice_states = ready_voices(&data);
             let ready: ReadyData = serde_json::from_value(data)?;
             Some(GatewayEvent::Ready {
                 session_id: ready.session_id,
@@ -332,6 +492,9 @@ fn decode_dispatch(name: &str, data: Value) -> Result<Option<GatewayEvent>, Gate
                     .user_settings
                     .as_ref()
                     .and_then(|settings| settings.client_theme.clone()),
+                read_state,
+                presences,
+                voice_states,
             })
         }
         "GUILD_CREATE" | "GUILD_UPDATE" => guild_upsert(&data)?,
@@ -482,6 +645,30 @@ impl Default for ZlibStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ready_keeps_read_state_presence_and_voice() {
+        let raw = r#"{"session_id":"stub","user":{"id":"1","username":"agentprivate","avatar":"u1"},"guilds":[],"read_state":{"entries":[{"id":"100","last_message_id":"4","mention_count":1}]},"presences":[{"user":{"id":"1"},"status":"online","activities":[{"type":4,"state":"RESONATING"}]}],"voice_states":[{"guild_id":"10","channel_id":"110","user_id":"3","member":{"user":{"id":"3","global_name":"Nosh","avatar":"u3"}}}]}"#;
+        let event = decode_dispatch("READY", serde_json::from_str(raw).unwrap())
+            .unwrap()
+            .unwrap();
+        match event {
+            GatewayEvent::Ready {
+                read_state,
+                presences,
+                voice_states,
+                ..
+            } => {
+                assert_eq!(read_state[0].mention_count, 1);
+                assert_eq!(read_state[0].last_message_id, 4);
+                assert_eq!(presences[0].activity, "RESONATING");
+                assert_eq!(voice_states[0].name, "Nosh");
+                assert_eq!(voice_states[0].channel_id, Some(110));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
     use futures_util::{SinkExt, StreamExt};
     use std::time::Duration;
     use tokio::net::TcpListener;
@@ -561,6 +748,7 @@ mod tests {
                 guilds,
                 discord_theme,
                 discord_client_theme,
+                ..
             } => {
                 assert!(discord_theme.is_none());
                 assert!(discord_client_theme.is_none());
