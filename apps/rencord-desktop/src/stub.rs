@@ -285,7 +285,7 @@ async fn handle_gateway(stream: TcpStream) {
     while let Some(Ok(message)) = socket.next().await {
         let text = message.into_text().unwrap_or_default();
         if text.contains("\"op\":14") {
-            let update = r#"{"op":0,"t":"GUILD_MEMBER_LIST_UPDATE","s":2,"d":{"guild_id":"10","id":"100","ops":[{"op":"SYNC","range":[0,99],"items":[{"group":{"id":"Online","count":1}},{"member":{"user":{"id":"2","global_name":"Munch","avatar":"u2"},"presence":{"status":"online","activities":[{"type":0,"name":"THE FINALS"}]}}},{"group":{"id":"Ranked Players","count":2}},{"member":{"user":{"id":"3","global_name":"Nosh","avatar":"u3"},"presence":{"status":"online","activities":[{"name":"In voice"}]}}},{"member":{"user":{"id":"4","global_name":"Boyka","avatar":"u4"},"presence":{"status":"idle","activities":[{"type":0,"name":"ROBLOX"}]}}}]}]}}"#;
+            let update = r#"{"op":0,"t":"GUILD_MEMBER_LIST_UPDATE","s":2,"d":{"guild_id":"10","id":"100","ops":[{"op":"SYNC","range":[0,99],"items":[{"group":{"id":"Online","count":1}},{"member":{"user":{"id":"2","global_name":"Munch","avatar":"u2"},"presence":{"status":"online","activities":[{"type":0,"name":"THE FINALS"}]}}},{"group":{"id":"Ranked Players","count":2}},{"member":{"user":{"id":"3","global_name":"Nosh","avatar":"u3"},"avatar":"gm3","presence":{"status":"online","activities":[{"name":"In voice"}]}}},{"member":{"user":{"id":"4","global_name":"Boyka","avatar":"u4"},"presence":{"status":"idle","activities":[{"type":0,"name":"ROBLOX"}]}}}]}]}}"#;
             if socket
                 .send(tokio_tungstenite::tungstenite::Message::Text(update.into()))
                 .await
