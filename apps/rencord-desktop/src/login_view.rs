@@ -123,7 +123,7 @@ impl RencordWindow {
         let size = window.viewport_size();
         let stack = stacks_login(size.width.as_f32(), size.height.as_f32());
         let card = self.login_card(cx, palette);
-        let copy = self.login_copy(cx, palette);
+        let copy = self.login_copy(cx, palette, window.scale_factor());
         let row = if stack {
             v_flex()
                 .w_full()
@@ -274,7 +274,12 @@ impl RencordWindow {
             .into_any_element()
     }
 
-    fn login_copy(&mut self, cx: &mut Context<Self>, palette: Palette) -> impl IntoElement {
+    fn login_copy(
+        &mut self,
+        cx: &mut Context<Self>,
+        palette: Palette,
+        scale: f32,
+    ) -> impl IntoElement {
         let this = cx.entity();
         let mut column = v_flex()
             .w(px(360.))
@@ -283,7 +288,7 @@ impl RencordWindow {
                 h_flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(hexwave_mark(palette.text, 36.))
+                    .child(hexwave_mark(palette.text, 36., scale))
                     .child(ink("Rencord", palette.text, 28., true)),
             )
             .child(ink("Sign in", palette.text, 16., true))
@@ -1103,28 +1108,8 @@ fn stage(face: impl IntoElement, phase: LoginPhase, palette: Palette) -> impl In
         .child(face)
 }
 
-struct CachedMark {
-    color: u32,
-    png: Vec<u8>,
-}
-
-fn hexwave_mark(color: u32, size: f32) -> impl IntoElement {
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<Vec<CachedMark>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
-    let png = {
-        let mut guard = cache.lock().expect("hexwave cache");
-        if let Some(hit) = guard.iter().find(|item| item.color == color) {
-            hit.png.clone()
-        } else {
-            let png = rencord_auth::hexwave_png(&format!("#{color:06X}"), 144).unwrap_or_default();
-            guard.push(CachedMark {
-                color,
-                png: png.clone(),
-            });
-            png
-        }
-    };
+fn hexwave_mark(color: u32, size: f32, scale: f32) -> impl IntoElement {
+    let png = rencord_desktop::hexwave_png(color, size, scale);
     let image = Image::from_bytes(ImageFormat::Png, png);
     img(std::sync::Arc::new(image))
         .size(px(size))

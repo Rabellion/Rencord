@@ -5,7 +5,6 @@
 
 mod big_file_view;
 
-use image::ImageEncoder;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -1590,11 +1589,6 @@ impl RencordWindow {
         } else {
             palette.home_bg
         };
-        let home_ink = if home_active {
-            palette.home_glyph_active
-        } else {
-            palette.home_glyph
-        };
         let home_border = if home_active {
             palette.home_border_active
         } else {
@@ -1624,7 +1618,11 @@ impl RencordWindow {
                 rail_w,
                 tile,
                 tile_radius,
-                rail_hexwave(home_ink, palette.accent),
+                hexwave_mark(
+                    rencord_desktop::rail_home_glyph_px(tile),
+                    palette.text,
+                    window.scale_factor(),
+                ),
                 move |_, _, cx| {
                     view.update(cx, |this, cx| {
                         this.shell
@@ -2325,6 +2323,7 @@ impl RencordWindow {
                     chosen_in.as_deref(),
                     chosen_out.as_deref(),
                     voice.as_ref(),
+                    window.scale_factor(),
                 ))
                 .into_any_element();
         }
@@ -2352,6 +2351,7 @@ impl RencordWindow {
                     chosen_in.as_deref(),
                     chosen_out.as_deref(),
                     voice.as_ref(),
+                    window.scale_factor(),
                 ))
                 .into_any_element();
         }
@@ -2622,6 +2622,7 @@ impl RencordWindow {
         chosen_in: Option<&str>,
         chosen_out: Option<&str>,
         voice: Option<&rencord_voice::LoopbackReport>,
+        scale: f32,
     ) -> impl IntoElement {
         let this = cx.entity();
         let jitter = voice
@@ -2649,7 +2650,7 @@ impl RencordWindow {
                     h_flex()
                         .items_center()
                         .gap_2()
-                        .child(hexwave_mark(28., palette.text))
+                        .child(hexwave_mark(30., palette.text, scale))
                         .child(
                             v_flex()
                                 .child(Label::new("Rencord"))
@@ -4415,44 +4416,16 @@ fn window_icon() -> std::sync::Arc<image::RgbaImage> {
     std::sync::Arc::new(icon)
 }
 
-/// Rail mark. SVG would be tinted as one color, so this is the 32 px raster.
-fn rail_hexwave(ink: u32, accent: u32) -> impl IntoElement {
-    let rgba = rencord_desktop::rail_hexwave_rgba(ink);
-    let mut png = Vec::new();
-    image::codecs::png::PngEncoder::new(&mut png)
-        .write_image(&rgba, 32, 32, image::ExtendedColorType::Rgba8)
-        .expect("rail mark png");
+/// Smooth Hexwave from `hexwave-mark.svg`. Two SVG layers share the viewBox:
+/// the knockout body in `ink`, and the third bar in `accent`. GPUI anti-aliases
+/// each layer.
+fn hexwave_mark(size: f32, ink: u32, scale: f32) -> impl IntoElement {
+    let png = rencord_desktop::hexwave_png(ink, size, scale);
     let image = Image::from_bytes(ImageFormat::Png, png);
-    // The third bar is a real element. A blue texel in the PNG was not
-    // surviving GPUI's image upload, and an SVG is painted as one color.
-    div()
-        .relative()
-        .size(px(32.))
-        .flex_shrink_0()
-        .child(
-            img(std::sync::Arc::new(image))
-                .size(px(32.))
-                .object_fit(ObjectFit::Fill),
-        )
-        .child(
-            div()
-                .absolute()
-                .left(px(16.))
-                .top(px(11.))
-                .w(px(3.))
-                .h(px(8.))
-                .bg(rgb(accent)),
-        )
-}
-
-/// Hexwave body in `ink` (the theme text color). The accent bar stays as drawn in the mark.
-fn hexwave_mark(size: f32, ink: u32) -> Svg {
-    let colored =
-        rencord_desktop::hexwave_svg_for_px(size).replace("currentColor", &format!("#{ink:06X}"));
-    svg()
-        .data(colored.as_bytes())
+    img(std::sync::Arc::new(image))
         .size(px(size))
-        .text_color(rgb(ink))
+        .flex_shrink_0()
+        .object_fit(ObjectFit::Fill)
 }
 
 fn icon(name: &str, size: f32, color: u32) -> Svg {

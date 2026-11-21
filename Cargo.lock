@@ -7511,6 +7511,7 @@ dependencies = [
  "rencord-theme",
  "rencord-upload",
  "rencord-voice",
+ "resvg 0.46.0",
  "serde_json",
  "tokio",
  "tracing",
