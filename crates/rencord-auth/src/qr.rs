@@ -4,11 +4,8 @@
 //! Hexwave: a hex speech bubble with the voice bars knocked out, and the
 //! middle bar in `#4F6BFF`.
 
-use flate2::write::ZlibEncoder;
-use flate2::Compression;
 use qrcode::types::Color;
 use qrcode::{EcLevel, QrCode};
-use std::io::Write;
 
 use crate::AuthError;
 
@@ -196,62 +193,15 @@ fn put(image: &mut QrImage, x: i32, y: i32, color: [u8; 4]) {
 }
 
 pub fn encode_png(image: &QrImage) -> Result<Vec<u8>, AuthError> {
-    let mut raw = Vec::with_capacity(((image.width * 4 + 1) * image.height) as usize);
-    for y in 0..image.height {
-        raw.push(0);
-        let start = (y * image.width * 4) as usize;
-        let end = start + (image.width * 4) as usize;
-        raw.extend_from_slice(&image.pixels[start..end]);
-    }
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
-    encoder
-        .write_all(&raw)
-        .and_then(|_| encoder.finish())
-        .map_err(|_| AuthError::Message("Could not encode the login code.".into()))
-        .map(|compressed| pack_png(image.width, image.height, &compressed))
+    // The code is fully opaque, so straight and premultiplied RGBA are the same.
+    resvg::tiny_skia::IntSize::from_wh(image.width, image.height)
+        .and_then(|size| resvg::tiny_skia::Pixmap::from_vec(image.pixels.clone(), size))
+        .and_then(|pixmap| pixmap.encode_png().ok())
+        .ok_or_else(|| AuthError::Message("Could not encode the login code.".into()))
 }
-
-fn pack_png(width: u32, height: u32, idat: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
-    let mut ihdr = Vec::with_capacity(13);
-    ihdr.extend_from_slice(&width.to_be_bytes());
-    ihdr.extend_from_slice(&height.to_be_bytes());
-    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
-    chunk(&mut out, b"IHDR", &ihdr);
-    chunk(&mut out, b"IDAT", idat);
-    chunk(&mut out, b"IEND", &[]);
-    out
-}
-
-fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    out.extend_from_slice(kind);
-    out.extend_from_slice(data);
-    let mut crc_input = Vec::with_capacity(4 + data.len());
-    crc_input.extend_from_slice(kind);
-    crc_input.extend_from_slice(data);
-    out.extend_from_slice(&crc32(&crc_input).to_be_bytes());
-}
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = 0xffff_ffffu32;
-    for byte in data {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    !crc
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use flate2::read::ZlibDecoder;
-    use std::io::Read;
-
     #[test]
     fn png_roundtrip_keeps_the_modules_and_the_accent_mark() {
         let url = "https://discord.com/ra/UZ0-kOVzXDZTFVV5_QlpURSO2BQHrtkKWHNpIGoDI0k";
@@ -273,16 +223,12 @@ mod tests {
 
         let png = encode_png(&image).unwrap();
         assert_eq!(&png[0..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
-        let (width, height, inflated) = inflate_png(&png);
-        assert_eq!((width, height), (image.width, image.height));
-        let mut expected = Vec::new();
-        for y in 0..image.height {
-            expected.push(0);
-            let start = (y * image.width * 4) as usize;
-            expected.extend_from_slice(&image.pixels[start..start + (image.width * 4) as usize]);
-        }
-        assert_eq!(inflated, expected);
-
+        let decoded = resvg::tiny_skia::Pixmap::decode_png(&png).unwrap();
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (image.width, image.height)
+        );
+        assert_eq!(decoded.data(), &image.pixels[..]);
         let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(
             image.width as usize,
             image.height as usize,
@@ -300,18 +246,5 @@ mod tests {
     fn pixel(image: &QrImage, x: u32, y: u32) -> [u8; 4] {
         let index = ((y * image.width + x) * 4) as usize;
         image.pixels[index..index + 4].try_into().unwrap()
-    }
-
-    fn inflate_png(png: &[u8]) -> (u32, u32, Vec<u8>) {
-        assert_eq!(&png[12..16], b"IHDR");
-        let width = u32::from_be_bytes(png[16..20].try_into().unwrap());
-        let height = u32::from_be_bytes(png[20..24].try_into().unwrap());
-        let idat_len = u32::from_be_bytes(png[33..37].try_into().unwrap()) as usize;
-        assert_eq!(&png[37..41], b"IDAT");
-        let data = &png[41..41 + idat_len];
-        let mut decoder = ZlibDecoder::new(data);
-        let mut inflated = Vec::new();
-        decoder.read_to_end(&mut inflated).unwrap();
-        (width, height, inflated)
     }
 }

@@ -7594,7 +7594,6 @@ name = "rencord-auth"
 version = "0.6.1"
 dependencies = [
  "base64 0.22.1",
- "flate2",
  "futures-util",
  "http",
  "keyring",
@@ -7604,7 +7603,7 @@ dependencies = [
  "rencord-model",
  "rencord-protocol",
  "reqwest",
- "resvg 0.45.1",
+ "resvg 0.46.0",
  "rqrr",
  "rsa",
  "serde",
