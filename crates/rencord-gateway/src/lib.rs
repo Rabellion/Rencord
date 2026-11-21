@@ -22,6 +22,10 @@ pub enum GatewayError {
     Socket(String),
     #[error("gateway closed before ready")]
     Closed,
+    #[error("gateway stopped acknowledging heartbeats")]
+    NoHeartbeatAck,
+    #[error("gateway closed with code {0}; reconnecting cannot help")]
+    Fatal(u16),
     #[error("frame error: {0}")]
     Frame(#[from] rencord_protocol::FrameError),
     #[error("json error: {0}")]
@@ -77,32 +81,65 @@ pub struct GatewayConfig {
     pub token: String,
 }
 
+/// Close codes after which a new connection would fail the same way:
+/// authentication failed, invalid shard, sharding required, invalid API
+/// version, invalid or disallowed intents.
+const FATAL_CLOSE_CODES: [u16; 6] = [4004, 4010, 4011, 4012, 4013, 4014];
+
+/// What survives a dropped socket so the next one can resume.
+#[derive(Default)]
+struct ResumeState {
+    session_id: Option<String>,
+    sequence: Option<u64>,
+    url: Option<String>,
+}
+
+/// Runs until a `Shutdown` command, the command or event channel closing, or
+/// a fatal close code. Every other failure reconnects with backoff and resumes
+/// when Discord still has the session.
 pub async fn run(
     config: GatewayConfig,
     events: mpsc::Sender<GatewayEvent>,
     mut commands: mpsc::Receiver<GatewayCommand>,
 ) -> Result<(), GatewayError> {
-    let mut session_id: Option<String> = None;
-    let mut sequence: Option<u64> = None;
-    let mut resumes = 0u32;
+    let mut resume = ResumeState::default();
+    let mut failures = 0u32;
     loop {
-        match run_socket(
-            &config,
-            &events,
-            &mut commands,
-            &mut session_id,
-            &mut sequence,
-        )
-        .await
-        {
+        match run_socket(&config, &events, &mut commands, &mut resume, &mut failures).await {
             Ok(()) => return Ok(()),
-            Err(GatewayError::Closed) if session_id.is_some() && resumes < 5 => {
-                resumes += 1;
-                let _ = events.send(GatewayEvent::Reconnect).await;
-                tokio::time::sleep(Duration::from_millis(30)).await;
+            Err(err @ GatewayError::Fatal(_)) => return Err(err),
+            Err(err) => {
+                tracing::warn!("gateway dropped ({err}); reconnecting");
+                if events.send(GatewayEvent::Reconnect).await.is_err() {
+                    return Ok(());
+                }
+                tokio::time::sleep(backoff(failures)).await;
+                failures = failures.saturating_add(1);
             }
-            Err(err) => return Err(err),
         }
+    }
+}
+
+/// 250 ms, doubling per failure in a row, capped at 30 s. Reset by READY or RESUMED.
+fn backoff(failures: u32) -> Duration {
+    Duration::from_millis(250u64 << failures.min(7)).min(Duration::from_secs(30))
+}
+
+/// `resume_gateway_url` from READY carries no query, so reuse the configured one.
+fn resume_url(base: &str, configured: &str) -> String {
+    let query = configured
+        .split_once('?')
+        .map(|(_, query)| query)
+        .unwrap_or("v=10&encoding=json");
+    format!("{}/?{query}", base.trim_end_matches('/'))
+}
+
+async fn next_beat(ticker: &mut Option<tokio::time::Interval>) {
+    match ticker {
+        Some(ticker) => {
+            ticker.tick().await;
+        }
+        None => std::future::pending().await,
     }
 }
 
@@ -110,16 +147,18 @@ async fn run_socket(
     config: &GatewayConfig,
     events: &mpsc::Sender<GatewayEvent>,
     commands: &mut mpsc::Receiver<GatewayCommand>,
-    session_id: &mut Option<String>,
-    sequence: &mut Option<u64>,
+    resume: &mut ResumeState,
+    failures: &mut u32,
 ) -> Result<(), GatewayError> {
-    let (socket, _) = connect_async(&config.url).await?;
+    let url = match (&resume.session_id, &resume.url) {
+        (Some(_), Some(base)) => resume_url(base, &config.url),
+        _ => config.url.clone(),
+    };
+    let (socket, _) = connect_async(url.as_str()).await?;
     let (mut write, mut read) = socket.split();
-    let mut identified = false;
     let mut inflater = ZlibStream::new();
-    let heartbeat_generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-
-    let (heartbeat_tx, mut heartbeat_rx) = mpsc::channel::<Option<u64>>(4);
+    let mut ticker: Option<tokio::time::Interval> = None;
+    let mut awaiting_ack = false;
 
     loop {
         tokio::select! {
@@ -127,11 +166,16 @@ async fn run_socket(
                 let Some(incoming) = incoming else {
                     return Err(GatewayError::Closed);
                 };
-                let message = incoming?;
-                let bytes = match message {
+                let bytes = match incoming? {
                     WsMessage::Text(text) => text.as_bytes().to_vec(),
                     WsMessage::Binary(bin) => inflater.feed(&bin)?,
-                    WsMessage::Close(_) => return Err(GatewayError::Closed),
+                    WsMessage::Close(frame) => {
+                        let code = frame.map(|frame| u16::from(frame.code));
+                        return Err(match code {
+                            Some(code) if FATAL_CLOSE_CODES.contains(&code) => GatewayError::Fatal(code),
+                            _ => GatewayError::Closed,
+                        });
+                    }
                     WsMessage::Ping(payload) => {
                         write.send(WsMessage::Pong(payload)).await?;
                         continue;
@@ -141,66 +185,71 @@ async fn run_socket(
                 if bytes.is_empty() {
                     continue;
                 }
-                let frame = GatewayFrame::parse(&bytes)?;
+                let frame = match GatewayFrame::parse(&bytes) {
+                    Ok(frame) => frame,
+                    Err(err) => {
+                        tracing::warn!("skipped a gateway frame: {err}");
+                        continue;
+                    }
+                };
                 if let Some(seq) = frame.sequence {
-                    *sequence = Some(seq);
+                    resume.sequence = Some(seq);
                 }
                 match frame.op {
                     GatewayOpcode::Hello => {
                         let hello: HelloData = serde_json::from_value(frame.data)?;
-                        let generation = heartbeat_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                        let flag = heartbeat_generation.clone();
-                        let tx = heartbeat_tx.clone();
                         let interval = Duration::from_millis(hello.heartbeat_interval.max(1));
-                        tokio::spawn(async move {
-                            let mut ticker = tokio::time::interval(interval);
-                            ticker.tick().await;
-                            loop {
-                                ticker.tick().await;
-                                if flag.load(std::sync::atomic::Ordering::Relaxed) != generation {
-                                    break;
-                                }
-                                if tx.send(None).await.is_err() {
-                                    break;
-                                }
-                            }
-                        });
-                        if let Some(id) = session_id.clone() {
-                            let payload = resume_payload(&config.token, &id, sequence.unwrap_or(0));
-                            write.send(WsMessage::Text(payload.to_string().into())).await?;
-                            identified = true;
-                        } else if !identified {
-                            let payload = identify_payload(&config.token);
-                            write.send(WsMessage::Text(payload.to_string().into())).await?;
-                            identified = true;
-                        }
+                        let mut beats = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+                        beats.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                        ticker = Some(beats);
+                        awaiting_ack = false;
+                        let payload = match &resume.session_id {
+                            Some(id) => resume_payload(&config.token, id, resume.sequence.unwrap_or(0)),
+                            None => identify_payload(&config.token),
+                        };
+                        write.send(WsMessage::Text(payload.to_string().into())).await?;
                     }
-                    GatewayOpcode::HeartbeatAck => {}
+                    GatewayOpcode::HeartbeatAck => awaiting_ack = false,
                     GatewayOpcode::Heartbeat => {
-                        let _ = heartbeat_tx.send(*sequence).await;
+                        let payload = heartbeat_payload(resume.sequence);
+                        write.send(WsMessage::Text(payload.to_string().into())).await?;
                     }
-                    GatewayOpcode::Reconnect => {
-                        let _ = events.send(GatewayEvent::Reconnect).await;
-                        return Err(GatewayError::Closed);
-                    }
+                    GatewayOpcode::Reconnect => return Err(GatewayError::Closed),
                     GatewayOpcode::InvalidSession => {
-                        let resumable = frame.data.as_bool().unwrap_or(false);
-                        if !resumable {
-                            *session_id = None;
+                        if !frame.data.as_bool().unwrap_or(false) {
+                            *resume = ResumeState::default();
                         }
                         return Err(GatewayError::Closed);
                     }
                     GatewayOpcode::Dispatch => {
                         let name = frame.event_name.clone().unwrap_or_default();
                         if name == "RESUMED" {
-                            let _ = events.send(GatewayEvent::Resumed).await;
+                            *failures = 0;
+                            if events.send(GatewayEvent::Resumed).await.is_err() {
+                                return Ok(());
+                            }
                             continue;
                         }
-                        if let Some(event) = decode_dispatch(&name, frame.data)? {
-                            if let GatewayEvent::Ready { session_id: id, .. } = &event {
-                                *session_id = Some(id.clone());
+                        if name == "READY" {
+                            resume.url = frame
+                                .data
+                                .get("resume_gateway_url")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                        }
+                        match decode_dispatch(&name, frame.data) {
+                            Ok(Some(event)) => {
+                                if let GatewayEvent::Ready { session_id: id, .. } = &event {
+                                    resume.session_id = Some(id.clone());
+                                    *failures = 0;
+                                }
+                                if events.send(event).await.is_err() {
+                                    return Ok(());
+                                }
                             }
-                            let _ = events.send(event).await;
+                            Ok(None) => {}
+                            // One odd payload must not take the whole connection down.
+                            Err(err) => tracing::warn!("skipped {name}: {err}"),
                         }
                     }
                     GatewayOpcode::Identify
@@ -210,11 +259,14 @@ async fn run_socket(
                     | GatewayOpcode::RequestGuildMembers => {}
                 }
             }
-            beat = heartbeat_rx.recv() => {
-                if beat.is_some() {
-                    let payload = heartbeat_payload(*sequence);
-                    write.send(WsMessage::Text(payload.to_string().into())).await?;
+            _ = next_beat(&mut ticker) => {
+                // No ack since the last beat: the socket is half-open (sleep, NAT timeout).
+                if awaiting_ack {
+                    return Err(GatewayError::NoHeartbeatAck);
                 }
+                let payload = heartbeat_payload(resume.sequence);
+                write.send(WsMessage::Text(payload.to_string().into())).await?;
+                awaiting_ack = true;
             }
             command = commands.recv() => {
                 match command {
@@ -228,6 +280,7 @@ async fn run_socket(
         }
     }
 }
+
 fn decode_dispatch(name: &str, data: Value) -> Result<Option<GatewayEvent>, GatewayError> {
     let event = match name {
         "READY" => {
@@ -494,6 +547,258 @@ mod tests {
         }
         assert!(saw_resumed, "gateway did not resume");
         runner.abort();
+    }
+
+    fn text(body: &str) -> WsMessage {
+        WsMessage::Text(body.to_owned().into())
+    }
+
+    fn hello(ms: u64) -> WsMessage {
+        text(&format!(
+            r#"{{"op":10,"d":{{"heartbeat_interval":{ms}}},"s":null,"t":null}}"#
+        ))
+    }
+
+    fn ready(session: &str, extra: &str) -> WsMessage {
+        text(&format!(
+            r#"{{"op":0,"t":"READY","s":1,"d":{{"session_id":"{session}","user":{{"id":"9","username":"ada"}},"guilds":[]{extra}}}}}"#
+        ))
+    }
+
+    async fn first_op(
+        socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    ) -> String {
+        socket
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap()
+            .to_string()
+    }
+
+    fn start(
+        url: String,
+    ) -> (
+        mpsc::Receiver<GatewayEvent>,
+        tokio::task::JoinHandle<Result<(), GatewayError>>,
+        mpsc::Sender<GatewayCommand>,
+    ) {
+        let (events_tx, events_rx) = mpsc::channel(16);
+        let (cmd_tx, cmd_rx) = mpsc::channel(4);
+        let runner = tokio::spawn(run(
+            GatewayConfig {
+                url,
+                token: "token".into(),
+            },
+            events_tx,
+            cmd_rx,
+        ));
+        (events_rx, runner, cmd_tx)
+    }
+
+    async fn next_event(events: &mut mpsc::Receiver<GatewayEvent>) -> GatewayEvent {
+        tokio::time::timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("gateway event timeout")
+            .expect("gateway stopped")
+    }
+
+    #[tokio::test]
+    #[allow(clippy::result_large_err)] // tungstenite fixes the handshake callback's error type
+    async fn reconnects_after_a_reset_and_resumes_on_the_resume_url() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            socket.send(hello(60000)).await.unwrap();
+            first_op(&mut socket).await;
+            let extra = format!(r#","resume_gateway_url":"ws://{addr}/resume""#);
+            socket.send(ready("sess", &extra)).await.unwrap();
+            drop(socket); // no close frame: the client sees a reset, not a clean close
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let path = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+            let seen = path.clone();
+            let mut socket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                move |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                      response| {
+                    *seen.lock().unwrap() = request.uri().path().to_owned();
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            socket.send(hello(60000)).await.unwrap();
+            let resume = first_op(&mut socket).await;
+            assert!(
+                resume.contains("\"op\":6") && resume.contains("sess"),
+                "{resume}"
+            );
+            assert!(path.lock().unwrap().starts_with("/resume"));
+            socket
+                .send(text(r#"{"op":0,"t":"RESUMED","s":2,"d":{}}"#))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        let (mut events, runner, _commands) = start(format!("ws://{addr}/?v=10&encoding=json"));
+        assert!(matches!(
+            next_event(&mut events).await,
+            GatewayEvent::Ready { .. }
+        ));
+        assert!(matches!(
+            next_event(&mut events).await,
+            GatewayEvent::Reconnect
+        ));
+        assert!(matches!(
+            next_event(&mut events).await,
+            GatewayEvent::Resumed
+        ));
+        runner.abort();
+    }
+
+    #[tokio::test]
+    async fn a_socket_that_stops_acking_heartbeats_is_replaced() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            socket.send(hello(100)).await.unwrap();
+            first_op(&mut socket).await;
+            socket.send(ready("sess", "")).await.unwrap();
+            // Keep the socket open and read heartbeats without ever acking them.
+            tokio::spawn(async move { while socket.next().await.is_some() {} });
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            socket.send(hello(60000)).await.unwrap();
+            let resume = first_op(&mut socket).await;
+            assert!(resume.contains("\"op\":6"), "{resume}");
+            socket
+                .send(text(r#"{"op":0,"t":"RESUMED","s":2,"d":{}}"#))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        let (mut events, runner, _commands) = start(format!("ws://{addr}"));
+        assert!(matches!(
+            next_event(&mut events).await,
+            GatewayEvent::Ready { .. }
+        ));
+        assert!(matches!(
+            next_event(&mut events).await,
+            GatewayEvent::Reconnect
+        ));
+        assert!(matches!(
+            next_event(&mut events).await,
+            GatewayEvent::Resumed
+        ));
+        runner.abort();
+    }
+
+    #[tokio::test]
+    async fn a_dispatch_that_does_not_decode_is_skipped() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            socket.send(hello(60000)).await.unwrap();
+            first_op(&mut socket).await;
+            socket.send(ready("sess", "")).await.unwrap();
+            // A partial update with no author, then a normal message.
+            socket.send(text(r#"{"op":0,"t":"MESSAGE_UPDATE","s":2,"d":{"id":"5","channel_id":"8","embeds":[]}}"#)).await.unwrap();
+            socket.send(text(r#"{"op":0,"t":"MESSAGE_CREATE","s":3,"d":{"id":"6","channel_id":"8","content":"still here","timestamp":"t","author":{"id":"9","username":"ada"}}}"#)).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        let (mut events, runner, _commands) = start(format!("ws://{addr}"));
+        assert!(matches!(
+            next_event(&mut events).await,
+            GatewayEvent::Ready { .. }
+        ));
+        match next_event(&mut events).await {
+            GatewayEvent::MessageCreate(message) => assert_eq!(message.content, "still here"),
+            other => panic!("unexpected {other:?}"),
+        }
+        runner.abort();
+    }
+
+    #[tokio::test]
+    async fn a_session_that_cannot_resume_identifies_again() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            socket.send(hello(60000)).await.unwrap();
+            first_op(&mut socket).await;
+            socket.send(ready("old", "")).await.unwrap();
+            socket
+                .send(text(r#"{"op":9,"d":false,"s":null,"t":null}"#))
+                .await
+                .unwrap();
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            socket.send(hello(60000)).await.unwrap();
+            let identify = first_op(&mut socket).await;
+            assert!(identify.contains("\"op\":2"), "{identify}");
+            socket.send(ready("new", "")).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        let (mut events, runner, _commands) = start(format!("ws://{addr}"));
+        assert!(matches!(
+            next_event(&mut events).await,
+            GatewayEvent::Ready { .. }
+        ));
+        assert!(matches!(
+            next_event(&mut events).await,
+            GatewayEvent::Reconnect
+        ));
+        match next_event(&mut events).await {
+            GatewayEvent::Ready { session_id, .. } => assert_eq!(session_id, "new"),
+            other => panic!("unexpected {other:?}"),
+        }
+        runner.abort();
+    }
+
+    #[tokio::test]
+    async fn authentication_failed_stops_without_retrying() {
+        use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            socket.send(hello(60000)).await.unwrap();
+            first_op(&mut socket).await;
+            let frame = CloseFrame {
+                code: CloseCode::from(4004),
+                reason: "Authentication failed.".into(),
+            };
+            socket.close(Some(frame)).await.ok();
+        });
+        let (_events, runner, _commands) = start(format!("ws://{addr}"));
+        let outcome = tokio::time::timeout(Duration::from_secs(3), runner)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(outcome, Err(GatewayError::Fatal(4004))),
+            "{outcome:?}"
+        );
+    }
+
+    #[test]
+    fn backoff_grows_and_caps() {
+        assert_eq!(backoff(0), Duration::from_millis(250));
+        assert_eq!(backoff(2), Duration::from_secs(1));
+        assert_eq!(backoff(50), Duration::from_secs(30));
     }
 
     #[test]
