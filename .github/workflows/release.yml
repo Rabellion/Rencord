@@ -71,13 +71,36 @@ jobs:
             Write-Host "No signing secret was set. Generated a self-signed CN=Rabellion certificate."
           }
 
+          $script:TimestampServer = "http://timestamp.digicert.com"
           function Sign-Binary([string]$Path) {
-            & $signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f $pfx /p $password $Path
-            if ($LASTEXITCODE -ne 0) { throw "signtool failed for $Path" }
+            $servers = @(
+              "http://timestamp.digicert.com",
+              "http://timestamp.sectigo.com",
+              "http://timestamp.acs.microsoft.com"
+            )
+            foreach ($server in $servers) {
+              Write-Host "signing $Path via $server"
+              $proc = New-Object System.Diagnostics.Process
+              $proc.StartInfo.FileName = $signtool
+              $proc.StartInfo.Arguments = "sign /fd SHA256 /tr $server /td SHA256 /f `"$pfx`" /p `"$password`" `"$Path`""
+              $proc.StartInfo.UseShellExecute = $false
+              $proc.Start() | Out-Null
+              if (-not $proc.WaitForExit(120000)) {
+                try { $proc.Kill() } catch {}
+                Write-Host "timestamp server timed out: $server"
+                continue
+              }
+              if ($proc.ExitCode -eq 0) {
+                $script:TimestampServer = $server
+                return
+              }
+              Write-Host "signtool exit $($proc.ExitCode) via $server"
+            }
+            throw "could not sign $Path"
           }
 
           Sign-Binary $exe
-          $signCmd = "`$q$signtool`$q sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f `$q$pfx`$q /p `$q$password`$q `$f"
+          $signCmd = "`$q$signtool`$q sign /fd SHA256 /tr $($script:TimestampServer) /td SHA256 /f `$q$pfx`$q /p `$q$password`$q `$f"
           & $iscc "/Srencord=$signCmd" "/DExeSource=$exe" "/O$dist" (Join-Path $root "packaging\windows\rencord.iss")
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
           $setup = Join-Path $dist "Rencord-v0.6.0-setup-x64.exe"
@@ -104,8 +127,17 @@ jobs:
           $installed = Join-Path $installDir "Rencord.exe"
           if (-not (Test-Path $installed)) { throw "installed exe missing" }
           if (Test-Path (Join-Path $installDir "rencord-stream.exe")) { throw "installer laid down rencord-stream.exe" }
-          & $installed --worker-check
-          if ($LASTEXITCODE -ne 0) { throw "worker-check failed" }
+          $check = New-Object System.Diagnostics.Process
+          $check.StartInfo.FileName = $installed
+          $check.StartInfo.Arguments = "--worker-check"
+          $check.StartInfo.UseShellExecute = $false
+          $check.StartInfo.RedirectStandardOutput = $true
+          $check.Start() | Out-Null
+          if (-not $check.WaitForExit(20000)) {
+            try { $check.Kill() } catch {}
+            throw "worker-check hung"
+          }
+          if ($check.ExitCode -ne 0) { throw "worker-check failed: $($check.ExitCode)" }
           $bannerPath = Join-Path $dist "worker-banner.txt"
           $psi = New-Object System.Diagnostics.ProcessStartInfo
           $psi.FileName = $installed
@@ -143,11 +175,11 @@ jobs:
           @"
           Test build for the owner. Windows x64 installer. Unofficial client: Discord's terms can end the account.
 
-          Since v0.5.0: UDP discovery retries a dropped probe and ignores a garbage datagram, for voice and Go Live. The Go Live worker is the same Rencord.exe, started again with --stream-worker, so the installer does not ship rencord-stream.exe. A QR ticket exchange keeps Discord's reply when it fails.
+          Since v0.5.0: UDP discovery retries a dropped probe and ignores a garbage datagram, for voice and Go Live. The Go Live worker is the same Rencord.exe, started again with --stream-worker, and this build is an installer rather than a loose zip. A QR ticket exchange keeps Discord's reply when it fails. The login window can show an hCaptcha panel in the app.
 
           The setup installs per user to %LOCALAPPDATA%\Programs\Rencord unless you choose an all-users install. It adds a Start Menu shortcut, an optional desktop shortcut, and an uninstaller. The uninstaller asks before deleting user data in %APPDATA%.
 
-          Signing: $(if ($selfSigned) { "self-signed certificate, subject CN=Rabellion, SHA-256, timestamped by http://timestamp.digicert.com. SmartScreen can still warn. Choose More info, then Run anyway. Real trust needs an OV or EV certificate, or Azure Trusted Signing. Rencord-signing.cer is attached if you want to trust this build locally." } else { "signed with the repository certificate, SHA-256, timestamped by http://timestamp.digicert.com." })
+          Signing: $(if ($selfSigned) { "self-signed certificate, subject CN=Rabellion, SHA-256, timestamped by $($script:TimestampServer). SmartScreen can still warn. Choose More info, then Run anyway. Real trust needs an OV or EV certificate, or Azure Trusted Signing. Rencord-signing.cer is attached if you want to trust this build locally." } else { "signed with the repository certificate, SHA-256, timestamped by $($script:TimestampServer)." })
 
           SHA-256 of Rencord-v0.6.0-setup-x64.exe: $hash
           "@ | Set-Content -Encoding utf8 (Join-Path $dist "notes.md")
