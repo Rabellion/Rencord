@@ -24,9 +24,14 @@ foreach ($server in $servers) {
     $proc.StartInfo.FileName = $signtool
     $proc.StartInfo.Arguments = "sign /fd SHA256 /tr $server /td SHA256 /f `"$pfx`" /p `"$password`" `"$File`""
     $proc.StartInfo.UseShellExecute = $false
+    $proc.StartInfo.CreateNoWindow = $true
     $proc.Start() | Out-Null
-    if (-not $proc.WaitForExit(90000)) {
-        try { $proc.Kill() } catch {}
+    $deadline = (Get-Date).AddSeconds(90)
+    while (-not $proc.HasExited -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $proc.HasExited) {
+        & taskkill.exe /F /T /PID $proc.Id | Out-Null
         Write-Host "timestamp server timed out: $server"
         continue
     }

@@ -32,6 +32,7 @@ jobs:
           $env:CXXFLAGS = "/MT"
           cargo build --release --locked --target x86_64-pc-windows-msvc -p rencord-desktop --bin rencord
       - name: Sign, package, and smoke-test
+        timeout-minutes: 25
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
