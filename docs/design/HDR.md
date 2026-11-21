@@ -2,7 +2,7 @@
 
 Milestone 5 is the HDR path that sits beside Go Live. Go Live (capture, the out-of-process worker, H.264, the viewer socket) is Milestone 4 and is not in this tree. `crates/rencord-hdr` does not open a capture device and does not replace that worker. It exposes the traits the worker can call once it exists: `HdrCaptureProbe`, `HdrEncoder`, `ToneMapper`, and `HdrSignal`.
 
-The `hdr` cargo feature (default) maps a `DeliveryPlan` onto `rencord-media::PixelPath`. Turning the feature off builds the crate with no dependency on those Go Live types. `WorkerCommand` is unchanged.
+The `hdr` cargo feature (default) maps a `DeliveryPlan` onto `rencord-media::PixelPath`. Turning the feature off builds the crate with no dependency on those Go Live types.
 
 ## What runs
 
