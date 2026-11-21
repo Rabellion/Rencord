@@ -46,8 +46,10 @@ pub struct UploadSettings {
     pub archive: ArchiveFormat,
     pub litterbox: LitterboxTime,
     pub zero_x_hours: Option<u32>,
-    /// Presigned PUT URL, or an `s3 ...` line. Empty means Custom is not configured.
-    #[serde(default)]
+    /// Presigned PUT URL, or an `s3 ...` line (it holds the host's secret key).
+    /// Empty means Custom is not configured. Never written to the settings file:
+    /// it is read back only so an old file can still be loaded.
+    #[serde(default, skip_serializing)]
     pub custom_spec: String,
 }
 
@@ -114,6 +116,28 @@ pub fn save_settings(path: &Path, settings: &UploadSettings) -> Result<(), Uploa
     let body = serde_json::to_string_pretty(settings)
         .map_err(|err| UploadError::message(format!("settings JSON: {err}")))?;
     file.write_all(body.as_bytes())?;
+    Ok(())
+}
+
+/// Older builds saved `custom_spec`, with the upload host's secret key, in the
+/// settings file. Remove it in place. A file without it is left untouched.
+pub fn scrub_saved_secret(path: &Path) -> Result<(), UploadError> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Ok(());
+    };
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Ok(());
+    };
+    let Some(object) = value.as_object_mut() else {
+        return Ok(());
+    };
+    if object.remove("custom_spec").is_none() {
+        return Ok(());
+    }
+    let body = serde_json::to_string_pretty(&value)
+        .map_err(|err| UploadError::message(format!("settings JSON: {err}")))?;
+    // The file already exists, so its private permissions are kept.
+    fs::write(path, body)?;
     Ok(())
 }
 
@@ -233,6 +257,69 @@ mod tests {
         assert_eq!(history[0].url, "https://example.test/a");
         assert_eq!(format_unix(0), "1970-01-01T00:00:00Z");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    const SECRET_SPEC: &str = "s3 https://bucket.example.test AKIAEXAMPLE SECRETKEYVALUE";
+
+    fn temp_file(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("rencord-upload-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir.join("upload-settings.json")
+    }
+
+    #[test]
+    fn saving_settings_never_writes_the_custom_spec() {
+        let path = temp_file("no-secret");
+        let settings = UploadSettings {
+            provider: ProviderKind::Custom,
+            custom_spec: SECRET_SPEC.into(),
+            ..UploadSettings::default()
+        };
+        save_settings(&path, &settings).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("SECRETKEYVALUE"), "{text}");
+        assert!(!text.contains("custom_spec"), "{text}");
+        // The other choices still round-trip.
+        assert_eq!(load_settings(&path).provider, ProviderKind::Custom);
+    }
+
+    #[test]
+    fn scrubbing_removes_a_secret_an_older_build_saved() {
+        let path = temp_file("scrub");
+        let old = UploadSettings {
+            provider: ProviderKind::Custom,
+            default_action: DefaultAction::Split,
+            ..UploadSettings::default()
+        };
+        let mut json = serde_json::to_value(&old).unwrap();
+        json["custom_spec"] = SECRET_SPEC.into();
+        fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("SECRETKEYVALUE"));
+
+        scrub_saved_secret(&path).unwrap();
+
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("SECRETKEYVALUE"), "{text}");
+        let kept = load_settings(&path);
+        assert_eq!(kept.provider, ProviderKind::Custom);
+        assert_eq!(kept.default_action, DefaultAction::Split);
+    }
+
+    #[test]
+    fn scrubbing_a_clean_or_missing_file_changes_nothing() {
+        let path = temp_file("scrub-clean");
+        scrub_saved_secret(&path).unwrap(); // missing file
+        save_settings(&path, &UploadSettings::default()).unwrap();
+        let before = fs::read_to_string(&path).unwrap();
+        scrub_saved_secret(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+        fs::write(&path, "not json").unwrap();
+        scrub_saved_secret(&path).unwrap(); // unparsable: left alone
+        assert_eq!(fs::read_to_string(&path).unwrap(), "not json");
     }
 
     #[test]

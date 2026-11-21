@@ -48,7 +48,8 @@ pub use split::{
     HEADER_LEN,
 };
 pub use store::{
-    append_history, load_history, load_settings, save_settings, HistoryEntry, UploadSettings,
+    append_history, load_history, load_settings, save_settings, scrub_saved_secret, HistoryEntry,
+    UploadSettings,
 };
 pub use transfer::{run_job, JobOutput, JobSpec, ProgressSnap};
 
