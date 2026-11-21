@@ -35,6 +35,8 @@ mod stub;
 use rencord_markdown::{parse, Block, Inline};
 use rencord_model::{Message, Snowflake};
 
+const UI_FONT: &str = "Segoe UI Variable, Segoe UI, Inter";
+
 gpui_kit::actions!(
     rencord_ui,
     [
@@ -116,6 +118,9 @@ fn main() {
         });
     if let Some(scene) = stub_scene {
         let (api_base, gateway) = net::runtime().block_on(stub::serve(scene));
+        if let Some(root) = api_base.strip_suffix("/api/v10") {
+            rencord_desktop::set_cdn_base(root);
+        }
         net::set_endpoints(api_base, gateway);
     }
     if args.iter().any(|arg| arg == "--home") {
@@ -409,6 +414,11 @@ struct RencordWindow {
     api: Option<Arc<rencord_api::DiscordApi>>,
     /// Dropping this shuts the live gateway down.
     gateway: Option<tokio::sync::mpsc::Sender<rencord_gateway::GatewayCommand>>,
+    roster_for: Option<Snowflake>,
+    opened_home: bool,
+    images: HashMap<String, std::sync::Arc<Image>>,
+    image_wait: HashSet<String>,
+    image_fail: HashSet<String>,
     voice_join: Option<rencord_voice::VoiceJoin>,
     voice_cmd: Option<tokio::sync::mpsc::Sender<voice_call::VoiceCmd>>,
     voice_status: Option<std::sync::mpsc::Receiver<String>>,
@@ -456,7 +466,8 @@ struct RencordWindow {
     persist_layout: bool,
     screenshot: Option<String>,
     screenshot_frames: u32,
-    screenshot_waits: u32,
+    shot_armed: bool,
+    shot_wait_from: Option<Instant>,
     metrics: ColumnMetrics,
     frame: Option<ResolvedLayout>,
     suppress_split: Option<SplitEdge>,
@@ -639,6 +650,11 @@ impl RencordWindow {
             session_token: None,
             api: None,
             gateway: None,
+            roster_for: None,
+            opened_home: false,
+            images: HashMap::new(),
+            image_wait: HashSet::new(),
+            image_fail: HashSet::new(),
             voice_join: None,
             voice_cmd: None,
             voice_status: None,
@@ -683,7 +699,8 @@ impl RencordWindow {
             persist_layout,
             screenshot,
             screenshot_frames: 0,
-            screenshot_waits: 0,
+            shot_armed: false,
+            shot_wait_from: None,
             metrics: ColumnMetrics::onyx(),
             frame: None,
             suppress_split: None,
@@ -871,9 +888,10 @@ impl RencordWindow {
     }
 
     fn grab_screenshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.stub_shot_ready() {
-            self.screenshot_waits += 1;
-            if self.screenshot_waits < 400 {
+        let waiting = !self.stub_shot_ready() || !self.image_wait.is_empty();
+        if waiting {
+            let started = *self.shot_wait_from.get_or_insert_with(Instant::now);
+            if started.elapsed() < Duration::from_secs(8) {
                 cx.on_next_frame(window, |this, window, cx| {
                     this.grab_screenshot(window, cx);
                 });
@@ -943,16 +961,40 @@ impl RencordWindow {
             Some(stub::StubScene::Retry) => !self.failed.is_empty(),
             Some(stub::StubScene::Scroll) => self.loading_older.is_some(),
             Some(stub::StubScene::Layout) => {
-                self.shell
+                let named = self
+                    .shell
                     .session
                     .guilds
                     .iter()
-                    .any(|guild| guild.name == "Analytical Engines")
-                    && self
-                        .shell
-                        .session
-                        .selected_channel
-                        .is_some_and(|channel| !self.shell.session.messages_for(channel).is_empty())
+                    .any(|guild| guild.name == "Analytical Engines");
+                let messages =
+                    self.shell.session.selected_channel.is_some_and(|channel| {
+                        !self.shell.session.messages_for(channel).is_empty()
+                    });
+                let icon = self
+                    .images
+                    .contains_key(&rencord_desktop::guild_icon_url(10, "g10"));
+                let face = self
+                    .images
+                    .contains_key(&rencord_desktop::user_avatar_url(2, "u2"));
+                let banner = self
+                    .images
+                    .contains_key(&rencord_desktop::guild_banner_url(10, "b10"));
+                let note = self.images.contains_key(&format!(
+                    "{}/attachments/note.png",
+                    rencord_desktop::cdn_base()
+                ));
+                if self.opened_home {
+                    named && messages && face
+                } else {
+                    named
+                        && messages
+                        && icon
+                        && banner
+                        && face
+                        && note
+                        && !self.shell.session.roster.is_empty()
+                }
             }
         }
     }
@@ -1741,7 +1783,8 @@ impl Render for RencordWindow {
                 this.note_bench_frame(window, cx);
             });
         }
-        if self.screenshot.is_some() && self.screenshot_frames == 0 && !self.bench {
+        if self.screenshot.is_some() && !self.shot_armed && !self.bench {
+            self.shot_armed = true;
             cx.on_next_frame(window, |this, window, cx| {
                 this.grab_screenshot(window, cx);
             });
@@ -1754,7 +1797,7 @@ impl Render for RencordWindow {
             .track_focus(&self.focus)
             .size_full()
             .bg(rgb(palette.app_bg))
-            .font_family("Segoe UI Variable, Segoe UI, Inter")
+            .font_family(UI_FONT)
             .text_color(rgb(palette.text))
             .text_size(px(self.shell.prefs.font_px))
             .on_action(cx.listener(|this, _: &QuickSwitcher, _, cx| {
@@ -1860,14 +1903,86 @@ impl RencordWindow {
             channel.kind.is_voice(),
             row_px,
             in_voice,
+            None,
         )
         .into_any_element()
     }
 
+    fn cached_image(&mut self, url: &str, cx: &mut Context<Self>) -> Option<std::sync::Arc<Image>> {
+        if let Some(image) = self.images.get(url) {
+            return Some(image.clone());
+        }
+        self.kick_image(url.to_owned(), cx);
+        None
+    }
+
+    fn kick_image(&mut self, url: String, cx: &mut Context<Self>) {
+        if self.images.contains_key(&url)
+            || self.image_wait.contains(&url)
+            || self.image_fail.contains(&url)
+            || self.image_wait.len() >= 8
+        {
+            return;
+        }
+        self.image_wait.insert(url.clone());
+        let key = url.clone();
+        let task = net::runtime().spawn(async move { load_cdn_bytes(&url).await });
+        cx.spawn(async move |this, cx| {
+            let loaded = task.await.ok().flatten();
+            let _ = this.update(cx, |view, cx| {
+                view.image_wait.remove(&key);
+                if let Some(bytes) = loaded {
+                    let image = Image::from_bytes(ImageFormat::Png, bytes);
+                    view.images.insert(key, std::sync::Arc::new(image));
+                } else {
+                    view.image_fail.insert(key);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn subscribe_roster(&mut self) {
+        let Some(guild) = self.shell.session.selected_guild else {
+            return;
+        };
+        let Some(channel) = self.shell.session.selected_channel else {
+            return;
+        };
+        if self.roster_for == Some(channel) {
+            return;
+        }
+        let Some(gateway) = &self.gateway else {
+            return;
+        };
+        if gateway
+            .try_send(rencord_gateway::GatewayCommand::RequestMemberList {
+                guild_id: guild.get(),
+                channel_id: channel.get(),
+            })
+            .is_err()
+        {
+            return;
+        }
+        self.roster_for = Some(channel);
+        self.shell.session.roster.clear();
+    }
+
     fn shell_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if stub::take_home() {
+            self.opened_home = true;
             self.shell.session.open_home();
         }
+        self.subscribe_roster();
+        let search_hint = if self.shell.session.selected_guild.is_none() {
+            "Find conversation"
+        } else {
+            "Search this channel"
+        };
+        self.search_input.update(cx, |input, cx| {
+            input.set_placeholder(search_hint, window, cx);
+        });
         let palette = rencord_desktop::Palette::from_theme(
             &self.shown,
             self.shell.prefs.font_px,
@@ -2013,7 +2128,7 @@ impl RencordWindow {
         if palette.show_top_rule {
             rail = rail.child(rail_rule(rail_w, palette.line));
         }
-        for guild in guilds {
+        for guild in &guilds {
             let id = guild.id;
             let mark = guild_mark(&guild.name);
             let active = selected_guild == Some(id);
@@ -2022,6 +2137,17 @@ impl RencordWindow {
             let fill = tile_colors.fill;
             let border = fill;
             let letter = tile_colors.letter;
+            let icon = if let Some(hash) = guild.icon.as_deref() {
+                let url = rencord_desktop::guild_icon_url(id.get(), hash);
+                self.cached_image(&url, cx).map(|image| {
+                    img(image)
+                        .size(px(48.))
+                        .rounded(px(if active { 16. } else { 24. }))
+                        .into_any_element()
+                })
+            } else {
+                None
+            };
             let guild_unread = self.shell.session.unread.iter().any(|channel_id| {
                 self.shell
                     .session
@@ -2046,7 +2172,7 @@ impl RencordWindow {
                 rail_w,
                 tile.max(48.),
                 if active { 16. } else { 24. },
-                tile_initial(&mark, letter),
+                icon.unwrap_or_else(|| tile_initial(&mark, letter).into_any_element()),
                 move |_, _, cx| {
                     view.update(cx, |this, cx| {
                         this.shell.session.select_guild(id);
@@ -2085,10 +2211,24 @@ impl RencordWindow {
             },
         ));
 
+        let banner = selected_guild.and_then(|id| {
+            guilds
+                .iter()
+                .find(|guild| guild.id == id)
+                .and_then(|guild| {
+                    guild.banner.as_deref().and_then(|hash| {
+                        let url = rencord_desktop::guild_banner_url(id.get(), hash);
+                        self.cached_image(&url, cx).map(|image| {
+                            img(image).w_full().h(px(84.)).object_fit(ObjectFit::Cover)
+                        })
+                    })
+                })
+        });
         let mut sidebar = v_flex()
             .w_full()
             .h_full()
             .bg(rgb(palette.sidebar))
+            .children(banner)
             .child(
                 div()
                     .h(px(palette.header_h))
@@ -2149,14 +2289,16 @@ impl RencordWindow {
             .flex_1()
             .min_h(px(0.))
             .overflow_y_scroll();
-        nav = nav.child(category_header(
-            this.clone(),
-            "favorites",
-            "FAVORITES",
-            favorites_open,
-            palette,
-        ));
-        if favorites_open {
+        if !favorite_ids.is_empty() {
+            nav = nav.child(category_header(
+                this.clone(),
+                "favorites",
+                "FAVORITES",
+                favorites_open,
+                palette,
+            ));
+        }
+        if favorites_open && !favorite_ids.is_empty() {
             for id in &favorite_ids {
                 if let Some(channel) = self.shell.session.channels.get(id) {
                     nav = nav.child(channel_row(
@@ -2169,6 +2311,7 @@ impl RencordWindow {
                         false,
                         row_px,
                         false,
+                        None,
                     ));
                 }
             }
@@ -2271,6 +2414,14 @@ impl RencordWindow {
             ));
             if dm_open {
                 for channel in &dms {
+                    let face = channel.avatar.as_deref().and_then(|hash| {
+                        let id = channel
+                            .recipient_ids
+                            .first()
+                            .map(|id| id.get())
+                            .unwrap_or(0);
+                        self.cached_image(&rencord_desktop::user_avatar_url(id, hash), cx)
+                    });
                     nav = nav.child(channel_row(
                         this.clone(),
                         channel.id,
@@ -2281,6 +2432,7 @@ impl RencordWindow {
                         false,
                         row_px,
                         false,
+                        face,
                     ));
                 }
             }
@@ -2334,6 +2486,25 @@ impl RencordWindow {
                     }
                 });
             });
+        }
+        let mut list_faces = HashMap::new();
+        let mut list_media: HashMap<String, std::sync::Arc<Image>> = HashMap::new();
+        for message in &list_messages {
+            let url = match message.author.avatar.as_deref() {
+                Some(hash) => rencord_desktop::user_avatar_url(message.author.id.get(), hash),
+                None => rencord_desktop::default_avatar_url(
+                    message.author.id.get(),
+                    message.author.discriminator.as_deref(),
+                ),
+            };
+            if let Some(image) = self.cached_image(&url, cx) {
+                list_faces.insert(message.author.id.get(), image);
+            }
+            for url in media_urls(&message.content) {
+                if let Some(image) = self.cached_image(&url, cx) {
+                    list_media.insert(url, image);
+                }
+            }
         }
         let list_now = rencord_desktop::now_local();
         let timeline = list(timeline_state, move |index, _window, _cx| {
@@ -2402,6 +2573,11 @@ impl RencordWindow {
                 reveal_hover && message.content.contains("Mention"),
                 &stamp,
                 reveal_hover,
+                list_faces.get(&message.author.id.get()).cloned(),
+                media_urls(&message.content)
+                    .into_iter()
+                    .filter_map(|url| list_media.get(&url).cloned())
+                    .collect(),
             );
             if show_day {
                 v_flex()
@@ -2449,7 +2625,9 @@ impl RencordWindow {
                                     hit.max(layout::TOUCH_TARGET),
                                 ))
                             })
-                            .child(icon("hash", palette.hash_icon, palette.muted))
+                            .when(!channel_name.starts_with('@'), |title| {
+                                title.child(icon("hash", palette.hash_icon, palette.muted))
+                            })
                             .child(
                                 div()
                                     .text_size(px(palette.title_px))
@@ -2672,56 +2850,106 @@ impl RencordWindow {
                 },
                 palette.muted,
             ));
-        if members.is_empty() {
+        let roster = self.shell.session.roster.clone();
+        if !roster.is_empty() {
+            for group in roster {
+                people = people.child(div().px(px(16.)).pt(px(16.)).pb(px(4.)).child(paint(
+                    format!("{} — {}", group.name.to_uppercase(), group.count),
+                    palette.muted,
+                    12.,
+                )));
+                for member in group.members {
+                    let line = if member.activity.is_empty() {
+                        member.status.clone()
+                    } else {
+                        member.activity.clone()
+                    };
+                    let face = member
+                        .avatar
+                        .as_deref()
+                        .map(|hash| rencord_desktop::user_avatar_url(member.id, hash))
+                        .unwrap_or_else(|| rencord_desktop::default_avatar_url(member.id, None));
+                    let face = self.cached_image(&face, cx).map(|image| {
+                        div()
+                            .size(px(32.))
+                            .flex_shrink_0()
+                            .rounded(px(16.))
+                            .overflow_hidden()
+                            .child(img(image).size(px(32.)).object_fit(ObjectFit::Cover))
+                            .into_any_element()
+                    });
+                    people = people.child(
+                        h_flex()
+                            .mx(px(8.))
+                            .px(px(8.))
+                            .h(px(42.))
+                            .gap(px(8.))
+                            .items_center()
+                            .rounded(px(4.))
+                            .hover(|style| style.bg(rgb(palette.hover)))
+                            .child(face.unwrap_or_else(|| {
+                                letter_face(&member.name, member.id, 32.).into_any_element()
+                            }))
+                            .child(
+                                v_flex()
+                                    .child(paint(member.name, palette.text, 14.))
+                                    .child(paint(line, palette.muted, 12.)),
+                            ),
+                    );
+                }
+            }
+        } else if members.is_empty() {
             people = people.child(div().px(px(16.)).py(px(8.)).child(paint(
                 "No members loaded yet.",
                 palette.muted,
                 13.,
             )));
         }
-        for member in members {
-            let (name, activity) = member
-                .split_once(" · ")
-                .map(|(name, activity)| (name.to_owned(), activity.to_owned()))
-                .unwrap_or_else(|| (member.clone(), "Online".into()));
-            let role = role_color(&name, &theme);
-            let dot = match activity.as_str() {
-                "Idle" => palette.status_idle,
-                "Offline" => palette.status_offline,
-                "In voice" => palette.status_online,
-                _ => palette.status_online,
-            };
-            let speaking = activity == "In voice" && palette.ink_chrome;
-            people = people.child(
-                h_flex()
-                    .mx(px(8.))
-                    .px(px(6.))
-                    .h(px(palette.member_row))
-                    .gap(px(8.))
-                    .items_center()
-                    .rounded(px(6.))
-                    .hover(|style| style.bg(rgb(palette.hover)))
-                    .child(if speaking {
-                        div()
-                            .p(px(2.))
-                            .rounded(px(20.))
-                            .border_2()
-                            .border_color(rgb(palette.accent))
-                            .child(portrait_status(&name, 32., dot, palette.members))
-                            .into_any_element()
-                    } else {
-                        portrait_status(&name, 32., dot, palette.members).into_any_element()
-                    })
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .overflow_hidden()
-                            .gap(px(0.))
-                            .child(paint(name, role, 14.))
-                            .child(meta(activity, palette.muted, 11., palette)),
-                    ),
-            );
+        if self.shell.session.roster.is_empty() {
+            for member in members {
+                let (name, activity) = member
+                    .split_once(" · ")
+                    .map(|(name, activity)| (name.to_owned(), activity.to_owned()))
+                    .unwrap_or_else(|| (member.clone(), "Online".into()));
+                let role = role_color(&name, &theme);
+                let dot = match activity.as_str() {
+                    "Idle" => palette.status_idle,
+                    "Offline" => palette.status_offline,
+                    "In voice" => palette.status_online,
+                    _ => palette.status_online,
+                };
+                let speaking = activity == "In voice" && palette.ink_chrome;
+                people = people.child(
+                    h_flex()
+                        .mx(px(8.))
+                        .px(px(6.))
+                        .h(px(palette.member_row))
+                        .gap(px(8.))
+                        .items_center()
+                        .rounded(px(6.))
+                        .hover(|style| style.bg(rgb(palette.hover)))
+                        .child(if speaking {
+                            div()
+                                .p(px(2.))
+                                .rounded(px(20.))
+                                .border_2()
+                                .border_color(rgb(palette.accent))
+                                .child(portrait_status(&name, 32., dot, palette.members))
+                                .into_any_element()
+                        } else {
+                            portrait_status(&name, 32., dot, palette.members).into_any_element()
+                        })
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .overflow_hidden()
+                                .gap(px(0.))
+                                .child(paint(name, role, 14.))
+                                .child(meta(activity, palette.muted, 11., palette)),
+                        ),
+                );
+            }
         }
 
         let layout_kind = self.shell.prefs.layout;
@@ -3214,6 +3442,7 @@ fn channel_row(
     joins_voice: bool,
     row_px: f32,
     live_dot: bool,
+    dm_face: Option<std::sync::Arc<Image>>,
 ) -> impl IntoElement {
     let hover = palette.hover;
     let bg = if active {
@@ -3270,13 +3499,26 @@ fn channel_row(
                         .gap(px(6.))
                         .items_center()
                         .child(if kind == "dm" {
-                            portrait_status(
-                                &title,
-                                palette.dm_avatar,
-                                palette.status_online,
-                                palette.sidebar,
-                            )
-                            .into_any_element()
+                            match dm_face {
+                                Some(image) => div()
+                                    .size(px(palette.dm_avatar.max(32.)))
+                                    .flex_shrink_0()
+                                    .rounded(px(palette.dm_avatar.max(32.) / 2.))
+                                    .overflow_hidden()
+                                    .child(
+                                        img(image)
+                                            .size(px(palette.dm_avatar.max(32.)))
+                                            .object_fit(ObjectFit::Cover),
+                                    )
+                                    .into_any_element(),
+                                None => portrait_status(
+                                    &title,
+                                    palette.dm_avatar,
+                                    palette.status_online,
+                                    palette.sidebar,
+                                )
+                                .into_any_element(),
+                            }
                         } else {
                             icon(
                                 if kind == "speaker" { "speaker" } else { "hash" },
@@ -3438,7 +3680,13 @@ fn channel_title(
         .iter()
         .chain(dms.iter())
         .find(|channel| Some(channel.id) == selected)
-        .map(|channel| channel.name.clone())
+        .map(|channel| {
+            if channel.recipient_ids.is_empty() {
+                channel.name.clone()
+            } else {
+                format!("@{}", channel.name)
+            }
+        })
         .unwrap_or_else(|| "Select a channel".into())
 }
 
@@ -3536,25 +3784,18 @@ fn rail_action(
     radius: f32,
     action: impl Fn(&mut RencordWindow, &mut Context<RencordWindow>) + 'static,
 ) -> impl IntoElement {
+    let _ = (dashed, radius);
     let tile_el = h_flex()
-        .size(px(tile))
+        .id(id)
+        .size(px(48.))
         .flex_shrink_0()
-        .rounded(px(radius))
+        .rounded(px(24.))
         .items_center()
         .justify_center()
-        .bg(rgb(palette.add_bg))
-        .border_1()
-        .border_color(rgb(palette.add_border));
-    let tile_el = if dashed {
-        tile_el.border_dashed()
-    } else {
-        tile_el
-    };
-    let tile_el = tile_el
-        .id(id)
+        .bg(rgb(palette.elevated))
         .cursor_pointer()
-        .hover(|style| style.border_color(rgb(palette.text)))
-        .child(icon(glyph, 18., palette.add_glyph))
+        .hover(|style| style.bg(rgb(palette.hover)))
+        .child(icon(glyph, 18., palette.accent))
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| action(this, cx));
         });
@@ -3675,7 +3916,7 @@ fn timestamp_label(
         .id(SharedString::from(format!("stamp-{message_id}")))
         .items_center()
         .gap(px(6.))
-        .font_family(palette.font_ui)
+        .font_family(UI_FONT)
         .text_size(px(11.))
         .text_color(rgb(palette.muted))
         .child(stamp.short.clone());
@@ -3721,6 +3962,8 @@ fn message_row(
     pin_actions: bool,
     stamp: &rencord_desktop::Presented,
     reveal_time: bool,
+    photo: Option<std::sync::Arc<Image>>,
+    attachments: Vec<std::sync::Arc<Image>>,
 ) -> impl IntoElement {
     let id = message.id;
     let onyx = palette.ink_chrome;
@@ -3741,7 +3984,7 @@ fn message_row(
     };
     let body_source = body_source
         .lines()
-        .filter(|line| !line.contains("attachment:"))
+        .filter(|line| !line.contains("attachment:") && !line.starts_with("emoji:"))
         .collect::<Vec<_>>()
         .join("\n");
     let group = SharedString::from(format!("row-{id}"));
@@ -3777,6 +4020,15 @@ fn message_row(
         );
     }
     body = body.child(message_blocks(&body_source, id, palette, font_px));
+    for image in attachments {
+        body = body.child(
+            img(image)
+                .w(px(240.))
+                .h(px(120.))
+                .rounded(px(8.))
+                .object_fit(ObjectFit::Cover),
+        );
+    }
     if !reactions.is_empty() {
         let mut pills = h_flex().gap_1().mt(px(2.));
         for reaction in &reactions {
@@ -3917,7 +4169,16 @@ fn message_row(
         .child(if grouped {
             div().w(px(avatar)).h(px(8.)).into_any_element()
         } else {
-            portrait(&name, avatar).into_any_element()
+            photo
+                .map(|image| {
+                    img(image)
+                        .size(px(avatar))
+                        .rounded(px(avatar / 2.))
+                        .into_any_element()
+                })
+                .unwrap_or_else(|| {
+                    letter_face(&name, message.author.id.get(), avatar).into_any_element()
+                })
         })
         .child(body)
         .child(
@@ -4458,6 +4719,77 @@ fn icon(name: &str, size: f32, color: u32) -> Svg {
         .text_color(rgb(color))
 }
 
+fn media_urls(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .filter_map(|line| {
+            if let Some(url) = line.strip_prefix("attachment:") {
+                Some(url.to_owned())
+            } else {
+                line.strip_prefix("emoji:")
+                    .and_then(|id| id.parse::<u64>().ok())
+                    .map(rencord_desktop::emoji_url)
+            }
+        })
+        .collect()
+}
+
+fn cache_file(url: &str) -> std::path::PathBuf {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in url.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    rencord_platform::data_dir()
+        .join("cdn-cache")
+        .join(format!("{hash:016x}.img"))
+}
+
+async fn load_cdn_bytes(url: &str) -> Option<Vec<u8>> {
+    let path = cache_file(url);
+    if let Ok(bytes) = std::fs::read(&path) {
+        if image::load_from_memory(&bytes).is_ok() {
+            return Some(bytes);
+        }
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?;
+    let response = match client.get(url).send().await {
+        Ok(response) => response,
+        Err(err) => {
+            tracing::warn!("cdn image failed: {err}");
+            return None;
+        }
+    };
+    let bytes = response.bytes().await.ok()?;
+    let decoded = image::load_from_memory(&bytes).ok()?;
+    let mut png = Vec::new();
+    decoded
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .ok()?;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, &png);
+    Some(png)
+}
+
+fn letter_face(name: &str, id: u64, size: f32) -> impl IntoElement {
+    let fill = rencord_theme::default_avatar_fill(((id >> 22) % 6) as u8);
+    let letter: String = name.chars().next().unwrap_or('?').to_uppercase().collect();
+    div()
+        .size(px(size))
+        .flex_shrink_0()
+        .rounded(px(size / 2.))
+        .bg(rgb(fill))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(paint(letter, 0xffffff, (size * 0.4).max(10.))) // hex-lint-allow: letter on the default avatar disc
+}
+
 fn portrait(name: &str, size: f32) -> impl IntoElement {
     let bytes: &'static [u8] = match name {
         "Charles" => include_bytes!("../assets/avatars/charles.png"),
@@ -4961,10 +5293,11 @@ fn banner_ink(text: &str, color: u32, size: f32) -> impl IntoElement {
 
 fn date_pill(label: &str, palette: Palette) -> impl IntoElement {
     h_flex()
+        .w_full()
         .items_center()
         .px(px(16.))
         .py(px(8.))
-        .gap(px(8.))
+        .gap(px(12.))
         .child(div().flex_1().h(px(1.)).bg(rgb(palette.line)))
         .child(paint(label, palette.muted, 12.))
         .child(div().flex_1().h(px(1.)).bg(rgb(palette.line)))
@@ -5038,7 +5371,7 @@ fn rich_inlines(inlines: &[Inline], palette: Palette, font_px: f32) -> impl Into
                 return;
             }
             text.push_str(chunk);
-            let mut face = font(palette.font_ui);
+            let mut face = font(UI_FONT);
             face.weight = weight;
             runs.push(TextRun {
                 len: chunk.len(),

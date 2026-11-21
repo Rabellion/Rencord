@@ -39,7 +39,8 @@ tokio.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 tracing.workspace = true
-image = { version = "0.25.1", default-features = false, features = ["png"] }
+reqwest.workspace = true
+image = { version = "0.25.1", default-features = false, features = ["png", "webp"] }
 resvg.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
