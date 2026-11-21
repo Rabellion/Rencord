@@ -1385,13 +1385,39 @@ fn account_page(
             13.,
         ))
         .child(switch_row(
-            view,
+            view.clone(),
             palette,
             "switch-discord",
             "Follow Discord",
             "Read Discord's light or dark choice once. Rencord never sends a theme back.",
             window.shell.prefs.sync_discord,
             |window| window.shell.prefs.sync_discord = !window.shell.prefs.sync_discord,
+        ))
+        .child(
+            h_flex()
+                .gap(px(8.))
+                .child(ghost(
+                    view.clone(),
+                    "add-account",
+                    "Add account",
+                    palette,
+                    |window, cx| window.add_account(cx),
+                ))
+                .child(ghost(
+                    view,
+                    "log-out",
+                    "Log out",
+                    palette,
+                    |window, cx| {
+                        window.shell.close_layers();
+                        window.logout(cx);
+                    },
+                )),
+        )
+        .child(quiet(
+            "Sessions stay in the OS keychain. Log out invalidates the token with Discord.",
+            palette.faint,
+            12.,
         ))
 }
 
