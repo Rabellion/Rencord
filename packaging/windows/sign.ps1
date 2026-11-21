@@ -4,42 +4,39 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
 $pfx = $env:RENCORD_PFX
 $password = $env:RENCORD_PFX_PASSWORD
 $signtool = $env:RENCORD_SIGNTOOL
 if (-not $pfx -or -not $password -or -not $signtool) {
-    Write-Error "RENCORD_PFX, RENCORD_PFX_PASSWORD, and RENCORD_SIGNTOOL must be set"
-    exit 1
+    throw "RENCORD_PFX, RENCORD_PFX_PASSWORD, and RENCORD_SIGNTOOL must be set"
 }
 
 $servers = @(
     "http://timestamp.digicert.com",
-    "http://timestamp.sectigo.com",
-    "http://timestamp.acs.microsoft.com"
+    "http://timestamp.sectigo.com"
 )
 
 foreach ($server in $servers) {
     Write-Host "signing $File via $server"
-    $proc = New-Object System.Diagnostics.Process
-    $proc.StartInfo.FileName = $signtool
-    $proc.StartInfo.Arguments = "sign /fd SHA256 /tr $server /td SHA256 /f `"$pfx`" /p `"$password`" `"$File`""
-    $proc.StartInfo.UseShellExecute = $false
-    $proc.StartInfo.CreateNoWindow = $true
-    $proc.Start() | Out-Null
-    $deadline = (Get-Date).AddSeconds(90)
-    while (-not $proc.HasExited -and (Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 500
-    }
+    $proc = Start-Process -FilePath $signtool -ArgumentList @(
+        "sign", "/fd", "SHA256", "/tr", $server, "/td", "SHA256",
+        "/f", $pfx, "/p", $password, $File
+    ) -PassThru -NoNewWindow
+    $null = Wait-Process -Id $proc.Id -Timeout 90 -ErrorAction SilentlyContinue
+    $proc.Refresh()
     if (-not $proc.HasExited) {
         & taskkill.exe /F /T /PID $proc.Id | Out-Null
         Write-Host "timestamp server timed out: $server"
         continue
     }
     if ($proc.ExitCode -eq 0) {
-        Set-Content -Path $env:RENCORD_TIMESTAMP_FILE -Value $server -Encoding ascii
+        if ($env:RENCORD_TIMESTAMP_FILE) {
+            Set-Content -Path $env:RENCORD_TIMESTAMP_FILE -Value $server -Encoding ascii
+        }
         exit 0
     }
     Write-Host "signtool exit $($proc.ExitCode) via $server"
 }
 
-exit 1
+throw "could not sign $File"
