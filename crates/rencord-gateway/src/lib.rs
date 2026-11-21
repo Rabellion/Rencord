@@ -70,6 +70,8 @@ pub enum GatewayEvent {
         emoji: String,
         remove: bool,
     },
+    /// A `GUILD_MEMBER_LIST_UPDATE` payload. The store interprets the ops.
+    MemberList(serde_json::Value),
     VoiceState(VoiceStateDispatch),
     VoiceServer(VoiceServerUpdate),
     Reconnect,
@@ -86,6 +88,11 @@ pub enum GatewayCommand {
         channel_id: Option<Snowflake>,
         self_mute: bool,
         self_deaf: bool,
+    },
+    /// Opcode 14. Discord replies with `GUILD_MEMBER_LIST_UPDATE`.
+    RequestMemberList {
+        guild_id: u64,
+        channel_id: u64,
     },
     Shutdown,
 }
@@ -290,6 +297,19 @@ async fn run_socket(
                         let payload = voice_state_update(guild_id, channel_id, self_mute, self_deaf);
                         write.send(WsMessage::Text(payload.to_string().into())).await?;
                     }
+                    Some(GatewayCommand::RequestMemberList { guild_id, channel_id }) => {
+                        let payload = serde_json::json!({
+                            "op": 14,
+                            "d": {
+                                "guild_id": guild_id.to_string(),
+                                "typing": true,
+                                "activities": true,
+                                "threads": false,
+                                "channels": { channel_id.to_string(): [[0, 99]] }
+                            }
+                        });
+                        write.send(WsMessage::Text(payload.to_string().into())).await?;
+                    }
                 }
             }
         }
@@ -319,6 +339,7 @@ fn decode_dispatch(name: &str, data: Value) -> Result<Option<GatewayEvent>, Gate
         "CHANNEL_CREATE" | "CHANNEL_UPDATE" => channel_upsert(&data)?,
         "CHANNEL_DELETE" => snowflake_field(&data, "id")?.map(GatewayEvent::ChannelDelete),
         "MESSAGE_REACTION_ADD" | "MESSAGE_REACTION_REMOVE" => reaction(name, &data)?,
+        "GUILD_MEMBER_LIST_UPDATE" => Some(GatewayEvent::MemberList(data)),
         "MESSAGE_DELETE" => {
             let channel_id = data.get("channel_id").cloned().unwrap_or(Value::Null);
             let message_id = data.get("id").cloned().unwrap_or(Value::Null);

@@ -250,6 +250,7 @@ mod tests {
             parent_id: None,
             position: 0,
             recipient_ids: Vec::new(),
+            avatar: None,
         };
     }
 }

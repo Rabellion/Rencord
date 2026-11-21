@@ -2,6 +2,7 @@
 //! without opening a window.
 
 mod breakpoints;
+mod cdn;
 mod icons;
 pub mod layout;
 mod search;
@@ -15,6 +16,10 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 pub use breakpoints::{stacks_login, LOGIN_STACK, MEMBERS_HIDE, MEMBERS_HIDE_ONYX, SIDEBAR_HIDE};
+pub use cdn::{
+    attachment_url, cdn_base, default_avatar_index, default_avatar_url, emoji_url,
+    guild_banner_url, guild_icon_url, member_avatar_url, set_cdn_base, user_avatar_url,
+};
 pub use icons::{
     discord_install_icon_dir, hexwave_png, hexwave_svg_for_px, icon_pack_dir, rail_home_glyph_px,
 };
