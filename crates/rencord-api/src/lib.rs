@@ -346,7 +346,9 @@ impl DiscordApi {
     }
 }
 
-fn url_encode(value: &str) -> String {
+/// Percent-encodes everything but `A-Za-z0-9-_.`, a space as `%20`, so the
+/// result is safe in a URL path segment and in a query string.
+pub fn url_encode(value: &str) -> String {
     let mut out = String::new();
     for byte in value.bytes() {
         match byte {
@@ -372,6 +374,15 @@ fn decode_message(bytes: Vec<u8>) -> Result<Message, ApiError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn url_encode_escapes_spaces_and_non_ascii_for_paths_and_queries() {
+        assert_eq!(super::url_encode("a b"), "a%20b");
+        assert_eq!(super::url_encode("caf\u{e9}"), "caf%C3%A9");
+        assert_eq!(super::url_encode("\u{1F44D}"), "%F0%9F%91%8D");
+        assert_eq!(super::url_encode("Az09-_."), "Az09-_.");
+        assert_eq!(super::url_encode("a&b=c/d"), "a%26b%3Dc%2Fd");
+    }
+
     use super::*;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

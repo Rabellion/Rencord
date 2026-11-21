@@ -147,7 +147,7 @@ pub fn guild_search_path(
 ) -> String {
     let mut pairs = Vec::new();
     if !query.free.is_empty() {
-        pairs.push(format!("content={}", url_encode(&query.free)));
+        pairs.push(format!("content={}", rencord_api::url_encode(&query.free)));
     }
     if let Some(id) = author_id {
         pairs.push(format!("author_id={id}"));
@@ -165,10 +165,10 @@ pub fn guild_search_path(
         pairs.push("has=file".into());
     }
     if let Some(after) = &query.after {
-        pairs.push(format!("min_id={}", url_encode(after)));
+        pairs.push(format!("min_id={}", rencord_api::url_encode(after)));
     }
     if let Some(before) = &query.before {
-        pairs.push(format!("max_id={}", url_encode(before)));
+        pairs.push(format!("max_id={}", rencord_api::url_encode(before)));
     }
     format!(
         "/guilds/{guild_id}/messages/search?{}",
@@ -178,20 +178,6 @@ pub fn guild_search_path(
             pairs.join("&")
         }
     )
-}
-
-fn url_encode(value: &str) -> String {
-    let mut out = String::new();
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
-                out.push(byte as char);
-            }
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -231,6 +217,13 @@ mod tests {
         assert!(general
             .iter()
             .any(|hit| hit.message.content.contains("Rencord")));
+    }
+
+    #[test]
+    fn a_multi_word_query_is_percent_encoded() {
+        let query = parse_message_query("hello world caf\u{e9}");
+        let path = guild_search_path(Snowflake::new(10), &query, None, None);
+        assert!(path.contains("content=hello%20world%20caf%C3%A9"), "{path}");
     }
 
     #[test]
