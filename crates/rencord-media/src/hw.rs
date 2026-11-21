@@ -7,7 +7,9 @@
 //! actually emits bytes on a machine with no GPU.
 
 use crate::encode::EncoderKind;
-use std::ffi::{c_void, CStr, CString};
+#[cfg(unix)]
+use std::ffi::CStr;
+use std::ffi::{c_void, CString};
 use std::path::Path;
 use std::ptr;
 

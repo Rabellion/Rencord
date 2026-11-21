@@ -47,6 +47,7 @@ pub fn open_platform_source(id: &str) -> Result<(), CaptureError> {
 
 #[cfg(target_os = "windows")]
 fn windows_output() -> Result<(), String> {
+    use windows::core::Interface;
     use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, IDXGIOutput1};
     unsafe {
         let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(|err| err.to_string())?;
