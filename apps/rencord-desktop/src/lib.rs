@@ -2,6 +2,7 @@
 //! without opening a window.
 
 mod icons;
+pub mod layout;
 mod search;
 mod theme;
 

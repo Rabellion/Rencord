@@ -67,7 +67,7 @@ pub fn viewer(palette: Palette) -> impl IntoElement {
                 .border_color(rgb(palette.line))
                 .bg(rgb(0x000000))
                 .relative()
-                .child(preview_image(640., 360.))
+                .child(preview_image(0., 0.))
                 .child(stats_overlay(&stats, palette)),
         )
 }
@@ -158,10 +158,18 @@ fn preview_image(width: f32, height: f32) -> impl IntoElement {
         .find(|source| source.id == "synthetic:desktop")
         .expect("preview source");
     let image = Image::from_bytes(ImageFormat::Png, source.thumbnail_png);
-    div()
-        .size_full()
-        .min_h(px(height))
-        .child(img(std::sync::Arc::new(image)).w(px(width)).h(px(height)))
+    let picture = img(std::sync::Arc::new(image));
+    if width <= 0.0 {
+        div()
+            .size_full()
+            .min_h(px(180.))
+            .child(picture.size_full().object_fit(ObjectFit::Contain))
+    } else {
+        div()
+            .size_full()
+            .min_h(px(height))
+            .child(picture.w(px(width)).h(px(height)))
+    }
 }
 
 fn stats_overlay(stats: &rencord_media::StreamStats, palette: Palette) -> impl IntoElement {

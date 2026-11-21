@@ -143,8 +143,8 @@ pub(crate) fn preview_source(
     height: u32,
     backend: CaptureBackend,
 ) -> CaptureSource {
-    let mut pixels = vec![0u8; 160 * 90 * 4];
-    paint_preview(&mut pixels, 160, 90, 3, title);
+    let mut pixels = vec![0u8; 320 * 180 * 4];
+    paint_desktop_still(&mut pixels, 320, 180);
     CaptureSource {
         id: id.to_owned(),
         kind,
@@ -152,7 +152,51 @@ pub(crate) fn preview_source(
         width,
         height,
         backend,
-        thumbnail_png: encode_png(&pixels, 160, 90),
+        thumbnail_png: encode_png(&pixels, 320, 180),
+    }
+}
+
+/// A still of a desktop window for the picker and the stream viewer.
+/// Live frames stay on [`paint_preview`]; this is not that bar pattern.
+pub(crate) fn paint_desktop_still(bgra: &mut [u8], width: u32, height: u32) {
+    fill_rect(bgra, width, 0, 0, width, height, (22, 24, 32));
+    let x0 = width / 12;
+    let y0 = height / 10;
+    let x1 = width - width / 12;
+    let y1 = height - height / 12;
+    fill_rect(bgra, width, x0, y0, x1, y1, (14, 16, 24));
+    fill_rect(bgra, width, x0, y0, x0 + 4, y1, (79, 107, 255));
+    fill_rect(bgra, width, x0, y0, x1, y0 + height / 12, (32, 36, 52));
+    let lines = [0.72_f32, 0.55, 0.64, 0.38];
+    for (index, portion) in lines.iter().enumerate() {
+        let y = y0 + height / 7 + index as u32 * (height / 14);
+        let line_h = (height / 28).max(3);
+        let line_w = ((x1 - x0 - 24) as f32 * portion) as u32;
+        fill_rect(
+            bgra,
+            width,
+            x0 + 16,
+            y,
+            x0 + 16 + line_w,
+            y + line_h,
+            (168, 174, 196),
+        );
+    }
+}
+
+fn fill_rect(bgra: &mut [u8], stride: u32, x0: u32, y0: u32, x1: u32, y1: u32, rgb: (u8, u8, u8)) {
+    let height = bgra.len() as u32 / (stride * 4).max(1);
+    for y in y0..y1.min(height) {
+        for x in x0..x1.min(stride) {
+            let i = ((y * stride + x) * 4) as usize;
+            if i + 3 >= bgra.len() {
+                return;
+            }
+            bgra[i] = rgb.2;
+            bgra[i + 1] = rgb.1;
+            bgra[i + 2] = rgb.0;
+            bgra[i + 3] = 255;
+        }
     }
 }
 
