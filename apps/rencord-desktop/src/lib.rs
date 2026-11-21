@@ -14,8 +14,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 pub use icons::{
-    discord_install_icon_dir, hexwave_svg_for_px, icon_pack_dir, rail_hexwave_rgba,
-    rail_home_glyph_px,
+    discord_install_icon_dir, hexwave_png, hexwave_svg_for_px, icon_pack_dir, rail_home_glyph_px,
 };
 pub use search::{guild_search_path, local_search, parse_message_query, MessageQuery, SearchHit};
 pub use theme::{
