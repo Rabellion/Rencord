@@ -397,6 +397,9 @@ struct RencordWindow {
     voice_status: Option<std::sync::mpsc::Receiver<String>>,
     /// Guilds and channels whose channels or history were already requested.
     requested: HashSet<Snowflake>,
+    loading_older: Option<Snowflake>,
+    /// Channels whose history has reached the first message.
+    history_start: HashSet<Snowflake>,
     login_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     remote_generation: u64,
     booted: bool,
@@ -609,6 +612,8 @@ impl RencordWindow {
             voice_cmd: None,
             voice_status: None,
             requested: HashSet::new(),
+            loading_older: None,
+            history_start: HashSet::new(),
             login_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             remote_generation: 0,
             booted: preview.is_some(),
@@ -1275,6 +1280,8 @@ impl RencordWindow {
         self.api = None;
         self.gateway = None;
         self.requested.clear();
+        self.loading_older = None;
+        self.history_start.clear();
     }
 
     /// Loads what the selection needs the first time it is shown: a guild's
@@ -1339,6 +1346,69 @@ impl RencordWindow {
                 .detach();
             }
         }
+    }
+
+    /// One older page when the timeline is at the top. Not called again until
+    /// this page returns, and not at all once a short page marks the start.
+    fn scroll_back(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.api.clone() else {
+            return;
+        };
+        let Some(channel) = self.shell.session.selected_channel else {
+            return;
+        };
+        if self.loading_older.is_some() || self.history_start.contains(&channel) {
+            return;
+        }
+        if !self.requested.contains(&channel) {
+            return;
+        }
+        let Some(oldest) = self
+            .shell
+            .session
+            .messages_for(channel)
+            .first()
+            .map(|message| message.id)
+        else {
+            return;
+        };
+        self.loading_older = Some(channel);
+        cx.notify();
+        let task =
+            net::runtime().spawn(async move { api.messages_before(channel, oldest, 50).await });
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = task.await else {
+                return;
+            };
+            this.update(cx, |view, cx| {
+                if view.loading_older == Some(channel) {
+                    view.loading_older = None;
+                }
+                match result {
+                    Ok(history) => {
+                        if history.len() < 50 {
+                            view.history_start.insert(channel);
+                        }
+                        let top = view.timeline.logical_scroll_top();
+                        let anchor = top.item_ix.saturating_sub(1);
+                        let prepended = view.shell.session.merge_older(channel, history);
+                        let count = view.shell.session.messages_for(channel).len();
+                        view.timeline.reset(count);
+                        view.timeline.scroll_to(ListOffset {
+                            item_ix: anchor + prepended,
+                            offset_in_item: top.offset_in_item,
+                        });
+                    }
+                    Err(err) => view.shell.note(format!(
+                        "Could not load earlier messages: {}",
+                        rencord_auth::redact(&err.to_string())
+                    )),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn reopen_audio(&mut self) {
@@ -2034,7 +2104,8 @@ impl RencordWindow {
         }
         sidebar = sidebar.child(nav);
 
-        let count = messages.len();
+        let count =
+            messages.len() + usize::from(self.loading_older == self.shell.session.selected_channel);
         if self.timeline.item_count() != count {
             self.timeline.reset(count);
         }
@@ -2055,14 +2126,39 @@ impl RencordWindow {
         let list_entity = this.clone();
         let list_reactions = reactions.clone();
         let reveal_hover = self.reveal_hover;
+        let loading_older = self.loading_older == self.shell.session.selected_channel;
         let _density = density;
+        {
+            let view = cx.entity();
+            self.timeline.set_scroll_handler(move |event, _window, cx| {
+                if event.visible_range.start == 0 && event.is_scrolled {
+                    view.update(cx, |this, cx| this.scroll_back(cx));
+                }
+            });
+        }
         let timeline = list(timeline_state, move |index, _window, _cx| {
-            let Some(message) = list_messages.get(index).cloned() else {
+            let message_index = if loading_older {
+                if index == 0 {
+                    return div()
+                        .h(px(28.))
+                        .px(px(16.))
+                        .flex()
+                        .items_center()
+                        .text_size(px(12.))
+                        .text_color(rgb(list_palette.muted))
+                        .child("Loading earlier messages")
+                        .into_any_element();
+                }
+                index - 1
+            } else {
+                index
+            };
+            let Some(message) = list_messages.get(message_index).cloned() else {
                 return div().into_any_element();
             };
-            let grouped = index > 0
+            let grouped = message_index > 0
                 && list_messages
-                    .get(index - 1)
+                    .get(message_index - 1)
                     .is_some_and(|previous| previous.author.id == message.author.id);
             message_row(
                 list_entity.clone(),
