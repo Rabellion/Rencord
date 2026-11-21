@@ -1,8 +1,8 @@
 //! HDR detection and the SDR fallback.
 //!
 //! A 10-bit or PQ source is tone-mapped to 8-bit BT.709 before encode.
-//! `RENCORD_HDR_WIRE=1` records that a later milestone may send 10-bit between
-//! two Rencord clients. The wire format itself is not implemented.
+//! `planned_pixel_path` asks `rencord-hdr` what a Rencord audience could receive.
+//! `output_path` does not use that answer, so the worker stays on 8-bit.
 
 use crate::frame::HdrFlags;
 use crate::preset::PixelPath;
@@ -20,9 +20,49 @@ pub fn hdr_wire_format() -> Result<&'static str, &'static str> {
     }
 }
 
+/// Ask `rencord-hdr` which Discord track this audience should get.
+///
+/// `output_path` stays the worker's actual choice and still tone-maps. This
+/// function is the hook for a later change that would put 10-bit on the wire
+/// only when send and receive are on, every viewer advertised HDR, and the
+/// caller sets `sfu_proven`. That flag is not set by this crate.
+pub fn planned_pixel_path(
+    flags: HdrFlags,
+    send: bool,
+    receive: bool,
+    sfu_proven: bool,
+) -> PixelPath {
+    use rencord_hdr::{
+        AudienceMember, DiscordTrack, HdrCapability, HdrSession, HdrSignal, SourceColorimetry,
+        ToneCurve,
+    };
+    if !flags.is_hdr() {
+        return PixelPath::Sdr;
+    }
+    let mut session = HdrSession::from_settings(send, receive, ToneCurve::Bt2390);
+    session.sfu_hdr_passthrough_proven = sfu_proven;
+    if receive {
+        session
+            .audience
+            .push(AudienceMember::Rencord(HdrCapability::advertise(
+                true, false, 1000,
+            )));
+    } else {
+        session.audience.push(AudienceMember::OfficialOrUnknown);
+    }
+    match session
+        .plan(&SourceColorimetry::hdr10(1000.0))
+        .discord_track
+    {
+        DiscordTrack::Hdr10 => PixelPath::RencordHdr10,
+        DiscordTrack::Sdr => PixelPath::Sdr,
+        DiscordTrack::ToneMappedSdr => PixelPath::ToneMapHdrToSdr,
+    }
+}
+
 pub fn output_path(flags: HdrFlags) -> PixelPath {
-    // The wire flag does not change the path. 10-bit between Rencord clients
-    // is still tone-mapped until the later milestone defines the packet format.
+    // The wire flag does not change this path. `planned_pixel_path` is the
+    // separate decision, and this encode stays 8-bit.
     if flags.is_hdr() {
         PixelPath::ToneMapHdrToSdr
     } else {
@@ -57,5 +97,34 @@ mod tests {
             PixelPath::ToneMapHdrToSdr
         );
         assert_eq!(output_path(HdrFlags::default()), PixelPath::Sdr);
+    }
+
+    #[test]
+    fn planned_path_follows_the_hdr_signal_and_stays_stricter_than_viewer_kind() {
+        let hdr = HdrFlags {
+            ten_bit: true,
+            pq: true,
+        };
+        assert_eq!(
+            planned_pixel_path(HdrFlags::default(), true, true, true),
+            PixelPath::Sdr
+        );
+        assert_eq!(
+            planned_pixel_path(hdr, true, true, false),
+            PixelPath::ToneMapHdrToSdr
+        );
+        assert_eq!(
+            planned_pixel_path(hdr, true, false, true),
+            PixelPath::ToneMapHdrToSdr
+        );
+        assert_eq!(
+            planned_pixel_path(hdr, false, true, true),
+            PixelPath::ToneMapHdrToSdr
+        );
+        assert_eq!(
+            planned_pixel_path(hdr, true, true, true),
+            PixelPath::RencordHdr10
+        );
+        assert_eq!(output_path(hdr), PixelPath::ToneMapHdrToSdr);
     }
 }

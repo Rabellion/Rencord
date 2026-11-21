@@ -25,6 +25,7 @@ gpui-kit.workspace = true
 rencord-api.workspace = true
 rencord-gateway.workspace = true
 rencord-markdown.workspace = true
+rencord-hdr.workspace = true
 rencord-media.workspace = true
 rencord-model.workspace = true
 rencord-platform.workspace = true

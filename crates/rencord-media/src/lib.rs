@@ -35,7 +35,9 @@ pub use encode::{
 };
 pub use frame::{encode_png, Frame, HdrFlags};
 pub use golive::{GoLive, StreamPhase, StreamStats};
-pub use hdr::{hdr_wire_enabled, hdr_wire_format, output_path, tone_map_pq_to_sdr};
+pub use hdr::{
+    hdr_wire_enabled, hdr_wire_format, output_path, planned_pixel_path, tone_map_pq_to_sdr,
+};
 pub use hw::{probe_all, usable_encoder, EncoderProbe};
 pub use ipc::{ClientMessage, WorkerMessage};
 pub use loopback::loopback_frame;

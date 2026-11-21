@@ -230,6 +230,40 @@ pub const TYPE_SCALE: [f32; 5] = [11.0, 13.0, 15.0, 18.0, 24.0];
 
 pub const FONT_STEPS: [f32; 3] = [13.0, 15.0, 17.0];
 
+/// Settings choice for the HDR-to-SDR curve. Defaults to the BT.2390 EETF.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HdrCurveChoice {
+    Bt2390,
+    Hable,
+    Aces,
+}
+
+impl HdrCurveChoice {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bt2390 => "BT.2390",
+            Self::Hable => "Hable",
+            Self::Aces => "ACES",
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Bt2390 => Self::Hable,
+            Self::Hable => Self::Aces,
+            Self::Aces => Self::Bt2390,
+        }
+    }
+
+    pub fn tone_curve(self) -> rencord_hdr::ToneCurve {
+        match self {
+            Self::Bt2390 => rencord_hdr::ToneCurve::Bt2390,
+            Self::Hable => rencord_hdr::ToneCurve::Hable,
+            Self::Aces => rencord_hdr::ToneCurve::Aces,
+        }
+    }
+}
+
 /// Motion: hover 80ms, overlay 140ms, layout 180ms. Ease-out cubic.
 pub const MOTION_HOVER_MS: u64 = 80;
 pub const MOTION_OVERLAY_MS: u64 = 140;
@@ -259,6 +293,11 @@ pub struct Preferences {
     pub stats_hud: bool,
     pub input_device: Option<String>,
     pub output_device: Option<String>,
+    /// Offer a 10-bit track when every viewer is a Rencord peer that asked for it.
+    pub hdr_send: bool,
+    /// Accept a 10-bit track and present it on an HDR display when one is reported.
+    pub hdr_receive: bool,
+    pub hdr_curve: HdrCurveChoice,
 }
 
 impl Default for Preferences {
@@ -279,6 +318,9 @@ impl Default for Preferences {
             stats_hud: false,
             input_device: None,
             output_device: None,
+            hdr_send: false,
+            hdr_receive: false,
+            hdr_curve: HdrCurveChoice::Bt2390,
         }
     }
 }

@@ -46,7 +46,7 @@ Several native Rust clients already exist. Rencord is aimed at the gaps that sho
 | **Voice cut-outs** | Adaptive jitter target from 40&nbsp;ms to 120&nbsp;ms, Opus PLC and in-band FEC, and a one-frame time-stretch instead of a hard skip. A loss simulation beats a fixed 40&nbsp;ms / 8-slot window at 1.5% and 5% loss. | Not measured on a live Discord call. Acoustic echo cancellation and noise suppression are not included. |
 | **Interface** | GPUI Kit 0.10. Direction A layout. The default theme is Onyx Ink: a true-black canvas, `#15152A` hairlines, 8 px gaps, a `#4F6BFF` accent with black ink on the banner, Inter for the UI, and JetBrains Mono for timestamps and status. Dark (Crisp Minimal), Ash, and Light stay selectable. Ctrl/Cmd+K, density, and type size are in settings. The same four columns reflow for 16:9, 16:10, 21:9, 32:9, portrait, and small windows. No Nitro surface. | Not a screen-reader pass. Plugins are still out. Layouts B and C remain behind `--layout`. |
 | **Streaming** | In progress. Preview capture, the out-of-process worker, software encode, RTP, DAVE video wrap, and the Onyx picker/viewer/PiP are in the tree. VA-API and oneVPL are opened with `dlopen` when a device exists. A wide window shows the viewer only while a stream is open. | No GPU session on the CI machine, so hardware encode does not emit frames. The portal consent dialog, Windows Graphics Capture, and ScreenCaptureKit are not producing frames here. x264 is GPL and is not loaded. Discord may still reject a preset. |
-| **HDR** | Policy code tone-maps HDR to SDR unless both peers are Rencord and an SFU passthrough test has succeeded. That test has not been run. | No HDR capture. |
+| **HDR** | `rencord-hdr` tone-maps with BT.2390, Hable, or ACES, writes HDR10 SEI/OBU metadata, and classifies DXGI, ScreenCaptureKit, Wayland, PipeWire, and EDID descriptors. Settings can opt in. The Go Live worker still tone-maps before encode. A 10-bit Discord track needs every viewer to advertise Rencord HDR and a caller to set the SFU flag. That flag is not set. | No NVENC/AMF/QSV/VideoToolbox/VA-API encode session that emits frames, no HEVC/AV1 decoder, no test against Discord's servers. |
 
 Serein, Concord, and Yapfast are further along as daily drivers. Milestone 1 is the shell and the text path. Milestone 2 adds a voice websocket and UDP session, tested against a local stub, with mute, deafen, and gain. Milestone 3 is the quieter window described in [docs/design/UX.md](docs/design/UX.md). None of this has been signed into a real Discord voice server.
 
@@ -87,7 +87,7 @@ Honest status for this repository. "Implemented" means the code path and tests e
 | DAVE (E2EE) | Implemented | `davey` 0.2. Two-member MLS encrypt/decrypt test. Opcode routing keeps the transport up when a welcome fails. |
 | Adaptive jitter buffer | Implemented | See [Voice](#voice). |
 | Screen share / camera / Go Live | In progress | Worker, software encode, RTP, DAVE wrap, and `--golive` screens. VA-API and oneVPL are initialized when a device exists. This machine has no GPU session, so those encoders do not emit frames. PipeWire, Windows Graphics Capture, and ScreenCaptureKit do not produce frames yet. |
-| HDR | Policy only | Tone-map to SDR by default. |
+| HDR | Software path | Tone-map, 10-bit metadata, probes, and signalling. See [HDR](docs/design/HDR.md). The worker still tone-maps. Hardware encode and Discord passthrough are not linked. |
 | Notifications, keyring, tray, hotkeys | Stub | In-process notification sink. OS keyring is the intended next store; Milestone 1 uses the private file. |
 | Themes, density, quick switcher | Implemented | Onyx Ink is the default. Dark, Ash, and Light remain. Compact, Cozy, and Spacious. Direction A is the default; B and C stay behind `--layout`. Ctrl/Cmd+K. Alt+arrows move channels. |
 | Responsive layout | Implemented | Breakpoints use width, height, and aspect ratio. 16:9 and 16:10 keep the four columns, including 1440×900, 1366×768, 1280×800, and 1280×720. 21:9 and 32:9 cap the message measure and leave the spare width as a gutter unless a stream, thread, or profile panel is open. Portrait keeps a narrow rail, a channel button, and drawers for channels and members. Column edges drag, double-click resets, and widths are stored per aspect and scale. `--window WxH` and `--scale` open a sized window. |
@@ -126,7 +126,7 @@ cargo run -p rencord-desktop --bin rencord-measure -- --offline
 | Next / previous server | Ctrl+Alt+Down / Ctrl+Alt+Up |
 | Settings | Ctrl+, or Cmd+, or the Settings button |
 
-Settings switches theme (Onyx Ink, dark, ash, light), density (compact 28 px rows, cozy 32 px, spacious 36 px), and type size (13, 15, or 17 px). It lists cpal input and output names, shows the last loopback jitter line, and states that Go Live defaults to 720p30. There is no Nitro row.
+Settings switches theme (Onyx Ink, dark, ash, light), density (compact 28 px rows, cozy 32 px, spacious 36 px), and type size (13, 15, or 17 px). It lists cpal input and output names, shows the last loopback jitter line, and states that Go Live defaults to 720p30. The HDR row (Send, Receive, curve) is off by default. It configures the tone-map and the Rencord-to-Rencord plan. It does not start a capture. There is no Nitro row.
 
 ## Measured on this machine
 
@@ -139,6 +139,16 @@ Release build, `rencord --demo --bench`, Linux, X11, software GL, about 800 cach
 | Cached channel switch | < 50 ms | 669 ns average over 200 session switches. On-screen switches in the bench were 0–3 µs. |
 | Frame gap | About one 60 Hz frame | p50 16.7 ms over 23 frames while the bench changed channel every frame. |
 | Release binary | < 80 MB | 63 MB. The unstripped debug binary is 840 MB and is not the shipping build. |
+
+HDR tone-map, same machine, `cargo bench -p rencord-hdr --bench throughput`, one thread, 1920×1080, release. The number includes the BT.2020 to BT.709 matrix. BT.2390 uses a 4096-entry PQ table; the f64 EETF is the accuracy reference, not the per-pixel path.
+
+| Curve | 1080p frame | Throughput |
+| --- | ---: | ---: |
+| BT.2390 | 87.7 ms | 23.7 Mpix/s |
+| Hable | 15.6 ms | 133 Mpix/s |
+| ACES | 12.6 ms | 165 Mpix/s |
+
+HDR10 SEI and the AV1 metadata OBUs together take 0.31 µs. BT.2390 is not a 60 fps 1080p grade on this core. Details and the samples the tests lock are in [docs/design/HDR.md](docs/design/HDR.md).
 
 `RENCORD_DATA_DIR` overrides the data directory. The default is `$XDG_DATA_HOME/rencord` or `~/.local/share/rencord`.
 
@@ -221,6 +231,7 @@ rencord/
     ├── rencord-markdown/     UI-free Discord markdown AST
     ├── rencord-voice/        RTP, transport AEAD, DAVE, Opus, jitter
     ├── rencord-media/        Stream presets, HDR policy, worker messages
+    ├── rencord-hdr/          HDR probes, tone-map, 10-bit metadata, signalling
     └── rencord-platform/     Data dir, token file, login requirements
 ```
 
@@ -238,10 +249,10 @@ The UI does not embed egui. Protocol crates do not depend on GPUI.
 | 4. Threads, search, uploads, notifications | Not started | OS keyring behind the existing `SecretStore` trait. |
 | 5. Voice against Discord | Not started | Point `LiveCall` at a real voice server and keep DAVE rekeys without dropping the call. |
 | 6. Go Live | In progress | Preview frames, `rencord-stream`, software encode, RTP, DAVE wrap, and `--golive` screens are on `main`. VA-API, oneVPL, NVENC, AMF, and VideoToolbox are probed by loading the system library and opening a session. They do not encode until a GPU session succeeds. Real Windows Graphics Capture, ScreenCaptureKit, and a PipeWire consumer are not producing frames yet. 120 fps is offered only when the display reports that refresh and the encoder sustains the budget. |
-| 7. HDR between Rencord users | Not started | Tone-map to BT.709 8-bit unless both peers are Rencord and an SFU passthrough test has succeeded. |
+| 7. HDR between Rencord users (Milestone 5) | Software path | `rencord-hdr`: detection traits, BT.2390/Hable/ACES, HEVC Main10 and AV1 10-bit parameter blocks with HDR10 SEI/OBU, opt-in signalling, SDR fallback. `planned_pixel_path` is the hook the worker can call. `output_path` still tone-maps, so a running Go Live preview stays 8-bit. A Discord SFU test is not included. [docs/design/HDR.md](docs/design/HDR.md). |
 | 8. Files over the attachment cap | Not started | Discord enforces the upload size on the server, so the client cannot lift it. When a file is over the account cap, one dialog offers a saved default: re-encode video or downscale images to fit, upload to Litterbox, Catbox, or a host the user configures and post the link (Rencord shows an inline preview), or split the file into parts. |
 
-HDR stays policy-only until that milestone. The UI must not promise that Discord will accept a Go Live preset. The capture worker publishes preview frames; it does not send them to Discord.
+The UI must not promise that Discord will accept a Go Live preset or a 10-bit stream. The capture worker publishes preview frames and tone-maps HDR to 8-bit. It does not send them to Discord. A 10-bit track stays off until a caller has proof the SFU forwarded HDR. There is no such proof in this repository.
 
 ## FAQ
 

@@ -5,7 +5,7 @@ The window should feel quieter than Discord and cheaper to run. This document is
 ## Principles
 
 1. **One job per region.** The rail is servers. The sidebar is channels. The center is the conversation. The right column is people. Voice sits in a card, not across the whole window.
-2. **No upsells.** There is no Nitro shop, gift button, quest, boost banner, or "upgrade" row. Go Live defaults to 720p30. Higher presets stay in the list, and the settings screen says Discord may still reject them.
+2. **No upsells.** There is no Nitro shop, gift button, quest, boost banner, or "upgrade" row. Go Live defaults to 720p30. Higher presets stay in the list, and the settings screen says Discord may still reject them. The HDR chips set a plan. They do not start a stream and they do not claim Discord will carry 10-bit.
 3. **Keyboard first.** Ctrl/Cmd+K opens the quick switcher. Alt+Up/Down moves channels. Ctrl/Cmd+Alt+Up/Down moves servers. Esc closes the switcher and settings. Ctrl/Cmd+, opens settings.
 4. **The list does not draw what is off screen.** Messages use GPUI's virtual list. A row can grow for a code block, an embed, or an attachment.
 5. **Themes are data.** Onyx Ink, dark, ash, and light are token sets. Switching them does not rebuild the session.
@@ -76,6 +76,7 @@ These are recurring complaints from Discord's own feedback channels, client revi
 | Notification overload | Badges, pings, and inbox items stack | This milestone does not add a badge or a toast. The in-process notification sink from earlier milestones is unchanged. |
 | Cramped compact mode | Compact still keeps uneven padding and hover chrome | Compact is one shorter row height, not a second layout. |
 | Buried devices | Input and output are several settings pages down | Settings lists the cpal device names and remembers the choice. Opening the call still uses the default devices; the stored name is not yet passed to cpal. |
+| HDR buried behind a Nitro toggle, or promised on a client that cannot show it | Official clients are 8-bit. A switch that says "HDR" with no fallback lies | Settings has Send, Receive, and the tone-map curve on one row. Send and Receive start off. The line under them says the Discord track stays tone-mapped SDR for an unknown audience. The Go Live worker still tone-maps before encode. The row uses the Onyx field: `#000000`, a `#15152A` hairline, `#4F6BFF` when a chip is on, JetBrains Mono at 11 px. |
 
 ## Budgets and measurements
 
@@ -97,6 +98,16 @@ cargo run -p rencord-desktop --bin rencord-measure -- --offline
 ```
 
 The responsive pass measured the breakpoint function and a live resize sweep on llvmpipe (Xvfb, refresh unreported). `layout_resolve` was **95 ns** per size. Channel-switch frame p50 was **48.0 ms** and the resize sweep was **p50 25.6 ms**, **p95 154 ms**, with the slow tail on the 5120-wide frames. Startup was **109 ms** and RSS **139 MiB**. The 16.7 ms row above is the earlier software-GL run; this machine's present path did not hold that rate. The column math is not the cost.
+
+## HDR row
+
+Not a stream. The three chips live in the settings card, under the device lists:
+
+- **Send** defaults off. On means the user is willing to offer 10-bit to Rencord peers. Official clients, unknown clients, and a mixed audience still get tone-mapped SDR. One Go Live track cannot be both.
+- **Receive** defaults off. On means this client will present 10-bit PQ on a display whose transfer is PQ or HLG and whose peak is above 200 cd/m², or scRGB when the display is linear and that bright. Any other display gets the tone-map. GPUI's swapchain is not an HDR surface, so the present path returns pixels and a surface name. It does not create the swapchain.
+- **Curve** cycles BT.2390 (default), Hable, and ACES.
+
+The copy under the chips is computed from that plan for a hypothetical 1 000 cd/m² BT.2020 master. It includes the sentence that the Go Live worker still tone-maps HDR to 8-bit. A second line is the local probe: EDID from sysfs on Linux when a connector exposes it, otherwise a note that DXGI or ScreenCaptureKit was not opened. The full limits, including what Discord's servers may strip, are in [HDR.md](HDR.md).
 
 ## Later: files over the attachment cap
 
@@ -120,5 +131,5 @@ Layout presets A, B, and C are compared in [DIRECTIONS.md](DIRECTIONS.md). A is 
 - The device row records a name. Capture and playback still open cpal's default devices.
 - Search does not cross channels, and it does not query Discord.
 - Light, Dark, and Ash switch live. The captures in the README are Onyx Ink.
-- Go Live's picker, viewer, and picture-in-picture use preview frames. The safe preset is 720p30. A 10-bit or PQ source is tone-mapped to 8-bit. The Rencord-to-Rencord HDR packet format is not in this build.
+- Go Live's picker, viewer, and picture-in-picture use preview frames. The safe preset is 720p30. A 10-bit or PQ source is tone-mapped to 8-bit before that encode. The HDR chips do not open a capture. Send and Receive start off.
 - Keyboard bindings need the window focused. They are not a screen-reader pass.

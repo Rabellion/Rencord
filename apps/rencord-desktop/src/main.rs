@@ -26,6 +26,7 @@ use gpui_kit::*;
 use rencord_desktop::{Density, Palette, Shell, ThemeMode, MOTION_OVERLAY_MS};
 
 mod golive;
+mod hdr_ui;
 use rencord_markdown::{parse, Block, Inline};
 use rencord_model::{Message, Snowflake};
 
@@ -2291,13 +2292,49 @@ impl RencordWindow {
                 .child(Label::new("Input device"))
                 .child(device_list(this.clone(), inputs, chosen_in, true, palette))
                 .child(Label::new("Output device"))
-                .child(device_list(this, outputs, chosen_out, false, palette))
+                .child(device_list(this.clone(), outputs, chosen_out, false, palette))
                 .child(
                     div()
                         .text_size(px(13.))
                         .text_color(rgb(palette.muted))
                         .child(Label::new(jitter)),
                 )
+                .child(hdr_ui::hdr_settings_block(
+                    palette,
+                    hdr_ui::HdrSettingsModel {
+                        send: self.shell.prefs.hdr_send,
+                        receive: self.shell.prefs.hdr_receive,
+                        curve: self.shell.prefs.hdr_curve.label().to_string(),
+                        summary: self.shell.hdr_settings_summary(),
+                    },
+                    {
+                        let view = this.clone();
+                        move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.shell.toggle_hdr_send();
+                                cx.notify();
+                            });
+                        }
+                    },
+                    {
+                        let view = this.clone();
+                        move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.shell.toggle_hdr_receive();
+                                cx.notify();
+                            });
+                        }
+                    },
+                    {
+                        let view = this;
+                        move |_, _, cx| {
+                            view.update(cx, |this, cx| {
+                                this.shell.cycle_hdr_curve();
+                                cx.notify();
+                            });
+                        }
+                    },
+                ))
                 .child(
                     div()
                         .text_size(px(12.))
