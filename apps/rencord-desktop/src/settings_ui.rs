@@ -120,7 +120,11 @@ fn nav(view: Entity<RencordWindow>, palette: Palette, page: SettingsPage) -> imp
                 .child(
                     v_flex()
                         .child(strong("Rencord", palette.text, 14.))
-                        .child(quiet("Settings", palette.muted, 12.)),
+                        .child(quiet(
+                            concat!("Settings · ", env!("CARGO_PKG_VERSION")),
+                            palette.muted,
+                            12.,
+                        )),
                 ),
         )
         .child(div().px(px(16.)).pt(px(8.)).pb(px(6.)).child(quiet(

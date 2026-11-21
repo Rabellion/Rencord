@@ -1,6 +1,6 @@
 [package]
 name = "rencord-protocol"
-version = "0.1.0"
+version.workspace = true
 description = "Discord gateway and voice wire payloads for Rencord"
 edition.workspace = true
 license.workspace = true

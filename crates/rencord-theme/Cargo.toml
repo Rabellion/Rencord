@@ -1,6 +1,6 @@
 [package]
 name = "rencord-theme"
-version = "0.1.0"
+version.workspace = true
 description = "Semantic appearance tokens, presets, and custom themes for Rencord"
 edition.workspace = true
 license.workspace = true

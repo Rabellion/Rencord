@@ -1,6 +1,6 @@
 [package]
 name = "rencord-api"
-version = "0.1.0"
+version.workspace = true
 description = "Discord REST client used by Rencord"
 edition.workspace = true
 license.workspace = true

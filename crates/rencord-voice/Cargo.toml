@@ -1,6 +1,6 @@
 [package]
 name = "rencord-voice"
-version = "0.1.0"
+version.workspace = true
 description = "Discord voice session, DAVE, and the adaptive jitter buffer"
 edition.workspace = true
 license.workspace = true

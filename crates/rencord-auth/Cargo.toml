@@ -1,6 +1,6 @@
 [package]
 name = "rencord-auth"
-version = "0.1.0"
+version.workspace = true
 description = "Discord sign-in for Rencord: remote auth, the login page, and the OS keychain"
 edition.workspace = true
 license.workspace = true

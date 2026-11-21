@@ -1,6 +1,6 @@
 [package]
 name = "rencord-upload"
-version = "0.1.0"
+version.workspace = true
 description = "Big-file flow when a Discord attachment is over the account cap"
 edition.workspace = true
 license.workspace = true

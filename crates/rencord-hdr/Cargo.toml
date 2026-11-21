@@ -1,6 +1,6 @@
 [package]
 name = "rencord-hdr"
-version = "0.1.0"
+version.workspace = true
 description = "HDR capture probes, 10-bit encode contracts, tone-mapping, and Rencord-to-Rencord signalling"
 edition.workspace = true
 license.workspace = true

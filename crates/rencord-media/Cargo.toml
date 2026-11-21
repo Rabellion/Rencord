@@ -1,6 +1,6 @@
 [package]
 name = "rencord-media"
-version = "0.1.0"
+version.workspace = true
 description = "Go Live capture, shared-memory frames, and the stream worker"
 edition.workspace = true
 license.workspace = true
@@ -13,10 +13,8 @@ name = "rencord-stream"
 path = "src/bin/rencord-stream.rs"
 
 [dependencies]
-ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
 memmap2 = "0.9"
 openh264 = "0.8"
-pipewire = "0.10"
 rencord-hdr.workspace = true
 rencord-model.workspace = true
 rencord-protocol.workspace = true
@@ -25,6 +23,10 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
+pipewire = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [

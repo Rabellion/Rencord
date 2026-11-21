@@ -1,6 +1,6 @@
 [package]
 name = "rencord-desktop"
-version = "0.1.0"
+version.workspace = true
 description = "GPUI desktop shell for Rencord"
 edition.workspace = true
 license.workspace = true

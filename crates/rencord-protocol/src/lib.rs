@@ -91,10 +91,14 @@ impl GatewayFrame {
     }
 }
 
-pub const CLIENT_VERSION: &str = "0.1.0";
+pub const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Same agent string the REST client sends. Login and the gateway share it.
-pub const USER_AGENT: &str = "Rencord (https://github.com/Rabellion/Rencord, 0.1.0)";
+pub const USER_AGENT: &str = concat!(
+    "Rencord (https://github.com/Rabellion/Rencord, ",
+    env!("CARGO_PKG_VERSION"),
+    ")"
+);
 
 /// Locale in the `en-US` shape Discord expects. `LANG` is the only source.
 pub fn discord_locale() -> String {

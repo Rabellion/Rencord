@@ -1,6 +1,6 @@
 [package]
 name = "rencord-gateway"
-version = "0.1.0"
+version.workspace = true
 description = "Discord gateway session for Rencord"
 edition.workspace = true
 license.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "rencord-platform"
-version = "0.1.0"
+version.workspace = true
 description = "OS integration points for Rencord: secrets, paths, notifications"
 edition.workspace = true
 license.workspace = true

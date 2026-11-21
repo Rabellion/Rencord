@@ -8,8 +8,6 @@
 
 use crate::encode::EncoderKind;
 use std::ffi::{c_void, CStr, CString};
-use std::fs::OpenOptions;
-use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::ptr;
 
@@ -169,6 +167,24 @@ fn probe_videotoolbox() -> EncoderProbe {
 
 fn probe_vaapi() -> EncoderProbe {
     let kind = EncoderKind::Vaapi;
+    #[cfg(not(target_os = "linux"))]
+    {
+        return EncoderProbe {
+            kind,
+            usable: false,
+            detail: "VA-API is the Linux encoder. This process is not Linux.".into(),
+        };
+    }
+    #[cfg(target_os = "linux")]
+    {
+        probe_vaapi_linux(kind)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn probe_vaapi_linux(kind: EncoderKind) -> EncoderProbe {
+    use std::fs::OpenOptions;
+    use std::os::fd::AsRawFd;
     let node = match first_render_node() {
         Ok(node) => node,
         Err(err) => {
@@ -325,7 +341,7 @@ fn dlopen(names: &[&str]) -> Result<*mut c_void, String> {
     let mut last = String::from("no candidate library");
     for name in names {
         let path = CString::new(*name).map_err(|err| err.to_string())?;
-        let handle = unsafe { dlopen_c(path.as_ptr(), 1) };
+        let handle = unsafe { load_library(path.as_ptr()) };
         if !handle.is_null() {
             return Ok(handle);
         }
@@ -336,7 +352,7 @@ fn dlopen(names: &[&str]) -> Result<*mut c_void, String> {
 
 fn dlsym(handle: *mut c_void, name: &str) -> Result<*mut c_void, String> {
     let symbol = CString::new(name).map_err(|err| err.to_string())?;
-    let ptr = unsafe { dlsym_c(handle, symbol.as_ptr()) };
+    let ptr = unsafe { load_symbol(handle, symbol.as_ptr()) };
     if ptr.is_null() {
         Err(format!("{name} is not exported ({})", last_dlerror()))
     } else {
@@ -345,16 +361,58 @@ fn dlsym(handle: *mut c_void, name: &str) -> Result<*mut c_void, String> {
 }
 
 fn last_dlerror() -> String {
-    unsafe {
-        let ptr = dlerror_c();
-        if ptr.is_null() {
-            "unknown".into()
-        } else {
-            CStr::from_ptr(ptr).to_string_lossy().into_owned()
+    #[cfg(unix)]
+    {
+        unsafe {
+            let ptr = dlerror_c();
+            if ptr.is_null() {
+                "unknown".into()
+            } else {
+                CStr::from_ptr(ptr).to_string_lossy().into_owned()
+            }
         }
+    }
+    #[cfg(windows)]
+    {
+        unsafe { format!("win32 error {}", GetLastError()) }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        "dynamic loading is unavailable".into()
     }
 }
 
+#[cfg(unix)]
+unsafe fn load_library(filename: *const i8) -> *mut c_void {
+    dlopen_c(filename, 1)
+}
+
+#[cfg(unix)]
+unsafe fn load_symbol(handle: *mut c_void, symbol: *const i8) -> *mut c_void {
+    dlsym_c(handle, symbol)
+}
+
+#[cfg(windows)]
+unsafe fn load_library(filename: *const i8) -> *mut c_void {
+    LoadLibraryA(filename)
+}
+
+#[cfg(windows)]
+unsafe fn load_symbol(handle: *mut c_void, symbol: *const i8) -> *mut c_void {
+    GetProcAddress(handle, symbol)
+}
+
+#[cfg(not(any(unix, windows)))]
+unsafe fn load_library(_filename: *const i8) -> *mut c_void {
+    std::ptr::null_mut()
+}
+
+#[cfg(not(any(unix, windows)))]
+unsafe fn load_symbol(_handle: *mut c_void, _symbol: *const i8) -> *mut c_void {
+    std::ptr::null_mut()
+}
+
+#[cfg(unix)]
 unsafe extern "C" {
     #[link_name = "dlopen"]
     fn dlopen_c(filename: *const i8, flags: i32) -> *mut c_void;
@@ -362,6 +420,13 @@ unsafe extern "C" {
     fn dlsym_c(handle: *mut c_void, symbol: *const i8) -> *mut c_void;
     #[link_name = "dlerror"]
     fn dlerror_c() -> *mut i8;
+}
+
+#[cfg(windows)]
+unsafe extern "system" {
+    fn LoadLibraryA(name: *const i8) -> *mut c_void;
+    fn GetProcAddress(module: *mut c_void, name: *const i8) -> *mut c_void;
+    fn GetLastError() -> u32;
 }
 
 #[cfg(test)]

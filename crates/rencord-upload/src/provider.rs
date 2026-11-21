@@ -10,7 +10,11 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::Path;
 
-pub const USER_AGENT: &str = "Rencord (https://github.com/Rabellion/Rencord, 0.1.0)";
+pub const USER_AGENT: &str = concat!(
+    "Rencord (https://github.com/Rabellion/Rencord, ",
+    env!("CARGO_PKG_VERSION"),
+    ")"
+);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

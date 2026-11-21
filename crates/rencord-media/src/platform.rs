@@ -98,15 +98,23 @@ pub fn portal_source() -> Option<CaptureSource> {
 /// PipeWire is how a granted ScreenCast fd becomes frames. Missing library
 /// means the portal session, even if it connected, cannot be consumed yet.
 pub fn pipewire_library() -> Result<String, String> {
-    let path = std::ffi::CString::new("libpipewire-0.3.so.0").map_err(|err| err.to_string())?;
-    let handle = unsafe { dlopen_pw(path.as_ptr(), 1) };
-    if handle.is_null() {
-        Err("libpipewire-0.3.so.0 is not installed, so a portal fd cannot be consumed".into())
-    } else {
-        Ok("libpipewire-0.3.so.0".into())
+    #[cfg(unix)]
+    {
+        let path = std::ffi::CString::new("libpipewire-0.3.so.0").map_err(|err| err.to_string())?;
+        let handle = unsafe { dlopen_pw(path.as_ptr(), 1) };
+        if handle.is_null() {
+            Err("libpipewire-0.3.so.0 is not installed, so a portal fd cannot be consumed".into())
+        } else {
+            Ok("libpipewire-0.3.so.0".into())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        Err("libpipewire is a Linux library".into())
     }
 }
 
+#[cfg(unix)]
 unsafe extern "C" {
     #[link_name = "dlopen"]
     fn dlopen_pw(filename: *const i8, flags: i32) -> *mut std::ffi::c_void;

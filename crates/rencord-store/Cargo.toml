@@ -1,6 +1,6 @@
 [package]
 name = "rencord-store"
-version = "0.1.0"
+version.workspace = true
 description = "In-memory session and bounded SQLite cache for Rencord"
 edition.workspace = true
 license.workspace = true

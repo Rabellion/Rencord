@@ -1,6 +1,6 @@
 [package]
 name = "rencord-markdown"
-version = "0.1.0"
+version.workspace = true
 description = "Discord-flavored markdown AST with no UI toolkit dependency"
 edition.workspace = true
 license.workspace = true
