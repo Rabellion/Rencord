@@ -497,54 +497,6 @@ fn encode_query(text: &str) -> String {
     encode_path(text).replace('/', "%2F")
 }
 
-#[derive(Clone)]
-pub struct DiscordTarget {
-    pub base: String,
-    pub token: String,
-    pub channel_id: u64,
-}
-
-impl fmt::Debug for DiscordTarget {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("DiscordTarget")
-            .field("base", &self.base)
-            .field("channel_id", &self.channel_id)
-            .field("token", &"[redacted]")
-            .finish()
-    }
-}
-
-pub fn discord_attachment_call(
-    target: &DiscordTarget,
-    content: &str,
-    files: &[(String, String)],
-) -> HttpCall {
-    let mut fields = vec![FieldPlan::Text {
-        name: "payload_json".into(),
-        value: serde_json::json!({ "content": content }).to_string(),
-    }];
-    for (index, (filename, _)) in files.iter().enumerate() {
-        fields.push(FieldPlan::File {
-            name: format!("files[{index}]"),
-            filename: filename.clone(),
-        });
-    }
-    HttpCall {
-        method: Method::Post,
-        url: format!(
-            "{}/channels/{}/messages",
-            target.base.trim_end_matches('/'),
-            target.channel_id
-        ),
-        headers: vec![
-            ("Authorization".into(), target.token.clone()),
-            ("User-Agent".into(), USER_AGENT.into()),
-        ],
-        body: BodyPlan::Multipart(fields),
-    }
-}
-
 pub fn upload_call(plan: &UploadPlan) -> Result<UploadRecipe, UploadError> {
     plan.calls()
 }
@@ -679,31 +631,5 @@ mod tests {
         let rendered = format!("{:?}", plan.custom.as_ref().unwrap());
         assert!(rendered.contains("[redacted]"));
         assert!(!rendered.contains("s3cr3t-value"));
-    }
-
-    #[test]
-    fn discord_attachment_request_names_the_files() {
-        let call = discord_attachment_call(
-            &DiscordTarget {
-                base: "http://127.0.0.1:9".into(),
-                token: "secret-token".into(),
-                channel_id: 42,
-            },
-            "rencord-split v1",
-            &[("a.zip.001".into(), "ignored".into())],
-        );
-        assert!(call.url.ends_with("/channels/42/messages"));
-        let fields = multipart(&call);
-        assert!(fields.iter().any(|field| matches!(field, FieldPlan::Text { name, value } if name == "payload_json" && value.contains("rencord-split"))));
-        assert!(fields.iter().any(|field| matches!(field, FieldPlan::File { name, filename } if name == "files[0]" && filename == "a.zip.001")));
-        let rendered = format!(
-            "{:?}",
-            DiscordTarget {
-                base: "http://x".into(),
-                token: "secret-token".into(),
-                channel_id: 1,
-            }
-        );
-        assert!(!rendered.contains("secret-token"));
     }
 }

@@ -18,7 +18,6 @@
 
 use crate::UploadError;
 use serde::Deserialize;
-use serde_json::Value;
 
 /// 20 × 1024 × 1024. The API reference calls this 20 MiB.
 pub const FREE_LIMIT_BYTES: u64 = 20 * 1024 * 1024;
@@ -197,67 +196,6 @@ pub fn limit_from_json(
     }))
 }
 
-/// `GET /users/@me` and, when `guild_id` is set, `GET /guilds/{id}`.
-/// The token is sent as the raw Authorization value, the same way the REST
-/// client does, and it is not included in the error text.
-pub fn fetch_limit(
-    base: &str,
-    token: &str,
-    guild_id: Option<u64>,
-    larger_file_perk: bool,
-) -> Result<UploadLimit, UploadError> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(crate::provider::USER_AGENT)
-        .build()?;
-    let root = base.trim_end_matches('/');
-    let user = authorized_get(&client, &format!("{root}/users/@me"), token)?;
-    let guild = if let Some(guild_id) = guild_id {
-        Some(authorized_get(
-            &client,
-            &format!("{root}/guilds/{guild_id}"),
-            token,
-        )?)
-    } else {
-        None
-    };
-    limit_from_json(
-        &user,
-        guild.as_deref(),
-        guild_id.is_some(),
-        larger_file_perk,
-    )
-}
-
-fn authorized_get(
-    client: &reqwest::blocking::Client,
-    url: &str,
-    token: &str,
-) -> Result<String, UploadError> {
-    let response = client.get(url).header("Authorization", token).send()?;
-    let status = response.status();
-    let body = response.text()?;
-    if !status.is_success() {
-        return Err(UploadError::Http {
-            status: status.as_u16(),
-            body: redact_token(&body, token),
-        });
-    }
-    let value: Value = serde_json::from_str(&body)
-        .map_err(|err| UploadError::message(format!("limit response was not JSON: {err}")))?;
-    if value.get("token").is_some() || value.get("email").is_some() {
-        // Keep going; we only read premium fields. Do not log the body.
-    }
-    Ok(body)
-}
-
-fn redact_token(body: &str, token: &str) -> String {
-    if token.is_empty() {
-        body.to_owned()
-    } else {
-        body.replace(token, "[redacted]")
-    }
-}
-
 /// One decimal "MB" where MB means 1024 × 1024 bytes, matching the cap constants.
 pub fn format_bytes(bytes: u64) -> String {
     const MIB: u64 = 1024 * 1024;
@@ -272,7 +210,6 @@ pub fn format_bytes(bytes: u64) -> String {
         format!("{bytes} B")
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

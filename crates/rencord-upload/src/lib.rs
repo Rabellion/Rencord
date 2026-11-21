@@ -30,7 +30,7 @@ pub use ffmpeg::{
 };
 pub use flow::{compressed_file_name, Flow, FlowChoice, Prepared, SheetScreen};
 pub use limit::{
-    detect_limit, fetch_limit, format_bytes, limit_from_json, LimitInput, LimitSource, UploadLimit,
+    detect_limit, format_bytes, limit_from_json, LimitInput, LimitSource, UploadLimit,
     FREE_LIMIT_BYTES, NITRO_BASIC_LIMIT_BYTES, NITRO_LIMIT_BYTES,
 };
 pub use plan::{
@@ -40,8 +40,8 @@ pub use plan::{
     SheetOffer, SplitOffer, StagedFile, VideoPlan, VideoSource,
 };
 pub use provider::{
-    discord_attachment_call, encode_multipart, upload_call, BodyPlan, CustomTarget, DiscordTarget,
-    FieldPlan, Hosts, HttpCall, LitterboxTime, ProviderKind, UploadPlan,
+    encode_multipart, upload_call, BodyPlan, CustomTarget, FieldPlan, Hosts, HttpCall,
+    LitterboxTime, ProviderKind, UploadPlan,
 };
 pub use split::{
     format_note, parse_note, reassemble, split_bytes, ArchiveFormat, SplitBundle, SplitNote,

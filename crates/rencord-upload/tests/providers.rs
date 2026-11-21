@@ -1,8 +1,7 @@
 //! Provider requests against a local HTTP server. Nothing here contacts a real host.
 
 use rencord_upload::{
-    discord_attachment_call, fetch_limit, run_job, CustomTarget, DiscordTarget, Hosts, JobOutput,
-    JobSpec, LitterboxTime, ProviderKind, UploadPlan, NITRO_BASIC_LIMIT_BYTES,
+    run_job, CustomTarget, Hosts, JobOutput, JobSpec, LitterboxTime, ProviderKind, UploadPlan,
 };
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -15,7 +14,6 @@ use std::time::Duration;
 struct Hit {
     method: String,
     path: String,
-    headers: String,
     body: Vec<u8>,
 }
 
@@ -84,12 +82,7 @@ fn read_request(stream: &mut impl Read) -> std::io::Result<Hit> {
         body.extend_from_slice(&buf[..read]);
     }
     body.truncate(length);
-    Ok(Hit {
-        method,
-        path,
-        headers: head,
-        body,
-    })
+    Ok(Hit { method, path, body })
 }
 
 fn write_response(
@@ -312,59 +305,4 @@ fn part_number(path: &str) -> Option<u32> {
         }
     }
     None
-}
-
-#[test]
-fn discord_attachment_post_carries_the_files_and_the_note() {
-    let (base, _) = serve(|hit| {
-        let body = String::from_utf8_lossy(&hit.body);
-        assert!(hit.headers.contains("secret-token"), "{}", hit.headers);
-        assert!(body.contains("payload_json"), "{body}");
-        assert!(body.contains("rencord-split v1"), "{body}");
-        assert!(body.contains("files[0]"), "{body}");
-        assert!(body.contains("volume-bytes"), "{body}");
-        (200, Vec::new(), b"{\"id\":\"1\"}".to_vec())
-    });
-    let file = temp_file("lecture.mp4.zip.001", b"volume-bytes");
-    let output = run_job(
-        JobSpec::Discord {
-            target: DiscordTarget {
-                base: base.clone(),
-                token: "secret-token".into(),
-                channel_id: 7,
-            },
-            content: "rencord-split v1\nparts: 1".into(),
-            files: vec![file],
-        },
-        &Arc::new(AtomicBool::new(false)),
-        |_| {},
-    )
-    .unwrap();
-    assert!(matches!(output, JobOutput::Posted { .. }));
-    let call = discord_attachment_call(
-        &DiscordTarget {
-            base,
-            token: "secret-token".into(),
-            channel_id: 7,
-        },
-        "rencord-split v1",
-        &[("lecture.mp4.zip.001".into(), String::new())],
-    );
-    assert!(call.url.ends_with("/channels/7/messages"));
-}
-
-#[test]
-fn fetch_limit_reads_premium_type_and_boost_tier() {
-    let (base, _) = serve(|hit| {
-        let body = if hit.path.contains("/users/") {
-            br#"{"id":"1","username":"ada","premium_type":3}"#.to_vec()
-        } else {
-            br#"{"id":"9","name":"Engines","premium_tier":2}"#.to_vec()
-        };
-        (200, Vec::new(), body)
-    });
-    let limit = fetch_limit(&base, "token-value", Some(9), false).unwrap();
-    assert_eq!(limit.bytes, NITRO_BASIC_LIMIT_BYTES.max(50 * 1024 * 1024));
-    assert_eq!(limit.premium_type, 3);
-    assert_eq!(limit.guild_tier, Some(2));
 }
