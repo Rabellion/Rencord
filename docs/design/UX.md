@@ -39,6 +39,25 @@ Spacing steps are 4, 8, 12, 16, 24, and 32 px. Onyx panels use an 8 px gap and a
 
 Cozy channel rows are 32 px. Compact rows are 28 px. Spacious rows are 36 px. Grouped messages from the same author leave the avatar gutter empty instead of repeating the name.
 
+### Responsive frame
+
+The four columns stay the default. Breakpoints live in `layout::resolve` and take the window's logical width, height, and aspect ratio. DPI scale changes the logical size GPUI reports; a 1440×900 monitor at 200% is a 720×450 layout.
+
+| Frame | What the shell does |
+| --- | --- |
+| 16:9 and 16:10, including 1920×1080, 1440×900, 1366×768, 1280×800, 1280×720, and 1000×700 | Rail, channel list, chat, and member list. The member list stays until the chat column would drop under 420 px. |
+| About 800×600 | The member list becomes an overlay (Ctrl+M). The channel list stays. |
+| Narrower still, or a very short window | The channel list becomes a drawer (Ctrl+B, or the channel title). Ctrl+K still opens the quick switcher. |
+| 21:9 and 32:9 (2560×1080, 3440×1440, 5120×1440) | The message column is capped at about 92 characters. The member list and a stream stage take the rest. Messages do not run to the far edge. |
+| 3840×2160 | The four columns stay. The text block inside the chat column is capped; the column itself still fills. |
+| Portrait: 1080×1920, 900×1440, 800×1280, 768×1366 | A narrow server rail stays. Channels and members are drawers. The composer and the voice dock sit at the bottom of the chat. Header and dock targets grow to about 44 px. |
+
+The gaps between the channel list, the chat, and the member list are drag handles. A drag is clamped so the chat column keeps its floor. Double-click restores the theme default. Widths are stored under `$XDG_DATA_HOME/rencord/layout.json`, keyed by aspect, DPI step (100, 125, 150, 200), and monitor. On launch, a saved window that sits off a monitor is moved back onto the visible bounds and snapped to device pixels. Text and icons are drawn as vectors. The demo avatars are 128 px sources, which cover a 40 px avatar at 200%.
+
+`--window 1440x900` opens that logical size. `--scale 1.5` sets the X11 scale before the window is created. `--screenshot path.png` writes the frame after it has painted. Captures for the sizes above are in [onyx/responsive](onyx/responsive).
+
+Settings > Measure switches the capped reading column between the left edge and the center. The default is the left edge, which is the Discord alignment.
+
 ### Iconography
 
 One clean-room set, 24 px viewBox, 1.75 px stroke, `currentColor`. People in the demo use illustrated avatars, not photographs. Servers without art fall back to a black tile, a hairline, and a centered initial. The active server tile's hairline is the accent. Add Server is a dashed squircle. There is no shop icon and no Send button on the desktop composer.
@@ -77,6 +96,8 @@ cargo run -p rencord-desktop --release --bin rencord -- --demo --bench
 cargo run -p rencord-desktop --bin rencord-measure -- --offline
 ```
 
+The responsive pass measured the breakpoint function and a live resize sweep on llvmpipe (Xvfb, refresh unreported). `layout_resolve` was **95 ns** per size. Channel-switch frame p50 was **48.0 ms** and the resize sweep was **p50 25.6 ms**, **p95 154 ms**, with the slow tail on the 5120-wide frames. Startup was **109 ms** and RSS **139 MiB**. The 16.7 ms row above is the earlier software-GL run; this machine's present path did not hold that rate. The column math is not the cost.
+
 ## Later: files over the attachment cap
 
 Not part of the current UI fixes. Discord rejects attachments above the account cap on the server. The client cannot remove that cap.
@@ -89,7 +110,7 @@ The later milestone is one dialog, with a default the user can save:
 
 The dialog should be the only step. There is no second settings hunt and no Nitro upsell.
 
-Layout presets A, B, and C are compared in [DIRECTIONS.md](DIRECTIONS.md). They are not on `main`.
+Layout presets A, B, and C are compared in [DIRECTIONS.md](DIRECTIONS.md). A is the default. B and C stay behind `--layout`. The responsive rules above apply to A.
 
 ## What is still rough
 

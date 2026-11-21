@@ -1,11 +1,20 @@
 //! GPUI shell. `rencord --demo` uses local data. `--theme amoled|dark|light`
-//! picks the starting theme. `--bench` prints startup, RSS, and frame gaps,
+//! picks the starting theme. `--window 1440x900` and `--scale 1.5` size the
+//! window for a layout check. `--bench` prints startup, RSS, and frame gaps,
 //! then quits.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+use rencord_desktop::layout::{
+    self, apply_drag, ColumnMetrics, DragContext, LayoutInput, LayoutStore, ReadingAnchor,
+    ResolvedLayout, RightChoice, RightPanel, SavedColumns, SplitEdge,
+};
 
 use gpui_kit::assets::Assets;
 use gpui_kit::base::{h_flex, v_flex};
@@ -93,11 +102,20 @@ fn main() {
     let reveal_hover = args.iter().any(|arg| arg == "--reveal-hover");
     let frame = args
         .windows(2)
-        .find(|pair| pair[0] == "--size")
-        .and_then(|pair| {
-            let (width, height) = pair[1].split_once('x')?;
-            Some((width.parse::<f32>().ok()?, height.parse::<f32>().ok()?))
-        });
+        .find(|pair| pair[0] == "--window" || pair[0] == "--size")
+        .and_then(|pair| parse_frame(&pair[1]));
+    let scale = args
+        .windows(2)
+        .find(|pair| pair[0] == "--scale")
+        .and_then(|pair| parse_scale(&pair[1]));
+    let screenshot = args
+        .windows(2)
+        .find(|pair| pair[0] == "--screenshot")
+        .map(|pair| pair[1].clone());
+    if let Some(scale) = scale {
+        // Read by GPUI before the X11 connection opens.
+        std::env::set_var("GPUI_X11_SCALE_FACTOR", format!("{scale}"));
+    }
     let app = gpui_kit::application().with_assets(Assets);
     app.run(move |cx| {
         gpui_kit::init(cx);
@@ -131,9 +149,40 @@ fn main() {
             KeyBinding::new("cmd-/", ShowHelp, None),
             KeyBinding::new("enter", SendMessage, None),
         ]);
-        let (frame_w, frame_h) = frame.unwrap_or((1180., 760.));
+        let persist_layout = frame.is_none() && screenshot.is_none() && !bench;
+        let layout_path = rencord_platform::data_dir().join("layout.json");
+        let layout_store = if persist_layout {
+            LayoutStore::load(&layout_path)
+        } else {
+            LayoutStore::default()
+        };
+        let requested = frame.unwrap_or((1180., 760.));
+        let window_bounds = if let Some((width, height)) = frame {
+            if screenshot.is_some() {
+                // Pin the origin so a grab of this rectangle does not include the desktop.
+                Some(WindowBounds::Windowed(Bounds::new(
+                    point(px(0.), px(0.)),
+                    size(px(width), px(height)),
+                )))
+            } else {
+                Some(WindowBounds::centered(size(px(width), px(height)), cx))
+            }
+        } else if let Some(saved) = layout_store.window {
+            let scale = scale.unwrap_or(1.0);
+            let clamped = layout::clamp_window(saved, &monitor_rects(cx), scale);
+            Some(WindowBounds::Windowed(Bounds::new(
+                point(px(clamped.x), px(clamped.y)),
+                size(px(clamped.w), px(clamped.h)),
+            )))
+        } else {
+            Some(WindowBounds::centered(
+                size(px(requested.0), px(requested.1)),
+                cx,
+            ))
+        };
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(frame_w), px(frame_h)), cx)),
+            window_bounds,
+            window_min_size: Some(size(px(480.), px(360.))),
             // Client decorations drop the desktop app-menu button. Settings stays in the dock.
             window_decorations: Some(WindowDecorations::Client),
             ..Default::default()
@@ -149,6 +198,10 @@ fn main() {
                     start_voice,
                     reveal_hover,
                     golive,
+                    screenshot.clone(),
+                    persist_layout,
+                    layout_store.clone(),
+                    layout_path.clone(),
                     window,
                     cx,
                 )
@@ -156,6 +209,55 @@ fn main() {
         })
         .expect("open Rencord window");
     });
+}
+
+fn parse_frame(raw: &str) -> Option<(f32, f32)> {
+    let (width, height) = raw.split_once(['x', 'X'])?;
+    let width = width.parse::<f32>().ok()?;
+    let height = height.parse::<f32>().ok()?;
+    if width >= 320.0 && height >= 240.0 && width.is_finite() && height.is_finite() {
+        Some((width, height))
+    } else {
+        None
+    }
+}
+
+fn parse_scale(raw: &str) -> Option<f32> {
+    let raw = raw.trim().trim_end_matches('%');
+    let value = raw.parse::<f32>().ok()?;
+    let scale = if value > 8.0 { value / 100.0 } else { value };
+    if scale.is_finite() && scale > 0.0 {
+        Some(scale)
+    } else {
+        None
+    }
+}
+
+fn monitor_rects(cx: &App) -> Vec<layout::Rect> {
+    cx.displays()
+        .iter()
+        .map(|display| {
+            let bounds = display.visible_bounds();
+            layout::Rect {
+                x: bounds.origin.x.as_f32(),
+                y: bounds.origin.y.as_f32(),
+                w: bounds.size.width.as_f32(),
+                h: bounds.size.height.as_f32(),
+            }
+        })
+        .collect()
+}
+
+fn monitor_key(window: &Window, cx: &App) -> String {
+    window
+        .display(cx)
+        .map(|display| {
+            display
+                .uuid()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|_| u64::from(display.id()).to_string())
+        })
+        .unwrap_or_else(|| "primary".into())
 }
 
 struct RencordWindow {
@@ -171,10 +273,45 @@ struct RencordWindow {
     bench_frames: u32,
     bench_last: Instant,
     frame_us: Vec<u128>,
+    resize_us: Vec<u128>,
     collapsed: HashSet<&'static str>,
     pinned_top: bool,
     reveal_hover: bool,
     golive: golive::GoLiveMode,
+    columns: SavedColumns,
+    reading_anchor: ReadingAnchor,
+    right_choice: RightChoice,
+    channels_drawer: bool,
+    members_overlay: bool,
+    channels_as_drawer: bool,
+    members_as_overlay: bool,
+    right_overlay: bool,
+    profile_key: String,
+    layout_store: LayoutStore,
+    layout_path: PathBuf,
+    persist_layout: bool,
+    screenshot: Option<String>,
+    screenshot_frames: u32,
+    metrics: ColumnMetrics,
+    frame: Option<ResolvedLayout>,
+    suppress_split: Option<SplitEdge>,
+    _bounds_observer: Subscription,
+    _display_observer: Subscription,
+}
+
+struct SplitGhost;
+
+impl Render for SplitGhost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+    }
+}
+
+#[derive(Clone)]
+struct SplitDrag {
+    edge: SplitEdge,
+    start_x: Rc<Cell<f32>>,
+    start_width: f32,
 }
 
 impl RencordWindow {
@@ -188,6 +325,10 @@ impl RencordWindow {
         start_voice: bool,
         reveal_hover: bool,
         golive: golive::GoLiveMode,
+        screenshot: Option<String>,
+        persist_layout: bool,
+        layout_store: LayoutStore,
+        layout_path: PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -226,6 +367,12 @@ impl RencordWindow {
             cx.new(|cx| InputState::new(window, cx).placeholder("Jump to a channel or command"));
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        let bounds_observer = cx.observe_window_bounds(window, |this, window, cx| {
+            this.remember_bounds(window, cx);
+        });
+        let display_observer = cx.observe_window_display(window, |this, window, cx| {
+            this.remember_bounds(window, cx);
+        });
         Self {
             shell,
             token_input,
@@ -239,10 +386,241 @@ impl RencordWindow {
             bench_frames: 0,
             bench_last: Instant::now(),
             frame_us: Vec::new(),
+            resize_us: Vec::new(),
             collapsed: HashSet::new(),
             pinned_top: false,
             reveal_hover,
             golive,
+            columns: SavedColumns::default(),
+            reading_anchor: ReadingAnchor::Left,
+            right_choice: RightChoice::Auto,
+            channels_drawer: false,
+            members_overlay: false,
+            channels_as_drawer: false,
+            members_as_overlay: false,
+            right_overlay: false,
+            profile_key: String::new(),
+            layout_store,
+            layout_path,
+            persist_layout,
+            screenshot,
+            screenshot_frames: 0,
+            metrics: ColumnMetrics::onyx(),
+            frame: None,
+            suppress_split: None,
+            _bounds_observer: bounds_observer,
+            _display_observer: display_observer,
+        }
+    }
+
+    fn remember_bounds(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sync_profile(window, cx);
+        if !self.persist_layout {
+            return;
+        }
+        let bounds = window.bounds();
+        let frame = layout::clamp_window(
+            layout::Rect {
+                x: bounds.origin.x.as_f32(),
+                y: bounds.origin.y.as_f32(),
+                w: bounds.size.width.as_f32(),
+                h: bounds.size.height.as_f32(),
+            },
+            &monitor_rects(cx),
+            window.scale_factor(),
+        );
+        self.layout_store.window = Some(frame);
+        let _ = self.layout_store.save(&self.layout_path);
+    }
+
+    fn sync_profile(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let size = window.viewport_size();
+        let height = size.height.as_f32().max(1.0);
+        let aspect = layout::classify(size.width.as_f32() / height);
+        let key = layout::profile_key(
+            aspect,
+            window.scale_factor(),
+            Some(&monitor_key(window, cx)),
+        );
+        if key == self.profile_key {
+            return;
+        }
+        if !self.profile_key.is_empty() {
+            self.layout_store.profiles.insert(
+                self.profile_key.clone(),
+                layout::Profile {
+                    columns: self.columns,
+                    anchor: self.reading_anchor,
+                },
+            );
+        }
+        self.profile_key = key;
+        if let Some(profile) = self.layout_store.profiles.get(&self.profile_key).cloned() {
+            self.columns = profile.columns;
+            self.reading_anchor = profile.anchor;
+        }
+        if self.persist_layout {
+            let _ = self.layout_store.save(&self.layout_path);
+        }
+    }
+
+    fn current_plan(&self, window: &Window) -> ResolvedLayout {
+        let size = window.viewport_size();
+        let ink = matches!(self.shell.prefs.palette().mode, ThemeMode::Onyx);
+        layout::resolve(&LayoutInput {
+            width: size.width.as_f32(),
+            height: size.height.as_f32(),
+            scale: window.scale_factor(),
+            message_px: if ink { 14.0 } else { self.shell.prefs.font_px },
+            show_members: self.shell.prefs.show_members,
+            show_channels: self.shell.prefs.show_sidebar,
+            reading_anchor: self.reading_anchor,
+            right: self.right_choice,
+            saved: self.columns,
+            metrics: if ink {
+                ColumnMetrics::onyx()
+            } else {
+                ColumnMetrics::crisp()
+            },
+            monitor: None,
+        })
+    }
+
+    fn toggle_channels(&mut self) {
+        if self.channels_as_drawer {
+            self.channels_drawer = !self.channels_drawer;
+        } else {
+            self.shell.prefs.show_sidebar = !self.shell.prefs.show_sidebar;
+            self.channels_drawer = false;
+        }
+    }
+
+    fn toggle_members(&mut self) {
+        if self.members_as_overlay {
+            self.members_overlay = !self.members_overlay;
+        } else {
+            self.shell.prefs.show_members = !self.shell.prefs.show_members;
+            self.members_overlay = false;
+        }
+    }
+
+    fn toggle_pin_panel(&mut self) {
+        self.right_choice = self.right_choice.toggle_pin();
+    }
+
+    fn drag_context(&self) -> DragContext {
+        let plan = self.frame.clone();
+        DragContext {
+            viewport_width: plan.as_ref().map(|plan| plan.chat_width).unwrap_or(0.0),
+            gap: self.metrics.gap,
+            rail: plan
+                .as_ref()
+                .map(|plan| plan.rail)
+                .unwrap_or(self.metrics.rail),
+            channels: plan.as_ref().map(|plan| plan.channels).unwrap_or(0.0),
+            members: plan.as_ref().map(|plan| plan.members).unwrap_or(0.0),
+            right: plan.as_ref().map(|plan| plan.right).unwrap_or(0.0),
+            chat_fixed: plan.and_then(|plan| {
+                if plan.chat_grows {
+                    None
+                } else {
+                    Some(plan.chat_width)
+                }
+            }),
+        }
+    }
+
+    fn resize_column(&mut self, edge: SplitEdge, proposed: f32) {
+        if self.suppress_split == Some(edge) {
+            return;
+        }
+        let mut ctx = self.drag_context();
+        // The drag budget is the whole window, not the chat column.
+        if let Some(plan) = &self.frame {
+            ctx.viewport_width = plan.chat_width
+                + plan.rail
+                + plan.channels
+                + plan.members
+                + plan.right
+                + layout::shell_chrome(
+                    1 + (plan.rail > 0.0) as u8
+                        + (plan.channels > 0.0) as u8
+                        + (plan.members > 0.0) as u8
+                        + (plan.right > 0.0) as u8,
+                    plan.gap,
+                );
+        }
+        let width = apply_drag(edge, proposed, &ctx);
+        match edge {
+            SplitEdge::Channels => self.columns.channels = Some(width),
+            SplitEdge::Members => self.columns.members = Some(width),
+            SplitEdge::Right => self.columns.right = Some(width),
+        }
+        self.store_columns();
+    }
+
+    fn reset_column(&mut self, edge: SplitEdge) {
+        self.columns = self.columns.reset(edge);
+        self.store_columns();
+    }
+
+    fn grab_screenshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.screenshot_frames += 1;
+        if self.screenshot_frames < 4 {
+            cx.on_next_frame(window, |this, window, cx| {
+                this.grab_screenshot(window, cx);
+            });
+            return;
+        }
+        let Some(path) = self.screenshot.clone() else {
+            return;
+        };
+        let bounds = window.bounds();
+        let scale = window.scale_factor();
+        let x = (bounds.origin.x.as_f32() * scale).round().max(0.0) as i32;
+        let y = (bounds.origin.y.as_f32() * scale).round().max(0.0) as i32;
+        let width = (bounds.size.width.as_f32() * scale).round().max(1.0) as i32;
+        let height = (bounds.size.height.as_f32() * scale).round().max(1.0) as i32;
+        // The frame that scheduled this callback is painted before the process sleeps.
+        std::thread::sleep(Duration::from_millis(250));
+        let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".into());
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "x11grab",
+                "-video_size",
+                &format!("{width}x{height}"),
+                "-i",
+                &format!("{display}.0+{x},{y}"),
+                "-frames:v",
+                "1",
+                &path,
+            ])
+            .status();
+        match status {
+            Ok(code) if code.success() => println!("SCREENSHOT {path}"),
+            Ok(code) => eprintln!("screenshot ffmpeg status {code}"),
+            Err(err) => eprintln!("screenshot ffmpeg failed: {err}"),
+        }
+        cx.quit();
+    }
+
+    fn store_columns(&mut self) {
+        if self.profile_key.is_empty() {
+            return;
+        }
+        self.layout_store.profiles.insert(
+            self.profile_key.clone(),
+            layout::Profile {
+                columns: self.columns,
+                anchor: self.reading_anchor,
+            },
+        );
+        if self.persist_layout {
+            let _ = self.layout_store.save(&self.layout_path);
         }
     }
 
@@ -269,10 +647,23 @@ impl RencordWindow {
             println!("BENCH interactive_ms={interactive}");
             println!("BENCH rss_kib={}", rss_kib());
             println!("BENCH channel_switch_us={}", self.shell.last_switch_us);
+            println!("BENCH scale={:.2}", window.scale_factor());
+            let started = Instant::now();
+            let passes = 200;
+            for _ in 0..passes {
+                for (width, height) in layout::CHECK_SIZES {
+                    let _ = layout::resolve(&layout::LayoutInput::for_size(*width, *height));
+                }
+            }
+            let each =
+                started.elapsed().as_nanos() / (passes * layout::CHECK_SIZES.len() as u128).max(1);
+            println!("BENCH layout_resolve_ns={each}");
         }
         let gap = self.bench_last.elapsed().as_micros();
-        if self.bench_frames > 0 {
+        if self.bench_frames > 0 && self.bench_frames < 24 {
             self.frame_us.push(gap);
+        } else if self.bench_frames >= 24 {
+            self.resize_us.push(gap);
         }
         self.bench_last = Instant::now();
         self.bench_frames += 1;
@@ -283,14 +674,37 @@ impl RencordWindow {
             });
             return;
         }
+        let resize_at = (self.bench_frames - 24) as usize;
+        if resize_at < layout::CHECK_SIZES.len() {
+            let (width, height) = layout::CHECK_SIZES[resize_at];
+            window.resize(size(px(width), px(height)));
+            cx.on_next_frame(window, |this, window, cx| {
+                this.note_bench_frame(window, cx);
+            });
+            return;
+        }
         self.frame_us.sort_unstable();
+        self.resize_us.sort_unstable();
         let p50 = self
             .frame_us
             .get(self.frame_us.len() / 2)
             .copied()
             .unwrap_or(0);
+        let resize_p50 = self
+            .resize_us
+            .get(self.resize_us.len() / 2)
+            .copied()
+            .unwrap_or(0);
+        let resize_p95 = self
+            .resize_us
+            .get(self.resize_us.len().saturating_mul(95) / 100)
+            .copied()
+            .unwrap_or(resize_p50);
         println!("BENCH frame_p50_us={p50}");
         println!("BENCH frames={}", self.frame_us.len());
+        println!("BENCH resize_p50_us={resize_p50}");
+        println!("BENCH resize_p95_us={resize_p95}");
+        println!("BENCH resize_frames={}", self.resize_us.len());
         println!("BENCH channel_switch_us={}", self.shell.last_switch_us);
         match window.refresh_interval(cx) {
             Some(interval) if !interval.is_zero() => {
@@ -538,6 +952,11 @@ impl Render for RencordWindow {
                 this.note_bench_frame(window, cx);
             });
         }
+        if self.screenshot.is_some() && self.screenshot_frames == 0 && !self.bench {
+            cx.on_next_frame(window, |this, window, cx| {
+                this.grab_screenshot(window, cx);
+            });
+        }
         let signed_in = self.shell.session.user.is_some();
         let palette = self.shell.prefs.palette();
         let root = div()
@@ -560,6 +979,11 @@ impl Render for RencordWindow {
             }))
             .on_action(cx.listener(|this, _: &CloseLayer, _, cx| {
                 this.shell.close_layers();
+                this.channels_drawer = false;
+                this.members_overlay = false;
+                if this.right_overlay {
+                    this.right_choice = RightChoice::Auto;
+                }
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &NextChannel, _, cx| {
@@ -588,11 +1012,11 @@ impl Render for RencordWindow {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                this.shell.prefs.show_sidebar = !this.shell.prefs.show_sidebar;
+                this.toggle_channels();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleMembers, _, cx| {
-                this.shell.prefs.show_members = !this.shell.prefs.show_members;
+                this.toggle_members();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleSplit, _, cx| {
@@ -652,7 +1076,6 @@ impl RencordWindow {
     }
 
     fn shell_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let viewport = window.viewport_size().width;
         let palette = self.shell.prefs.palette();
         let density = self.shell.prefs.density;
         let this = cx.entity();
@@ -710,14 +1133,32 @@ impl RencordWindow {
             .unwrap_or_else(|| "Direct Messages".into());
         let home_active = selected.is_some_and(|id| dms.iter().any(|channel| channel.id == id));
         let ink = matches!(palette.mode, ThemeMode::Onyx);
-        let rail_w = if ink { 68. } else { 72. };
-        let tile = if ink { 44. } else { 48. };
+        self.sync_profile(window, cx);
+        let plan = self.current_plan(window);
+        self.channels_as_drawer = plan.channels_as_drawer;
+        self.members_as_overlay = plan.members_as_overlay;
+        self.right_overlay = plan.right_as_overlay;
+        self.metrics = if ink {
+            ColumnMetrics::onyx()
+        } else {
+            ColumnMetrics::crisp()
+        };
+        self.frame = Some(plan.clone());
+        let rail_w = self.metrics.rail;
+        let tile = if plan.touch || ink { 44. } else { 48. };
         let tile_radius = if ink { 8. } else { 12. };
-        let side_w = if ink { 216. } else { 240. };
-        // Inter is a little wider than the mock's face, so the chat takes
-        // the extra from the member list and both body lines stay on one row.
-        let member_w = if ink { 176. } else { 240. };
-        let shell_gap = if ink { 8. } else { 12. };
+        let hit = if plan.touch {
+            layout::TOUCH_TARGET
+        } else {
+            32.
+        };
+        let header_h = if plan.touch {
+            layout::TOUCH_TARGET
+        } else if ink {
+            42.
+        } else {
+            48.
+        };
         let pill_ink = if ink {
             palette.accent
         } else if matches!(palette.mode, ThemeMode::Light) {
@@ -859,7 +1300,7 @@ impl RencordWindow {
         ));
 
         let mut sidebar = v_flex()
-            .w(px(side_w))
+            .w_full()
             .h_full()
             .bg(rgb(palette.sidebar))
             .child(
@@ -1062,13 +1503,15 @@ impl RencordWindow {
         .size_full();
 
         let channel_name = channel_title(selected, &channels, &dms);
+        let topic = !plan.hide_topic;
         let mut chat = v_flex()
             .flex_1()
+            .min_w(px(0.))
             .h_full()
             .bg(rgb(palette.chat))
             .child(
                 h_flex()
-                    .h(px(if ink { 42. } else { 48. }))
+                    .h(px(header_h))
                     .px(px(12.))
                     .items_center()
                     .justify_between()
@@ -1076,11 +1519,22 @@ impl RencordWindow {
                     .border_color(rgb(palette.line))
                     .child(
                         h_flex()
+                            .id("channel-title")
                             .flex_1()
                             .min_w(px(0.))
+                            .h_full()
                             .gap(px(8.))
                             .items_center()
                             .overflow_hidden()
+                            .when(plan.channels_as_drawer, |title| {
+                                let view = this.clone();
+                                title.cursor_pointer().on_click(move |_, _, cx| {
+                                    view.update(cx, |this, cx| {
+                                        this.toggle_channels();
+                                        cx.notify();
+                                    });
+                                })
+                            })
                             .child(icon("hash", if ink { 16. } else { 20. }, palette.muted))
                             .child(
                                 div()
@@ -1089,12 +1543,19 @@ impl RencordWindow {
                                     .text_color(rgb(palette.text))
                                     .child(channel_name.clone()),
                             )
-                            .child(div().w(px(1.)).h(px(16.)).bg(rgb(if ink {
-                                0x1c1c38
-                            } else {
-                                palette.line
-                            })))
-                            .child(paint("Voice, notes, and no upsells", palette.muted, 13.)),
+                            .when(topic, |title| {
+                                title
+                                    .child(div().w(px(1.)).h(px(16.)).bg(rgb(if ink {
+                                        0x1c1c38
+                                    } else {
+                                        palette.line
+                                    })))
+                                    .child(paint(
+                                        "Voice, notes, and no upsells",
+                                        palette.muted,
+                                        13.,
+                                    ))
+                            }),
                     )
                     .child(
                         h_flex()
@@ -1106,9 +1567,15 @@ impl RencordWindow {
                                     this.clone(),
                                     "hdr-threads",
                                     "threads",
+                                    hit,
                                     palette,
                                     |view, cx| {
-                                        view.shell.note("Threads are not in this build.");
+                                        view.right_choice = match view.right_choice {
+                                            RightChoice::Open(RightPanel::Thread) => {
+                                                RightChoice::Auto
+                                            }
+                                            _ => RightChoice::Open(RightPanel::Thread),
+                                        };
                                         cx.notify();
                                     },
                                 ))
@@ -1117,9 +1584,10 @@ impl RencordWindow {
                                 this.clone(),
                                 "hdr-pin",
                                 "pin",
+                                hit,
                                 palette,
                                 |view, cx| {
-                                    view.shell.note("Pinned messages are not in this build.");
+                                    view.toggle_pin_panel();
                                     cx.notify();
                                 },
                             ))
@@ -1127,9 +1595,10 @@ impl RencordWindow {
                                 this.clone(),
                                 "hdr-members",
                                 "members",
+                                hit,
                                 palette,
                                 |view, cx| {
-                                    view.shell.prefs.show_members = !view.shell.prefs.show_members;
+                                    view.toggle_members();
                                     cx.notify();
                                 },
                             ))
@@ -1137,6 +1606,7 @@ impl RencordWindow {
                                 this.clone(),
                                 "hdr-search",
                                 "search",
+                                hit,
                                 palette,
                                 |view, cx| {
                                     view.shell.toggle_palette();
@@ -1147,6 +1617,7 @@ impl RencordWindow {
                                 this.clone(),
                                 "hdr-inbox",
                                 "inbox",
+                                hit,
                                 palette,
                                 |view, cx| {
                                     view.shell.inbox_open = !view.shell.inbox_open;
@@ -1157,7 +1628,7 @@ impl RencordWindow {
             )
             .child(new_messages_banner(palette))
             .child(date_pill("Today", palette))
-            .child(div().flex_1().overflow_hidden().child(timeline));
+            .child(message_column(&plan, timeline));
         let hits = self.shell.search_hits();
         if !self.shell.search.trim().is_empty() {
             chat = chat.child(search_hits_bar(this.clone(), &hits, palette));
@@ -1173,7 +1644,9 @@ impl RencordWindow {
                 .mx(px(12.))
                 .mb(px(12.))
                 .px(px(4.))
-                .h(px(if matches!(palette.mode, ThemeMode::Onyx) {
+                .h(px(if plan.touch {
+                    layout::TOUCH_TARGET
+                } else if matches!(palette.mode, ThemeMode::Onyx) {
                     38.
                 } else {
                     47.
@@ -1188,6 +1661,7 @@ impl RencordWindow {
                     this.clone(),
                     "composer-plus",
                     "plus",
+                    hit,
                     palette,
                     |view, cx| {
                         view.shell.note("File uploads are not in this build.");
@@ -1206,6 +1680,7 @@ impl RencordWindow {
                     this.clone(),
                     "composer-gif",
                     "gif",
+                    hit,
                     palette,
                     |view, cx| {
                         view.shell.note("GIF search is not in this build.");
@@ -1216,6 +1691,7 @@ impl RencordWindow {
                     this.clone(),
                     "composer-emoji",
                     "emoji",
+                    hit,
                     palette,
                     |view, cx| {
                         view.shell.note("The emoji picker is not in this build.");
@@ -1240,7 +1716,7 @@ impl RencordWindow {
         }
 
         let mut people = v_flex()
-            .w(px(member_w))
+            .w_full()
             .h_full()
             .bg(rgb(palette.members))
             .child(section_label("ONLINE — 3", palette.muted));
@@ -1290,6 +1766,9 @@ impl RencordWindow {
                     })
                     .child(
                         v_flex()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
                             .gap(px(0.))
                             .child(paint(name, role, 14.))
                             .child(meta(activity, palette.muted, 11., palette)),
@@ -1297,36 +1776,37 @@ impl RencordWindow {
             );
         }
 
-        let voice_panel = self.voice_card(cx, palette, &user_name, voice.as_ref(), muted, deafened);
         let layout_kind = self.shell.prefs.layout;
-        let hide_members =
-            !self.shell.prefs.show_members || viewport < px(if ink { 900. } else { 1100. });
-        let hide_sidebar = !self.shell.prefs.show_sidebar || viewport < px(760.);
-        let sidebar = if hide_sidebar { div() } else { sidebar };
-        let people = if hide_members { div() } else { people };
+        let dock_hit = if plan.touch { 40. } else { 32. };
         let body = match layout_kind {
-            rencord_desktop::LayoutKind::Discord => div()
-                .size_full()
-                .bg(rgb(palette.app_bg))
-                .p(px(shell_gap))
-                .child(
-                    h_flex()
-                        .size_full()
-                        .gap(px(shell_gap))
-                        .child(panel(palette, palette.rail).w(px(rail_w)).child(rail))
-                        .child(
-                            panel(palette, palette.sidebar)
-                                .w(px(side_w))
-                                .child(sidebar.child(voice_panel)),
-                        )
-                        .child(panel(palette, palette.chat).flex_1().child(chat))
-                        .child(
-                            panel(palette, palette.members)
-                                .w(px(member_w))
-                                .child(people),
-                        ),
+            rencord_desktop::LayoutKind::Discord => {
+                let voice_panel = self.voice_card(
+                    cx,
+                    palette,
+                    &user_name,
+                    voice.as_ref(),
+                    muted,
+                    deafened,
+                    dock_hit,
+                );
+                let (chat, sidebar) = if plan.voice_in_chat {
+                    (chat.child(voice_panel), sidebar)
+                } else {
+                    (chat, sidebar.child(voice_panel))
+                };
+                discord_columns(
+                    cx,
+                    &plan,
+                    palette,
+                    rail,
+                    sidebar,
+                    chat,
+                    people,
+                    voice.is_some(),
+                    self.channels_drawer,
+                    self.members_overlay,
                 )
-                .into_any_element(),
+            }
             rencord_desktop::LayoutKind::Keyboard => v_flex()
                 .size_full()
                 .child(
@@ -1355,7 +1835,15 @@ impl RencordWindow {
                                     .map(|channel| format!("#{}", channel.name))
                                     .unwrap_or_else(|| "No second channel".into()),
                             ))
-                            .child(voice_panel),
+                            .child(self.voice_card(
+                                cx,
+                                palette,
+                                &user_name,
+                                voice.as_ref(),
+                                muted,
+                                deafened,
+                                dock_hit,
+                            )),
                     ),
                 )
                 .into_any_element(),
@@ -1385,7 +1873,15 @@ impl RencordWindow {
                         .bottom(px(16.))
                         .right(px(16.))
                         .w(px(280.))
-                        .child(voice_panel),
+                        .child(self.voice_card(
+                            cx,
+                            palette,
+                            &user_name,
+                            voice.as_ref(),
+                            muted,
+                            deafened,
+                            dock_hit,
+                        )),
                 )
                 .into_any_element(),
         };
@@ -1400,7 +1896,7 @@ impl RencordWindow {
         if self.shell.help_open {
             layer = layer.child(hint_bar(
                 palette,
-                "Ctrl+K palette, Tab secondary, Ctrl+I inbox, Ctrl+B sidebar, Ctrl+M members, Ctrl+\\ split, Ctrl+/ this list".into(),
+                "Ctrl+K palette, Ctrl+B channels, Ctrl+M members, Ctrl+, settings. Double-click a column edge to reset it.".into(),
             ));
         }
         if settings {
@@ -1486,6 +1982,7 @@ impl RencordWindow {
         voice: Option<&rencord_voice::LoopbackReport>,
         muted: bool,
         deafened: bool,
+        dock_hit: f32,
     ) -> impl IntoElement {
         let this = cx.entity();
         let in_call = voice.is_some();
@@ -1581,6 +2078,7 @@ impl RencordWindow {
                             this.clone(),
                             "mic-btn",
                             "Mic",
+                            dock_hit,
                             palette,
                             muted,
                             |view, cx| {
@@ -1592,6 +2090,7 @@ impl RencordWindow {
                             this.clone(),
                             "deaf-btn",
                             "Deaf",
+                            dock_hit,
                             palette,
                             deafened,
                             |view, cx| {
@@ -1603,6 +2102,7 @@ impl RencordWindow {
                             this,
                             "gear-btn",
                             "Set",
+                            dock_hit,
                             palette,
                             false,
                             |view, cx| {
@@ -1744,6 +2244,11 @@ impl RencordWindow {
                             view.shell.bump_font(-1);
                             cx.notify();
                         }))
+                        .child(small_button(this.clone(), "measure", "Measure", |view, cx| {
+                            view.reading_anchor = view.reading_anchor.toggle();
+                            view.store_columns();
+                            cx.notify();
+                        }))
                         .child(small_button(
                             this.clone(),
                             "close-settings",
@@ -1754,6 +2259,10 @@ impl RencordWindow {
                             },
                         )),
                 )
+                .child(Label::new(format!(
+                    "Reading {}",
+                    self.reading_anchor.as_str()
+                )))
                 .child(Label::new("Input device"))
                 .child(device_list(this.clone(), inputs, chosen_in, true, palette))
                 .child(Label::new("Output device"))
@@ -2008,6 +2517,7 @@ fn dock_circle(
     view: Entity<RencordWindow>,
     id: &'static str,
     label: &'static str,
+    hit: f32,
     palette: Palette,
     active: bool,
     action: impl Fn(&mut RencordWindow, &mut Context<RencordWindow>) + 'static,
@@ -2027,7 +2537,7 @@ fn dock_circle(
     };
     h_flex()
         .id(id)
-        .size(px(32.))
+        .size(px(hit))
         .flex_shrink_0()
         .rounded(px(6.))
         .items_center()
@@ -2257,13 +2767,14 @@ fn header_icon(
     view: Entity<RencordWindow>,
     id: &'static str,
     glyph: &'static str,
+    hit: f32,
     palette: Palette,
     action: impl Fn(&mut RencordWindow, &mut Context<RencordWindow>) + 'static,
 ) -> impl IntoElement {
     let hover = palette.hover;
     div()
         .id(id)
-        .size(px(32.))
+        .size(px(hit))
         .rounded(px(4.))
         .flex_shrink_0()
         .items_center()
@@ -3065,6 +3576,348 @@ fn portrait_status(name: &str, size: f32, dot: u32, ring: u32) -> impl IntoEleme
                 .border_2()
                 .border_color(rgb(ring)),
         )
+}
+
+fn message_column(plan: &ResolvedLayout, timeline: impl IntoElement) -> AnyElement {
+    if let Some(reading) = plan.reading_width {
+        let text = div()
+            .h_full()
+            .w_full()
+            .max_w(px(reading + layout::MESSAGE_GUTTER))
+            .overflow_hidden()
+            .child(timeline);
+        if plan.reading_anchor == ReadingAnchor::Center {
+            return h_flex()
+                .flex_1()
+                .w_full()
+                .min_h(px(0.))
+                .justify_center()
+                .child(text)
+                .into_any_element();
+        }
+        return div()
+            .flex_1()
+            .min_h(px(0.))
+            .w_full()
+            .overflow_hidden()
+            .child(text)
+            .into_any_element();
+    }
+    div()
+        .flex_1()
+        .min_h(px(0.))
+        .w_full()
+        .overflow_hidden()
+        .child(timeline)
+        .into_any_element()
+}
+
+fn column_gap(gap: f32) -> gpui_kit::Div {
+    div().w(px(gap)).h_full().flex_shrink_0()
+}
+
+fn column_splitter(
+    id: &'static str,
+    edge: SplitEdge,
+    start_width: f32,
+    gap: f32,
+    palette: Palette,
+    view: Entity<RencordWindow>,
+) -> impl IntoElement {
+    let drag = SplitDrag {
+        edge,
+        start_x: Rc::new(Cell::new(f32::NAN)),
+        start_width,
+    };
+    let hover = palette.line;
+    div()
+        .id(id)
+        .w(px(gap))
+        .h_full()
+        .flex_shrink_0()
+        .cursor_col_resize()
+        .hover(move |style| style.bg(rgb(hover)))
+        .on_mouse_down(MouseButton::Left, {
+            let view = view.clone();
+            move |event: &MouseDownEvent, _, cx| {
+                view.update(cx, |this, cx| {
+                    if event.click_count >= 2 {
+                        this.reset_column(edge);
+                        this.suppress_split = Some(edge);
+                    } else {
+                        this.suppress_split = None;
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .on_drag(drag, |drag, point, _window, cx| {
+            drag.start_x.set(point.x.as_f32());
+            cx.new(|_| SplitGhost)
+        })
+        .on_drag_move({
+            let view = view.clone();
+            move |event: &DragMoveEvent<SplitDrag>, _window, cx| {
+                let drag = event.drag(cx).clone();
+                let start = drag.start_x.get();
+                if !start.is_finite() {
+                    return;
+                }
+                let delta = event.event.position.x.as_f32() - start;
+                let proposed = match drag.edge {
+                    SplitEdge::Right => drag.start_width - delta,
+                    _ => drag.start_width + delta,
+                };
+                view.update(cx, |this, cx| {
+                    this.resize_column(drag.edge, proposed);
+                    cx.notify();
+                });
+            }
+        })
+}
+
+fn right_region(kind: RightPanel, palette: Palette) -> impl IntoElement {
+    let mut column = v_flex().size_full().bg(rgb(palette.members));
+    column = column.child(section_label(kind.title(), palette.muted));
+    match kind {
+        RightPanel::Stream => column.child(div().flex_1().min_h(px(0.)).child(golive::viewer(palette))),
+        RightPanel::Pinned => column.child(div().px(px(12.)).child(paint(
+            "No pinned messages.",
+            palette.muted,
+            13.,
+        ))),
+        RightPanel::Thread => column.child(div().px(px(12.)).child(paint(
+            "Threads are not in this build.",
+            palette.muted,
+            13.,
+        ))),
+        RightPanel::Profile => column.child(div().px(px(12.)).child(paint(
+            "Member profile.",
+            palette.muted,
+            13.,
+        ))),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn discord_columns(
+    cx: &mut Context<RencordWindow>,
+    plan: &ResolvedLayout,
+    palette: Palette,
+    rail: impl IntoElement,
+    sidebar: impl IntoElement,
+    chat: impl IntoElement,
+    people: impl IntoElement,
+    in_call: bool,
+    channels_open: bool,
+    members_open: bool,
+) -> AnyElement {
+    let view = cx.entity();
+    let gap = plan.gap;
+    let mut row = h_flex().size_full();
+    let mut drawer: Option<AnyElement> = None;
+
+    if plan.rail > 0.0 && plan.channels > 0.0 {
+        row = row
+            .child(
+                panel(palette, palette.rail)
+                    .w(px(plan.rail))
+                    .flex_shrink_0()
+                    .child(rail),
+            )
+            .child(column_gap(gap))
+            .child(
+                panel(palette, palette.sidebar)
+                    .w(px(plan.channels))
+                    .flex_shrink_0()
+                    .child(sidebar),
+            )
+            .child(column_splitter(
+                "split-channels",
+                SplitEdge::Channels,
+                plan.channels,
+                gap,
+                palette,
+                view.clone(),
+            ));
+    } else if plan.rail > 0.0 {
+        row = row
+            .child(
+                panel(palette, palette.rail)
+                    .w(px(plan.rail))
+                    .flex_shrink_0()
+                    .child(rail),
+            )
+            .child(column_gap(gap));
+        if channels_open {
+            drawer = Some(sidebar.into_any_element());
+        }
+    } else if plan.channels > 0.0 {
+        row = row
+            .child(
+                panel(palette, palette.sidebar)
+                    .w(px(plan.channels))
+                    .flex_shrink_0()
+                    .child(sidebar),
+            )
+            .child(column_splitter(
+                "split-channels",
+                SplitEdge::Channels,
+                plan.channels,
+                gap,
+                palette,
+                view.clone(),
+            ));
+    } else if channels_open {
+        drawer = Some(
+            h_flex()
+                .size_full()
+                .child(div().w(px(68.)).h_full().flex_shrink_0().child(rail))
+                .child(div().flex_1().h_full().min_w(px(0.)).child(sidebar))
+                .into_any_element(),
+        );
+    }
+
+    let chat_panel = panel(palette, palette.chat).min_w(px(0.));
+    let chat_panel = if plan.chat_grows {
+        chat_panel.flex_1()
+    } else {
+        chat_panel.w(px(plan.chat_width)).flex_shrink_0()
+    };
+    row = row.child(chat_panel.child(chat));
+
+    let mut members_layer: Option<AnyElement> = None;
+    if plan.members > 0.0 {
+        row = row
+            .child(column_splitter(
+                "split-members",
+                SplitEdge::Members,
+                plan.members,
+                gap,
+                palette,
+                view.clone(),
+            ))
+            .child(
+                panel(palette, palette.members)
+                    .w(px(plan.members))
+                    .flex_shrink_0()
+                    .child(people),
+            );
+    } else if members_open && plan.members_as_overlay {
+        members_layer = Some(people.into_any_element());
+    }
+
+    if let Some(kind) = plan.right_kind.filter(|_| plan.right > 0.0) {
+        let before_right = if plan.chat_grows {
+            column_splitter(
+                "split-right",
+                SplitEdge::Right,
+                plan.right,
+                gap,
+                palette,
+                view.clone(),
+            )
+            .into_any_element()
+        } else {
+            column_gap(gap).into_any_element()
+        };
+        let right_panel = if plan.chat_grows {
+            panel(palette, palette.members)
+                .w(px(plan.right))
+                .flex_shrink_0()
+        } else {
+            panel(palette, palette.members).flex_1().min_w(px(0.))
+        };
+        row = row
+            .child(before_right)
+            .child(right_panel.child(right_region(kind, palette)));
+    }
+
+    let reserve = if plan.voice_in_chat {
+        if in_call {
+            176.0
+        } else {
+            60.0
+        }
+    } else {
+        0.0
+    };
+    let show_right_overlay = plan.right_as_overlay && plan.right_kind.is_some();
+    let mut shell = div()
+        .size_full()
+        .relative()
+        .bg(rgb(palette.app_bg))
+        .p(px(gap))
+        .child(row);
+
+    if drawer.is_some() || members_layer.is_some() || show_right_overlay {
+        let scrim = view.clone();
+        shell = shell.child(
+            div()
+                .id("layout-scrim")
+                .absolute()
+                .top(px(0.))
+                .left(px(0.))
+                .right(px(0.))
+                .bottom(px(reserve))
+                .occlude()
+                .on_click(move |_, _, cx| {
+                    scrim.update(cx, |this, cx| {
+                        this.channels_drawer = false;
+                        this.members_overlay = false;
+                        if this.right_overlay {
+                            this.right_choice = RightChoice::Auto;
+                        }
+                        cx.notify();
+                    });
+                }),
+        );
+    }
+    if let Some(drawer) = drawer {
+        shell = shell.child(
+            div()
+                .absolute()
+                .top(px(gap))
+                .left(px(gap
+                    + plan.rail
+                    + if plan.rail > 0.0 { gap } else { 0.0 }))
+                .bottom(px(gap + reserve))
+                .w(px(plan.drawer))
+                .occlude()
+                .child(panel(palette, palette.sidebar).size_full().child(drawer)),
+        );
+    }
+    if let Some(people) = members_layer {
+        shell = shell.child(
+            div()
+                .absolute()
+                .top(px(gap))
+                .right(px(gap))
+                .bottom(px(gap + reserve))
+                .w(px(240.))
+                .occlude()
+                .child(panel(palette, palette.members).size_full().child(people)),
+        );
+    }
+    if show_right_overlay {
+        if let Some(kind) = plan.right_kind {
+            shell = shell.child(
+                div()
+                    .absolute()
+                    .top(px(gap))
+                    .right(px(gap))
+                    .bottom(px(gap + reserve))
+                    .w(px(360.))
+                    .occlude()
+                    .child(
+                        panel(palette, palette.members)
+                            .size_full()
+                            .child(right_region(kind, palette)),
+                    ),
+            );
+        }
+    }
+    shell.into_any_element()
 }
 
 fn panel(palette: Palette, fill: u32) -> gpui_kit::Div {
