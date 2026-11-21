@@ -44,6 +44,9 @@ pub(crate) struct Bootstrap {
     pub gateway_note: String,
     pub discord_theme: Option<String>,
     pub discord_client_theme: Option<String>,
+    pub read_state: Vec<rencord_gateway::ReadyRead>,
+    pub presences: Vec<rencord_gateway::ReadyPresence>,
+    pub voice_states: Vec<rencord_gateway::ReadyVoice>,
 }
 
 pub(crate) enum BootError {
@@ -91,8 +94,15 @@ pub(crate) async fn fetch_bootstrap(token: String) -> Result<Bootstrap, BootErro
         let mut guild_channels = api.guild_channels(guild.id).await.map_err(boot_error)?;
         channels.append(&mut guild_channels);
     }
-    let (gateway, gateway_note, discord_theme, discord_client_theme) =
-        spawn_gateway(token, gateway_url).await;
+    let (
+        gateway,
+        gateway_note,
+        discord_theme,
+        discord_client_theme,
+        read_state,
+        presences,
+        voice_states,
+    ) = spawn_gateway(token, gateway_url).await;
     Ok(Bootstrap {
         api,
         user,
@@ -102,6 +112,9 @@ pub(crate) async fn fetch_bootstrap(token: String) -> Result<Bootstrap, BootErro
         gateway_note,
         discord_theme,
         discord_client_theme,
+        read_state,
+        presences,
+        voice_states,
     })
 }
 
@@ -110,7 +123,15 @@ pub(crate) async fn fetch_bootstrap(token: String) -> Result<Bootstrap, BootErro
 async fn spawn_gateway(
     token: String,
     gateway_url: String,
-) -> (GatewayLink, String, Option<String>, Option<String>) {
+) -> (
+    GatewayLink,
+    String,
+    Option<String>,
+    Option<String>,
+    Vec<rencord_gateway::ReadyRead>,
+    Vec<rencord_gateway::ReadyPresence>,
+    Vec<rencord_gateway::ReadyVoice>,
+) {
     let (events_tx, mut events) = mpsc::channel(256);
     let (commands, cmd_rx) = mpsc::channel(8);
     let (ended_tx, ended) = oneshot::channel();
@@ -133,16 +154,22 @@ async fn spawn_gateway(
         let _ = ended_tx.send(outcome);
     });
     let first = tokio::time::timeout(Duration::from_secs(8), events.recv()).await;
-    let (note, theme, client_theme) = match first {
+    let (note, theme, client_theme, read_state, presences, voice_states) = match first {
         Ok(Some(GatewayEvent::Ready {
             session_id,
             discord_theme,
             discord_client_theme,
+            read_state,
+            presences,
+            voice_states,
             ..
         })) => (
             format!("ready, session {session_id}"),
             discord_theme,
             discord_client_theme,
+            read_state,
+            presences,
+            voice_states,
         ),
         Ok(Some(other)) => (
             format!(
@@ -151,9 +178,26 @@ async fn spawn_gateway(
             ),
             None,
             None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
         ),
-        Ok(None) => ("gateway closed".into(), None, None),
-        Err(_) => ("still waiting for the gateway".into(), None, None),
+        Ok(None) => (
+            "gateway closed".into(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
+        Err(_) => (
+            "still waiting for the gateway".into(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ),
     };
     (
         GatewayLink {
@@ -164,6 +208,9 @@ async fn spawn_gateway(
         note,
         theme,
         client_theme,
+        read_state,
+        presences,
+        voice_states,
     )
 }
 

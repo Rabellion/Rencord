@@ -15,6 +15,8 @@ pub struct RosterMember {
     pub avatar: Option<String>,
     /// Guild-specific avatar hash. Preferred over `avatar` when drawing the row.
     pub guild_avatar: Option<String>,
+    /// Highest coloured role, when the payload includes role objects.
+    pub color: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -245,7 +247,27 @@ fn member_from_item(item: &Value) -> Option<RosterMember> {
         activity,
         avatar,
         guild_avatar,
+        color: highest_role_color(member),
     })
+}
+
+fn highest_role_color(member: &Value) -> Option<u32> {
+    let roles = member.get("roles")?.as_array()?;
+    let mut best: Option<(i64, u32)> = None;
+    for role in roles {
+        let color = role.get("color").and_then(|color| color.as_u64())? as u32;
+        if color == 0 {
+            continue;
+        }
+        let position = role
+            .get("position")
+            .and_then(|position| position.as_i64())
+            .unwrap_or(0);
+        if best.is_none_or(|(best_position, _)| position >= best_position) {
+            best = Some((position, color));
+        }
+    }
+    best.map(|(_, color)| color)
 }
 
 fn activity_line(presence: Option<&Value>) -> String {
