@@ -1,0 +1,20 @@
+[package]
+name = "rencord-hdr"
+version = "0.1.0"
+description = "HDR capture probes, 10-bit encode contracts, tone-mapping, and Rencord-to-Rencord signalling"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+naga = { version = "25", default-features = false, features = ["wgsl-in"] }
+
+[[bench]]
+name = "throughput"
+harness = false

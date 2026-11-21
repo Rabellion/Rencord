@@ -16,7 +16,8 @@ use std::time::Instant;
 pub use icons::{discord_install_icon_dir, icon_pack_dir};
 pub use search::{guild_search_path, local_search, parse_message_query, MessageQuery, SearchHit};
 pub use theme::{
-    token_summary, Density, LayoutKind, Palette, Preferences, ThemeMode, MOTION_OVERLAY_MS,
+    token_summary, Density, HdrCurveChoice, LayoutKind, Palette, Preferences, ThemeMode,
+    MOTION_OVERLAY_MS,
 };
 
 #[derive(Clone, Debug)]
@@ -466,6 +467,45 @@ impl Shell {
         self.prefs.bump_font(direction);
     }
 
+    pub fn toggle_hdr_send(&mut self) {
+        self.prefs.hdr_send = !self.prefs.hdr_send;
+    }
+
+    pub fn toggle_hdr_receive(&mut self) {
+        self.prefs.hdr_receive = !self.prefs.hdr_receive;
+    }
+
+    pub fn cycle_hdr_curve(&mut self) {
+        self.prefs.hdr_curve = self.prefs.hdr_curve.cycle();
+    }
+
+    /// What the toggles would do for a 1 000 cd/m² master and an unknown audience.
+    /// The Go Live worker still tone-maps, so the line says so.
+    pub fn hdr_settings_summary(&self) -> String {
+        let session = rencord_hdr::HdrSession::from_settings(
+            self.prefs.hdr_send,
+            self.prefs.hdr_receive,
+            self.prefs.hdr_curve.tone_curve(),
+        );
+        let plan =
+            rencord_hdr::HdrSignal::plan(&session, &rencord_hdr::SourceColorimetry::hdr10(1000.0));
+        format!(
+            "{} · {} · {}. {} The Go Live worker still tone-maps HDR to 8-bit.",
+            if self.prefs.hdr_send {
+                "Send on"
+            } else {
+                "Send off"
+            },
+            if self.prefs.hdr_receive {
+                "Receive on"
+            } else {
+                "Receive off"
+            },
+            self.prefs.hdr_curve.label(),
+            plan.summary()
+        )
+    }
+
     pub fn select_channel_timed(&mut self, channel_id: Snowflake) {
         let started = Instant::now();
         self.session.select_channel(channel_id);
@@ -757,6 +797,12 @@ impl Shell {
             self.prefs.density.label(),
             self.prefs.font_px
         ));
+        lines.push(format!(
+            "hdr send={} receive={} curve={}",
+            self.prefs.hdr_send,
+            self.prefs.hdr_receive,
+            self.prefs.hdr_curve.label()
+        ));
         lines.push(token_summary());
         lines.push(format!(
             "icon-pack {}",
@@ -831,6 +877,15 @@ mod tests {
             ));
         shell.cycle_theme();
         assert_eq!(shell.prefs.theme, ThemeMode::Dark);
+        assert!(!shell.prefs.hdr_send);
+        assert!(shell.hdr_settings_summary().contains("Send off"));
+        assert!(shell.hdr_settings_summary().contains("tone-maps"));
+        shell.toggle_hdr_send();
+        shell.toggle_hdr_receive();
+        shell.cycle_hdr_curve();
+        assert!(shell.prefs.hdr_send && shell.prefs.hdr_receive);
+        assert_eq!(shell.prefs.hdr_curve, HdrCurveChoice::Hable);
+        assert!(shell.outline().contains("hdr send=true"));
         shell.begin_reply(Snowflake::new(1000));
         shell.send_local("noted");
         assert!(shell.outline().contains("replying to 1000"));
