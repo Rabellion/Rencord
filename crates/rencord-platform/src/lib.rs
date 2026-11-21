@@ -12,8 +12,8 @@ pub use appearance::{
     sanitize_account, system_reduced_motion, system_scheme, themes_dir, SystemScheme,
 };
 
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
@@ -52,7 +52,6 @@ pub fn official_login_requirements() -> OfficialLoginRequirements {
 }
 
 pub trait SecretStore {
-    fn save_token(&self, token: &str) -> Result<(), PlatformError>;
     fn load_token(&self) -> Result<Option<String>, PlatformError>;
     fn clear_token(&self) -> Result<(), PlatformError>;
 }
@@ -77,20 +76,6 @@ impl FileSecretStore {
 }
 
 impl SecretStore for FileSecretStore {
-    fn save_token(&self, token: &str) -> Result<(), PlatformError> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&self.path)?;
-        restrict_private(&file)?;
-        file.write_all(token.as_bytes())?;
-        Ok(())
-    }
-
     fn load_token(&self) -> Result<Option<String>, PlatformError> {
         match fs::read_to_string(&self.path) {
             Ok(value) => {
@@ -113,21 +98,6 @@ impl SecretStore for FileSecretStore {
             Err(err) => Err(err.into()),
         }
     }
-}
-
-fn restrict_private(file: &fs::File) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = file.metadata()?.permissions();
-        permissions.set_mode(0o600);
-        file.set_permissions(permissions)?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = file;
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -165,19 +135,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_secret_roundtrip_and_mode() {
+    fn a_legacy_token_file_is_read_then_cleared() {
         let path = std::env::temp_dir().join(format!("rencord-token-{}", std::process::id()));
         let _ = fs::remove_file(&path);
         let store = FileSecretStore::new(&path);
         assert!(store.load_token().unwrap().is_none());
-        store.save_token("abc").unwrap();
+        // Rencord no longer writes this file; an older build did.
+        fs::write(&path, "abc\n").unwrap();
         assert_eq!(store.load_token().unwrap().as_deref(), Some("abc"));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600);
-        }
         store.clear_token().unwrap();
         assert!(store.load_token().unwrap().is_none());
     }
