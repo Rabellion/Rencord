@@ -31,6 +31,8 @@ pub enum ApiError {
         what: &'static str,
         source: serde_json::Error,
     },
+    #[error("not fetched: {0}")]
+    Refused(String),
 }
 
 /// The line shown in the window. The raw body stays in the debug log.
@@ -73,6 +75,30 @@ struct Bucket {
     reset_at: Instant,
 }
 
+/// Largest image the client will download.
+pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+/// Hosts Discord serves images from: its CDN, and the media proxies behind
+/// embeds. A message can link anywhere; nothing else is ever contacted from
+/// one, so another user cannot make Rencord reveal an address by posting a link.
+pub fn is_discord_image_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    parsed.scheme() == "https"
+        && parsed
+            .host_str()
+            .is_some_and(|host| host == "cdn.discordapp.com" || host.ends_with(".discordapp.net"))
+}
+
+/// Redirects stay inside Discord, for the API and for images alike.
+fn is_discord_host(host: &str) -> bool {
+    host == "discord.com"
+        || host.ends_with(".discord.com")
+        || host == "discordapp.com"
+        || host.ends_with(".discordapp.com")
+        || host.ends_with(".discordapp.net")
+}
 pub struct DiscordApi {
     http: reqwest::Client,
     base: String,
@@ -88,6 +114,15 @@ impl DiscordApi {
     pub fn with_base(token: Token, base: String) -> Self {
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 {
+                    attempt.error("too many redirects")
+                } else if attempt.url().host_str().is_some_and(is_discord_host) {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }))
             .build()
             .expect("reqwest client builds with rustls");
         Self {
@@ -96,6 +131,48 @@ impl DiscordApi {
             token,
             buckets: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Downloads an image from Discord's CDN. The token is not sent, only
+    /// Discord's image hosts are allowed, and the size is capped.
+    pub async fn fetch_image(&self, url: &str) -> Result<Vec<u8>, ApiError> {
+        if !is_discord_image_url(url) {
+            return Err(ApiError::Refused(
+                "that is not a Discord image address".into(),
+            ));
+        }
+        self.download(url, MAX_IMAGE_BYTES).await
+    }
+
+    async fn download(&self, url: &str, max: usize) -> Result<Vec<u8>, ApiError> {
+        // A plain request: the Authorization header is added only by send().
+        let mut response = self
+            .http
+            .get(url)
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(ApiError::Status {
+                status: status.as_u16(),
+                body: String::new(),
+            });
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > max as u64)
+        {
+            return Err(ApiError::Refused("the image is too large".into()));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len() + chunk.len() > max {
+                return Err(ApiError::Refused("the image is too large".into()));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
     }
 
     pub async fn current_user(&self) -> Result<User, ApiError> {
@@ -658,5 +735,127 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].content, "found");
+    }
+
+    /// Answers one request with exactly these bytes, and reports the request.
+    async fn serve_raw(response: Vec<u8>) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = socket.read(&mut buf).await.unwrap();
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+            let _ = socket.write_all(&response).await;
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    #[test]
+    fn only_discords_image_hosts_are_fetched() {
+        for ok in [
+            "https://cdn.discordapp.com/avatars/1/abc.png?size=64",
+            "https://media.discordapp.net/attachments/1/2/a.png?ex=1&is=2&hm=3&",
+            "https://images-ext-1.discordapp.net/external/x/https/example.test/t.png",
+        ] {
+            assert!(is_discord_image_url(ok), "{ok}");
+        }
+        for bad in [
+            "http://cdn.discordapp.com/avatars/1/abc.png",
+            "https://example.test/tracker.png",
+            "https://cdn.discordapp.com.evil.example/a.png",
+            "https://notdiscordapp.net/a.png",
+            "https://discordapp.net.evil.example/a.png",
+            "https://127.0.0.1/a.png",
+            "file:///C:/secret.png",
+            "not a url",
+            "",
+        ] {
+            assert!(!is_discord_image_url(bad), "{bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_image_refuses_a_host_that_is_not_discords_without_connecting() {
+        let api = DiscordApi::with_base(Token::new("secret-token"), "http://127.0.0.1:9".into());
+        let error = api
+            .fetch_image("https://example.test/tracker.png")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, ApiError::Refused(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_download_returns_the_bytes_and_never_sends_the_token() {
+        let body = b"\x89PNG-bytes".to_vec();
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(&body);
+        let (base, request) = serve_raw(response).await;
+        let api = DiscordApi::with_base(Token::new("secret-token"), base.clone());
+        let got = api
+            .download(&format!("{base}/img.png"), 1024)
+            .await
+            .unwrap();
+        assert_eq!(got, body);
+        let seen = request.await.unwrap().to_lowercase();
+        assert!(!seen.contains("authorization"), "{seen}");
+        assert!(!seen.contains("secret-token"), "{seen}");
+        assert!(seen.contains("user-agent: rencord"), "{seen}");
+    }
+
+    #[tokio::test]
+    async fn a_download_over_the_cap_is_refused() {
+        // Declared too large: refused before the body is read.
+        let declared =
+            b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\nconnection: close\r\n\r\nxx".to_vec();
+        let (base, _) = serve_raw(declared).await;
+        let api = DiscordApi::with_base(Token::new("t"), base.clone());
+        let error = api.download(&format!("{base}/a"), 10).await.unwrap_err();
+        assert!(matches!(error, ApiError::Refused(_)), "{error}");
+
+        // No length declared: refused once the body passes the cap.
+        let mut open_ended = b"HTTP/1.1 200 OK\r\nconnection: close\r\n\r\n".to_vec();
+        open_ended.extend(std::iter::repeat_n(b'x', 5000));
+        let (base, _) = serve_raw(open_ended).await;
+        let api = DiscordApi::with_base(Token::new("t"), base.clone());
+        let error = api.download(&format!("{base}/a"), 1000).await.unwrap_err();
+        assert!(matches!(error, ApiError::Refused(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_failed_download_reports_the_status() {
+        let response =
+            b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_vec();
+        let (base, _) = serve_raw(response).await;
+        let api = DiscordApi::with_base(Token::new("t"), base.clone());
+        let error = api
+            .download(&format!("{base}/gone.png"), 1024)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ApiError::Status { status: 404, .. }),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_redirect_off_discord_is_not_followed() {
+        let response = b"HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:1/elsewhere.png\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_vec();
+        let (base, _) = serve_raw(response).await;
+        let api = DiscordApi::with_base(Token::new("t"), base.clone());
+        let error = api
+            .download(&format!("{base}/a.png"), 1024)
+            .await
+            .unwrap_err();
+        // The redirect itself comes back, so no request ever reaches that host.
+        assert!(
+            matches!(error, ApiError::Status { status: 302, .. }),
+            "{error}"
+        );
     }
 }
