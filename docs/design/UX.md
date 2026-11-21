@@ -48,9 +48,9 @@ The four columns stay the default. Breakpoints live in `layout::resolve` and tak
 | 16:9 and 16:10, including 1920×1080, 1440×900, 1366×768, 1280×800, 1280×720, and 1000×700 | Rail, channel list, chat, and member list. The member list stays until the chat column would drop under 420 px. |
 | About 800×600 | The member list becomes an overlay (Ctrl+M). The channel list stays. |
 | Narrower still, or a very short window | The channel list becomes a drawer (Ctrl+B, or the channel title). Ctrl+K still opens the quick switcher. |
-| 21:9 and 32:9 (2560×1080, 3440×1440, 5120×1440) | The message column is capped at about 92 characters. The member list and a stream stage take the rest. Messages do not run to the far edge. |
+| 21:9 and 32:9 (2560×1080, 3440×1440, 5120×1440) | The four columns stay. The message column is capped at about 92 characters and the spare width is a gutter. A stream panel opens only while one is actually on screen. |
 | 3840×2160 | The four columns stay. The text block inside the chat column is capped; the column itself still fills. |
-| Portrait: 1080×1920, 900×1440, 800×1280, 768×1366 | A narrow server rail stays. Channels and members are drawers. The composer and the voice dock sit at the bottom of the chat. Header and dock targets grow to about 44 px. |
+| Portrait: 1080×1920, 900×1440, 800×1280, 768×1366 | A narrow server rail stays. Channels and members are drawers. A channel button at the left of the header opens the channel drawer; the people icon opens the member list. The composer and the voice dock sit at the bottom of the chat. Header targets grow to about 44 px. The composer keeps the same left inset as the landscape window. |
 
 The gaps between the channel list, the chat, and the member list are drag handles. A drag is clamped so the chat column keeps its floor. Double-click restores the theme default. Widths are stored under `$XDG_DATA_HOME/rencord/layout.json`, keyed by aspect, DPI step (100, 125, 150, 200), and monitor. On launch, a saved window that sits off a monitor is moved back onto the visible bounds and snapped to device pixels. Text and icons are drawn as vectors. The demo avatars are 128 px sources, which cover a 40 px avatar at 200%.
 

@@ -112,6 +112,16 @@ fn main() {
         .windows(2)
         .find(|pair| pair[0] == "--screenshot")
         .map(|pair| pair[1].clone());
+    let panel = args
+        .windows(2)
+        .find(|pair| pair[0] == "--panel")
+        .and_then(|pair| parse_panel(&pair[1]));
+    let open_drawer = args
+        .windows(2)
+        .any(|pair| pair[0] == "--open" && pair[1] == "drawer");
+    let open_members = args
+        .windows(2)
+        .any(|pair| pair[0] == "--open" && pair[1] == "members");
     if let Some(scale) = scale {
         // Read by GPUI before the X11 connection opens.
         std::env::set_var("GPUI_X11_SCALE_FACTOR", format!("{scale}"));
@@ -199,6 +209,9 @@ fn main() {
                     reveal_hover,
                     golive,
                     screenshot.clone(),
+                    panel,
+                    open_drawer,
+                    open_members,
                     persist_layout,
                     layout_store.clone(),
                     layout_path.clone(),
@@ -219,6 +232,16 @@ fn parse_frame(raw: &str) -> Option<(f32, f32)> {
         Some((width, height))
     } else {
         None
+    }
+}
+
+fn parse_panel(raw: &str) -> Option<RightPanel> {
+    match raw {
+        "stream" => Some(RightPanel::Stream),
+        "pinned" => Some(RightPanel::Pinned),
+        "profile" => Some(RightPanel::Profile),
+        "thread" => Some(RightPanel::Thread),
+        _ => None,
     }
 }
 
@@ -326,6 +349,9 @@ impl RencordWindow {
         reveal_hover: bool,
         golive: golive::GoLiveMode,
         screenshot: Option<String>,
+        panel: Option<RightPanel>,
+        open_drawer: bool,
+        open_members: bool,
         persist_layout: bool,
         layout_store: LayoutStore,
         layout_path: PathBuf,
@@ -393,9 +419,9 @@ impl RencordWindow {
             golive,
             columns: SavedColumns::default(),
             reading_anchor: ReadingAnchor::Left,
-            right_choice: RightChoice::Auto,
-            channels_drawer: false,
-            members_overlay: false,
+            right_choice: panel.map(RightChoice::Open).unwrap_or(RightChoice::Auto),
+            channels_drawer: open_drawer,
+            members_overlay: open_members,
             channels_as_drawer: false,
             members_as_overlay: false,
             right_overlay: false,
@@ -1528,12 +1554,11 @@ impl RencordWindow {
                             .overflow_hidden()
                             .when(plan.channels_as_drawer, |title| {
                                 let view = this.clone();
-                                title.cursor_pointer().on_click(move |_, _, cx| {
-                                    view.update(cx, |this, cx| {
-                                        this.toggle_channels();
-                                        cx.notify();
-                                    });
-                                })
+                                title.child(drawer_button(
+                                    view,
+                                    palette,
+                                    hit.max(layout::TOUCH_TARGET),
+                                ))
                             })
                             .child(icon("hash", if ink { 16. } else { 20. }, palette.muted))
                             .child(
@@ -1661,7 +1686,7 @@ impl RencordWindow {
                     this.clone(),
                     "composer-plus",
                     "plus",
-                    hit,
+                    32.,
                     palette,
                     |view, cx| {
                         view.shell.note("File uploads are not in this build.");
@@ -1680,7 +1705,7 @@ impl RencordWindow {
                     this.clone(),
                     "composer-gif",
                     "gif",
-                    hit,
+                    32.,
                     palette,
                     |view, cx| {
                         view.shell.note("GIF search is not in this build.");
@@ -1691,7 +1716,7 @@ impl RencordWindow {
                     this.clone(),
                     "composer-emoji",
                     "emoji",
-                    hit,
+                    32.,
                     palette,
                     |view, cx| {
                         view.shell.note("The emoji picker is not in this build.");
@@ -2763,6 +2788,47 @@ fn rail_action(
         .child(tile_el)
 }
 
+fn drawer_button(view: Entity<RencordWindow>, palette: Palette, hit: f32) -> impl IntoElement {
+    let bar = div()
+        .w(px(16.))
+        .h(px(2.))
+        .rounded(px(1.))
+        .bg(rgb(palette.text));
+    v_flex()
+        .id("open-channels")
+        .size(px(hit))
+        .flex_shrink_0()
+        .rounded(px(6.))
+        .items_center()
+        .justify_center()
+        .gap(px(3.))
+        .cursor_pointer()
+        .border_1()
+        .border_color(rgb(palette.line))
+        .hover(move |style| style.bg(rgb(palette.hover)))
+        .child(bar)
+        .child(
+            div()
+                .w(px(16.))
+                .h(px(2.))
+                .rounded(px(1.))
+                .bg(rgb(palette.text)),
+        )
+        .child(
+            div()
+                .w(px(16.))
+                .h(px(2.))
+                .rounded(px(1.))
+                .bg(rgb(palette.text)),
+        )
+        .on_click(move |_, _, cx| {
+            view.update(cx, |this, cx| {
+                this.toggle_channels();
+                cx.notify();
+            });
+        })
+}
+
 fn header_icon(
     view: Entity<RencordWindow>,
     id: &'static str,
@@ -3717,6 +3783,9 @@ fn discord_columns(
     let view = cx.entity();
     let gap = plan.gap;
     let mut row = h_flex().size_full();
+    if !plan.chat_grows && plan.right <= 0.5 {
+        row = row.justify_center();
+    }
     let mut drawer: Option<AnyElement> = None;
 
     if plan.rail > 0.0 && plan.channels > 0.0 {

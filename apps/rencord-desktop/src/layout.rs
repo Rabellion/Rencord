@@ -175,7 +175,7 @@ impl RightPanel {
 /// What the extra right-hand region is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RightChoice {
-    /// Stream stage on wide and ultrawide. Nothing elsewhere.
+    /// No extra panel. A stream opens only when one is actually on screen.
     Auto,
     Open(RightPanel),
     Closed,
@@ -189,14 +189,10 @@ impl RightChoice {
         }
     }
 
-    pub fn displayed(self, aspect: AspectClass) -> Option<RightPanel> {
+    pub fn displayed(self, _aspect: AspectClass) -> Option<RightPanel> {
         match self {
-            Self::Closed => None,
+            Self::Closed | Self::Auto => None,
             Self::Open(panel) => Some(panel),
-            Self::Auto => match aspect {
-                AspectClass::Wide | AspectClass::Ultrawide => Some(RightPanel::Stream),
-                _ => None,
-            },
         }
     }
 }
@@ -466,20 +462,33 @@ pub fn resolve(input: &LayoutInput) -> ResolvedLayout {
     let mut right_overlay = false;
 
     if wide && channels > 0.0 && members > 0.0 {
-        let members_used = if aspect == AspectClass::Ultrawide && input.saved.members.is_none() {
-            members.max(240.0).clamp(MEMBERS_MIN, MEMBERS_MAX)
+        let members_used = members.clamp(MEMBERS_MIN, MEMBERS_MAX);
+        if kind.is_some() {
+            let chrome = shell_chrome(5, gap);
+            let leftover = width - chrome - rail - channels - chat_fixed_target - members_used;
+            if leftover >= RIGHT_MIN {
+                members = members_used;
+                right = leftover.min(RIGHT_MAX);
+                chat_width = chat_fixed_target;
+                chat_grows = false;
+            } else {
+                chat_width = flex_chat(width, gap, rail, &mut channels, &mut members, &mut right);
+                if right == 0.0 {
+                    right_overlay = true;
+                }
+            }
         } else {
-            members.clamp(MEMBERS_MIN, MEMBERS_MAX)
-        };
-        let chrome = shell_chrome(5, gap);
-        let leftover = width - chrome - rail - channels - chat_fixed_target - members_used;
-        if leftover >= RIGHT_MIN {
-            members = members_used;
-            right = leftover.min(RIGHT_MAX);
-            chat_width = chat_fixed_target;
-            chat_grows = false;
-        } else {
-            chat_width = flex_chat(width, gap, rail, &mut channels, &mut members, &mut right);
+            // Four columns at a reading width. The spare canvas is a gutter,
+            // not a stream panel.
+            let chrome = shell_chrome(4, gap);
+            let room = width - chrome - rail - channels - members_used;
+            if room >= CHAT_MIN {
+                members = members_used;
+                chat_width = chat_fixed_target.min(room);
+                chat_grows = false;
+            } else {
+                chat_width = flex_chat(width, gap, rail, &mut channels, &mut members, &mut right);
+            }
         }
     } else {
         if kind.is_some() && channels > 0.0 {
@@ -968,8 +977,11 @@ mod tests {
             assert_eq!(layout.aspect, AspectClass::Wide, "{width}x{height}");
             assert_eq!(layout.mode, ColumnMode::Classic);
             assert!(!layout.chat_grows);
-            assert!(layout.right >= RIGHT_MIN);
+            assert_eq!(layout.right, 0.0, "{width}x{height} stays four columns");
+            assert!(layout.right_kind.is_none());
             assert!(layout.chat_width < width * 0.5);
+            let used = layout.rail + layout.channels + layout.chat_width + layout.members;
+            assert!(width - used > 400.0, "gutter on {width}");
             let ch = layout.reading_width.unwrap() / (14.0 * CH_EM);
             assert!((80.0..=100.0).contains(&ch));
         }
@@ -982,8 +994,10 @@ mod tests {
             "messages span {}",
             ultra.chat_width
         );
-        assert!(ultra.right > 2000.0, "stream region {}", ultra.right);
-        assert!(ultra.chat_width + ultra.right < 5120.0);
+        assert_eq!(ultra.right, 0.0);
+        assert!(ultra.right_kind.is_none());
+        let used = ultra.rail + ultra.channels + ultra.chat_width + ultra.members;
+        assert!(5120.0 - used > 1000.0, "ultrawide gutter");
 
         for (width, height) in [
             (1080.0, 1920.0),
@@ -1015,6 +1029,19 @@ mod tests {
     }
 
     #[test]
+    fn stream_panel_opens_only_while_watching() {
+        let idle = plan(3440.0, 1440.0);
+        assert_eq!(idle.right, 0.0);
+        assert!(idle.right_kind.is_none());
+        let mut watching = LayoutInput::for_size(5120.0, 1440.0);
+        watching.right = RightChoice::Open(RightPanel::Stream);
+        let layout = resolve(&watching);
+        assert_eq!(layout.right_kind, Some(RightPanel::Stream));
+        assert!(layout.right > 2000.0, "watching uses {}", layout.right);
+        assert!(layout.chat_width < 1100.0);
+    }
+
+    #[test]
     fn screenshot_sizes_are_part_of_the_matrix() {
         for (name, width, height) in SCREENSHOT_SIZES {
             let layout = plan(*width, *height);
@@ -1027,10 +1054,12 @@ mod tests {
                 }
                 "3440x1440" => {
                     assert_eq!(layout.aspect, AspectClass::Wide, "{name}");
-                    assert!(layout.right > 0.0);
+                    assert_eq!(layout.right, 0.0);
+                    assert!(layout.chat_width < 1100.0);
                 }
                 "5120x1440" => {
                     assert_eq!(layout.aspect, AspectClass::Ultrawide, "{name}");
+                    assert_eq!(layout.right, 0.0);
                     assert!(layout.chat_width < 1100.0);
                 }
                 other => panic!("unexpected screenshot {other}"),
