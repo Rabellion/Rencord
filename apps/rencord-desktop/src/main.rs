@@ -749,6 +749,8 @@ impl RencordWindow {
                 "error",
                 "-f",
                 "x11grab",
+                "-draw_mouse",
+                "0",
                 "-video_size",
                 &format!("{width}x{height}"),
                 "-i",
