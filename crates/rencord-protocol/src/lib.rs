@@ -431,10 +431,19 @@ pub struct WireRef {
     pub message_id: Option<Snowflake>,
 }
 
+fn custom_emoji_at(content: &str) -> Option<usize> {
+    match (content.find("<:"), content.find("<a:")) {
+        (Some(plain), Some(animated)) => Some(plain.min(animated)),
+        (Some(plain), None) => Some(plain),
+        (None, Some(animated)) => Some(animated),
+        (None, None) => None,
+    }
+}
+
 fn strip_custom_emoji(content: &str) -> String {
     let mut out = String::new();
     let mut rest = content;
-    while let Some(start) = rest.find("<:").or_else(|| rest.find("<a:")) {
+    while let Some(start) = custom_emoji_at(rest) {
         out.push_str(&rest[..start]);
         let token = &rest[start..];
         let Some(end) = token.find('>') else {
@@ -450,7 +459,7 @@ fn strip_custom_emoji(content: &str) -> String {
 fn custom_emoji_ids(content: &str) -> Vec<u64> {
     let mut ids = Vec::new();
     let mut rest = content;
-    while let Some(start) = rest.find("<:").or_else(|| rest.find("<a:")) {
+    while let Some(start) = custom_emoji_at(rest) {
         let token = &rest[start..];
         let Some(end) = token.find('>') else { break };
         let body = &token[1..end];
@@ -487,28 +496,35 @@ impl From<WireMessage> for Message {
                 );
             }
         }
-        if value.edited_timestamp.is_some() && !content.contains("(edited)") {
-            content.push_str(" (edited)");
-        }
-        if let Some(reference) = value.message_reference.as_ref().and_then(|r| r.message_id) {
-            if !content.starts_with("replying to ") {
-                content = format!("replying to {}: {content}", reference.get());
-            }
-        }
         let mut extras = Vec::new();
         for file in &value.attachments {
             let url = media_url(&WireMedia {
                 url: file.url.clone(),
                 proxy_url: file.proxy_url.clone(),
             });
-            if !url.is_empty() {
+            if url.is_empty() {
+                continue;
+            }
+            let image = file
+                .content_type
+                .as_deref()
+                .is_none_or(|kind| kind.starts_with("image/"));
+            if image {
                 extras.push(format!("attachment:{url}"));
+            } else {
+                extras.push(url);
             }
         }
         for embed in &value.embeds {
-            if content.trim().is_empty() {
-                if let Some(title) = embed.title.as_deref().or(embed.description.as_deref()) {
-                    content = title.to_owned();
+            for text in [embed.title.as_deref(), embed.description.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                if !content.contains(text) {
+                    if !content.is_empty() && !content.ends_with('\n') {
+                        content.push('\n');
+                    }
+                    content.push_str(text);
                 }
             }
             if let Some(media) = embed.image.as_ref().or(embed.thumbnail.as_ref()) {
@@ -516,6 +532,14 @@ impl From<WireMessage> for Message {
                 if !url.is_empty() {
                     extras.push(format!("attachment:{url}"));
                 }
+            }
+        }
+        if value.edited_timestamp.is_some() && !content.contains("(edited)") {
+            content.push_str(" (edited)");
+        }
+        if let Some(reference) = value.message_reference.as_ref().and_then(|r| r.message_id) {
+            if !content.starts_with("replying to ") {
+                content = format!("replying to {}: {content}", reference.get());
             }
         }
         for sticker in &value.sticker_items {
@@ -796,6 +820,33 @@ mod tests {
         let embed = r#"{"id":"1","channel_id":"1","content":"","author":{"id":"1","username":"a"},"embeds":[{"title":"Welcome card"}]}"#;
         let message = Message::from(serde_json::from_str::<WireMessage>(embed).unwrap());
         assert_eq!(message.content, "Welcome card");
+
+        let both = r#"{"id":"1","channel_id":"1","content":"<a:wave:11> <:smile:22>","edited_timestamp":"t","author":{"id":"1","username":"a"},"embeds":[{"title":"Report","description":"Results"}]}"#;
+        let message = Message::from(serde_json::from_str::<WireMessage>(both).unwrap());
+        assert!(
+            message.content.contains("emoji:11\nemoji:22")
+                || (message.content.find("emoji:11") < message.content.find("emoji:22")),
+            "{}",
+            message.content
+        );
+        assert!(message.content.contains("Report"), "{}", message.content);
+        assert!(message.content.contains("Results"), "{}", message.content);
+        assert!(message.content.contains("(edited)"), "{}", message.content);
+        assert!(!message.content.contains("<a:"), "{}", message.content);
+        assert!(!message.content.contains("<:"), "{}", message.content);
+
+        let file = r#"{"id":"1","channel_id":"1","content":"notes","author":{"id":"1","username":"a"},"attachments":[{"url":"https://cdn.example/a.pdf","content_type":"application/pdf"}]}"#;
+        let message = Message::from(serde_json::from_str::<WireMessage>(file).unwrap());
+        assert!(
+            message.content.contains("https://cdn.example/a.pdf"),
+            "{}",
+            message.content
+        );
+        assert!(
+            !message.content.contains("attachment:"),
+            "{}",
+            message.content
+        );
     }
 
     #[test]

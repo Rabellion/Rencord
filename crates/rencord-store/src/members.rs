@@ -54,6 +54,13 @@ pub fn apply_member_list(groups: &mut Vec<RosterGroup>, data: &Value) -> bool {
                     .and_then(|index| index.as_u64())
                     .unwrap_or(0) as usize;
                 if let Some(item) = op.get("item") {
+                    if item.get("group").is_some()
+                        && kind == "UPDATE"
+                        && update_group(groups, index, item)
+                    {
+                        changed = true;
+                        continue;
+                    }
                     if kind == "UPDATE" {
                         remove_slot(groups, index);
                     }
@@ -110,7 +117,7 @@ fn push_item(groups: &mut Vec<RosterGroup>, item: &Value) {
 
 fn insert_slot(groups: &mut Vec<RosterGroup>, index: usize, item: &Value) {
     if item.get("group").is_some() {
-        push_item(groups, item);
+        insert_group(groups, index, item);
         return;
     }
     let Some(member) = member_from_item(item) else {
@@ -118,21 +125,77 @@ fn insert_slot(groups: &mut Vec<RosterGroup>, index: usize, item: &Value) {
     };
     let mut seen = 0usize;
     for group in groups.iter_mut() {
-        if index <= seen + group.members.len() {
-            let at = index.saturating_sub(seen).min(group.members.len());
-            group.members.insert(at, member);
+        let start = seen + 1;
+        let end = start + group.members.len();
+        if index >= start && index <= end {
+            group.members.insert(index - start, member);
             return;
         }
-        seen += group.members.len() + 1;
+        seen = end;
     }
     push_item(groups, item);
 }
 
-fn remove_slot(groups: &mut [RosterGroup], index: usize) {
+fn insert_group(groups: &mut Vec<RosterGroup>, index: usize, item: &Value) {
+    let (name, count) = group_header(item);
+    let mut seen = 0usize;
+    for (at, group) in groups.iter().enumerate() {
+        if index <= seen {
+            groups.insert(
+                at,
+                RosterGroup {
+                    name,
+                    count,
+                    members: Vec::new(),
+                },
+            );
+            return;
+        }
+        seen += group.members.len() + 1;
+    }
+    groups.push(RosterGroup {
+        name,
+        count,
+        members: Vec::new(),
+    });
+}
+
+fn update_group(groups: &mut [RosterGroup], index: usize, item: &Value) -> bool {
+    let (name, count) = group_header(item);
     let mut seen = 0usize;
     for group in groups.iter_mut() {
         if index == seen {
-            return;
+            group.name = name;
+            group.count = count;
+            return true;
+        }
+        seen += group.members.len() + 1;
+    }
+    false
+}
+
+fn group_header(item: &Value) -> (String, u32) {
+    let group = item.get("group");
+    let name = group_name(
+        group
+            .and_then(|group| group.get("id"))
+            .and_then(|id| id.as_str())
+            .unwrap_or("online"),
+    );
+    let count = group
+        .and_then(|group| group.get("count"))
+        .and_then(|count| count.as_u64())
+        .unwrap_or(0) as u32;
+    (name, count)
+}
+
+fn remove_slot(groups: &mut Vec<RosterGroup>, index: usize) {
+    let mut seen = 0usize;
+    let mut drop_group = None;
+    for (group_index, group) in groups.iter_mut().enumerate() {
+        if index == seen {
+            drop_group = Some(group_index);
+            break;
         }
         let start = seen + 1;
         if index < start + group.members.len() {
@@ -140,6 +203,9 @@ fn remove_slot(groups: &mut [RosterGroup], index: usize) {
             return;
         }
         seen = start + group.members.len();
+    }
+    if let Some(group_index) = drop_group {
+        groups.remove(group_index);
     }
 }
 
@@ -257,5 +323,33 @@ mod tests {
         assert!(apply_member_list(&mut groups, &remove));
         assert_eq!(groups[1].members.len(), 1);
         assert_eq!(groups[1].members[0].name, "Boyka");
+
+        let mut groups = Vec::new();
+        assert!(apply_member_list(&mut groups, &payload));
+        let update = serde_json::json!({
+            "ops": [{
+                "op": "UPDATE",
+                "index": 1,
+                "item": {"member": {"user": {"id": "9", "global_name": "Updated"}}}
+            }]
+        });
+        assert!(apply_member_list(&mut groups, &update));
+        assert_eq!(groups[0].members.len(), 1);
+        assert_eq!(groups[0].members[0].name, "Updated");
+        let header = serde_json::json!({
+            "ops": [{
+                "op": "UPDATE",
+                "index": 0,
+                "item": {"group": {"id": "online", "count": 4}}
+            }]
+        });
+        assert!(apply_member_list(&mut groups, &header));
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].count, 4);
+        assert_eq!(groups[0].members[0].name, "Updated");
+        let drop_header = serde_json::json!({"ops": [{"op": "DELETE", "index": 0}]});
+        assert!(apply_member_list(&mut groups, &drop_header));
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name, "Ranked Players");
     }
 }

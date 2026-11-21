@@ -8,7 +8,7 @@ mod settings_ui;
 
 use std::borrow::Cow;
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
@@ -417,6 +417,7 @@ struct RencordWindow {
     roster_for: Option<Snowflake>,
     opened_home: bool,
     images: HashMap<String, std::sync::Arc<Image>>,
+    image_order: VecDeque<String>,
     image_wait: HashSet<String>,
     image_fail: HashSet<String>,
     voice_join: Option<rencord_voice::VoiceJoin>,
@@ -653,6 +654,7 @@ impl RencordWindow {
             roster_for: None,
             opened_home: false,
             images: HashMap::new(),
+            image_order: VecDeque::new(),
             image_wait: HashSet::new(),
             image_fail: HashSet::new(),
             voice_join: None,
@@ -1652,6 +1654,23 @@ impl RencordWindow {
     }
 
     fn on_gateway_event(&mut self, event: rencord_gateway::GatewayEvent, cx: &mut Context<Self>) {
+        let mut resubscribe = false;
+        if matches!(
+            event,
+            rencord_gateway::GatewayEvent::Ready { .. } | rencord_gateway::GatewayEvent::Resumed
+        ) {
+            self.roster_for = None;
+            resubscribe = true;
+        }
+        if let rencord_gateway::GatewayEvent::MemberList(data) = &event {
+            if !self.member_list_is_current(data) {
+                return;
+            }
+            if member_list_invalidates(data) {
+                self.roster_for = None;
+                resubscribe = true;
+            }
+        }
         let voice_state = match &event {
             rencord_gateway::GatewayEvent::VoiceState(state) => {
                 Some((state.user_id, state.channel_id, state.session_id.clone()))
@@ -1665,6 +1684,9 @@ impl RencordWindow {
             _ => None,
         };
         self.shell.session.apply_gateway(event);
+        if resubscribe {
+            self.subscribe_roster();
+        }
         if self.shell.demo {
             return;
         }
@@ -1909,11 +1931,40 @@ impl RencordWindow {
     }
 
     fn cached_image(&mut self, url: &str, cx: &mut Context<Self>) -> Option<std::sync::Arc<Image>> {
-        if let Some(image) = self.images.get(url) {
-            return Some(image.clone());
+        if self.images.contains_key(url) {
+            self.image_order.retain(|item| item != url);
+            self.image_order.push_back(url.to_owned());
+            return self.images.get(url).cloned();
         }
         self.kick_image(url.to_owned(), cx);
         None
+    }
+
+    /// First URL that is still loading or already cached. A failed URL falls through.
+    fn first_image(
+        &mut self,
+        urls: &[String],
+        cx: &mut Context<Self>,
+    ) -> Option<std::sync::Arc<Image>> {
+        for url in urls {
+            if self.image_fail.contains(url) {
+                continue;
+            }
+            return self.cached_image(url, cx);
+        }
+        None
+    }
+
+    fn remember_image(&mut self, url: String, image: std::sync::Arc<Image>) {
+        self.image_order.retain(|item| item != &url);
+        self.image_order.push_back(url.clone());
+        self.images.insert(url, image);
+        while self.images.len() > 200 {
+            let Some(old) = self.image_order.pop_front() else {
+                break;
+            };
+            self.images.remove(&old);
+        }
     }
 
     fn kick_image(&mut self, url: String, cx: &mut Context<Self>) {
@@ -1933,7 +1984,7 @@ impl RencordWindow {
                 view.image_wait.remove(&key);
                 if let Some(bytes) = loaded {
                     let image = Image::from_bytes(ImageFormat::Png, bytes);
-                    view.images.insert(key, std::sync::Arc::new(image));
+                    view.remember_image(key, std::sync::Arc::new(image));
                 } else {
                     view.image_fail.insert(key);
                 }
@@ -1943,8 +1994,30 @@ impl RencordWindow {
         .detach();
     }
 
+    fn member_list_is_current(&self, data: &serde_json::Value) -> bool {
+        let Some(guild) = self.shell.session.selected_guild else {
+            return false;
+        };
+        let Some(channel) = self.shell.session.selected_channel else {
+            return false;
+        };
+        let same_guild = data
+            .get("guild_id")
+            .and_then(|value| value.as_str())
+            .and_then(|value| value.parse::<u64>().ok())
+            == Some(guild.get());
+        let same_list = data
+            .get("id")
+            .and_then(|value| value.as_str())
+            .and_then(|value| value.parse::<u64>().ok())
+            == Some(channel.get());
+        same_guild && same_list
+    }
+
     fn subscribe_roster(&mut self) {
         let Some(guild) = self.shell.session.selected_guild else {
+            self.shell.session.roster.clear();
+            self.roster_for = None;
             return;
         };
         let Some(channel) = self.shell.session.selected_channel else {
@@ -2420,7 +2493,13 @@ impl RencordWindow {
                             .first()
                             .map(|id| id.get())
                             .unwrap_or(0);
-                        self.cached_image(&rencord_desktop::user_avatar_url(id, hash), cx)
+                        self.first_image(
+                            &[
+                                rencord_desktop::user_avatar_url(id, hash),
+                                rencord_desktop::default_avatar_url(id, None),
+                            ],
+                            cx,
+                        )
                     });
                     nav = nav.child(channel_row(
                         this.clone(),
@@ -2487,25 +2566,6 @@ impl RencordWindow {
                 });
             });
         }
-        let mut list_faces = HashMap::new();
-        let mut list_media: HashMap<String, std::sync::Arc<Image>> = HashMap::new();
-        for message in &list_messages {
-            let url = match message.author.avatar.as_deref() {
-                Some(hash) => rencord_desktop::user_avatar_url(message.author.id.get(), hash),
-                None => rencord_desktop::default_avatar_url(
-                    message.author.id.get(),
-                    message.author.discriminator.as_deref(),
-                ),
-            };
-            if let Some(image) = self.cached_image(&url, cx) {
-                list_faces.insert(message.author.id.get(), image);
-            }
-            for url in media_urls(&message.content) {
-                if let Some(image) = self.cached_image(&url, cx) {
-                    list_media.insert(url, image);
-                }
-            }
-        }
         let list_now = rencord_desktop::now_local();
         let timeline = list(timeline_state, move |index, _window, _cx| {
             let message_index = if loading_older {
@@ -2559,6 +2619,28 @@ impl RencordWindow {
                     .child(paint(line, list_palette.muted, 14.))
                     .into_any_element();
             }
+            let (photo, attachments) = list_entity
+                .update(_cx, |window, cx| {
+                    let urls = match message.author.avatar.as_deref() {
+                        Some(hash) => vec![
+                            rencord_desktop::user_avatar_url(message.author.id.get(), hash),
+                            rencord_desktop::default_avatar_url(
+                                message.author.id.get(),
+                                message.author.discriminator.as_deref(),
+                            ),
+                        ],
+                        None => vec![rencord_desktop::default_avatar_url(
+                            message.author.id.get(),
+                            message.author.discriminator.as_deref(),
+                        )],
+                    };
+                    let photo = window.first_image(&urls, cx);
+                    let attachments = media_urls(&message.content)
+                        .into_iter()
+                        .filter_map(|url| window.cached_image(&url, cx))
+                        .collect();
+                    (photo, attachments)
+                });
             let row = message_row(
                 list_entity.clone(),
                 &message,
@@ -2573,11 +2655,8 @@ impl RencordWindow {
                 reveal_hover && message.content.contains("Mention"),
                 &stamp,
                 reveal_hover,
-                list_faces.get(&message.author.id.get()).cloned(),
-                media_urls(&message.content)
-                    .into_iter()
-                    .filter_map(|url| list_media.get(&url).cloned())
-                    .collect(),
+                photo,
+                attachments,
             );
             if show_day {
                 v_flex()
@@ -2864,18 +2943,21 @@ impl RencordWindow {
                     } else {
                         member.activity.clone()
                     };
-                    let face = if let Some(hash) = member.guild_avatar.as_deref() {
-                        selected_guild
-                            .map(|guild| {
-                                rencord_desktop::member_avatar_url(guild.get(), member.id, hash)
-                            })
-                            .unwrap_or_else(|| rencord_desktop::user_avatar_url(member.id, hash))
-                    } else if let Some(hash) = member.avatar.as_deref() {
-                        rencord_desktop::user_avatar_url(member.id, hash)
-                    } else {
-                        rencord_desktop::default_avatar_url(member.id, None)
-                    };
-                    let face = self.cached_image(&face, cx).map(|image| {
+                    let mut urls = Vec::new();
+                    if let Some(hash) = member.guild_avatar.as_deref() {
+                        if let Some(guild) = selected_guild {
+                            urls.push(rencord_desktop::member_avatar_url(
+                                guild.get(),
+                                member.id,
+                                hash,
+                            ));
+                        }
+                    }
+                    if let Some(hash) = member.avatar.as_deref() {
+                        urls.push(rencord_desktop::user_avatar_url(member.id, hash));
+                    }
+                    urls.push(rencord_desktop::default_avatar_url(member.id, None));
+                    let face = self.first_image(&urls, cx).map(|image| {
                         div()
                             .size(px(32.))
                             .flex_shrink_0()
@@ -3988,11 +4070,7 @@ fn message_row(
     } else {
         (None, body_source)
     };
-    let body_source = body_source
-        .lines()
-        .filter(|line| !line.contains("attachment:") && !line.starts_with("emoji:"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let body_source = without_media_markers(&body_source);
     let group = SharedString::from(format!("row-{id}"));
     let hover = palette.hover;
     let mut body = v_flex().flex_1().min_w(px(0.)).gap_1();
@@ -4723,6 +4801,41 @@ fn icon(name: &str, size: f32, color: u32) -> Svg {
         .data(colored.as_bytes())
         .size(px(size))
         .text_color(rgb(color))
+}
+
+fn member_list_invalidates(data: &serde_json::Value) -> bool {
+    data.get("ops")
+        .and_then(|ops| ops.as_array())
+        .is_some_and(|ops| {
+            ops.iter()
+                .any(|op| op.get("op").and_then(|op| op.as_str()) == Some("INVALIDATE"))
+        })
+}
+
+fn is_generated_media_line(line: &str) -> bool {
+    if let Some(url) = line.strip_prefix("attachment:") {
+        return !url.is_empty();
+    }
+    line.strip_prefix("emoji:")
+        .and_then(|id| id.parse::<u64>().ok())
+        .is_some()
+}
+
+fn without_media_markers(content: &str) -> String {
+    let mut fenced = false;
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            lines.push(line);
+            continue;
+        }
+        if !fenced && is_generated_media_line(line) {
+            continue;
+        }
+        lines.push(line);
+    }
+    lines.join("\n")
 }
 
 fn media_urls(content: &str) -> Vec<String> {
