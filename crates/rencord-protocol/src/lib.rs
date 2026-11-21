@@ -385,6 +385,7 @@ pub enum VoiceOpcode {
     Resume = 7,
     Hello = 8,
     Resumed = 9,
+    ClientsConnect = 11,
     ClientDisconnect = 13,
     DavePrepareTransition = 21,
     DaveExecuteTransition = 22,
@@ -412,6 +413,7 @@ impl VoiceOpcode {
             7 => Self::Resume,
             8 => Self::Hello,
             9 => Self::Resumed,
+            11 => Self::ClientsConnect,
             13 => Self::ClientDisconnect,
             21 => Self::DavePrepareTransition,
             22 => Self::DaveExecuteTransition,
@@ -433,6 +435,8 @@ impl VoiceOpcode {
 pub struct VoiceFrame {
     pub op: VoiceOpcode,
     pub data: Value,
+    /// Server sequence number (voice v8), echoed back as seq_ack.
+    pub seq: Option<u64>,
 }
 
 impl VoiceFrame {
@@ -448,6 +452,30 @@ impl VoiceFrame {
         Ok(Self {
             op,
             data: object.get("d").cloned().unwrap_or(Value::Null),
+            seq: object.get("seq").and_then(|v| v.as_u64()),
+        })
+    }
+
+    /// A binary DAVE frame from the server: `[seq u16 BE][op u8][payload]`.
+    /// The payload comes back as `{"data": [bytes]}`. Only the MLS opcodes are
+    /// binary; anything else is `FrameError::Opcode` so callers can skip it.
+    pub fn parse_binary(bytes: &[u8]) -> Result<Self, FrameError> {
+        let [s0, s1, op, payload @ ..] = bytes else {
+            return Err(FrameError::Opcode);
+        };
+        let op = match VoiceOpcode::from_u8(*op) {
+            Some(
+                op @ (VoiceOpcode::MlsExternalSender
+                | VoiceOpcode::MlsProposals
+                | VoiceOpcode::MlsAnnounceCommitTransition
+                | VoiceOpcode::MlsWelcome),
+            ) => op,
+            _ => return Err(FrameError::Opcode),
+        };
+        Ok(Self {
+            op,
+            data: json!({ "data": payload }),
+            seq: Some(u64::from(u16::from_be_bytes([*s0, *s1]))),
         })
     }
 
@@ -483,11 +511,20 @@ pub fn voice_select_protocol(address: &str, port: u16, mode: &str) -> Value {
     })
 }
 
-pub fn voice_heartbeat(nonce: u64) -> Value {
+/// Voice v8 heartbeat: `t` is a nonce, `seq_ack` the last server sequence seen.
+pub fn voice_heartbeat(nonce: u64, seq_ack: u64) -> Value {
     json!({
         "op": VoiceOpcode::Heartbeat as u8,
-        "d": { "t": nonce, "seq_ack": nonce }
+        "d": { "t": nonce, "seq_ack": seq_ack }
     })
+}
+
+/// A binary frame to the server (DAVE key package, commit and welcome): `[op u8][payload]`.
+pub fn voice_binary(op: VoiceOpcode, payload: &[u8]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(1 + payload.len());
+    frame.push(op as u8);
+    frame.extend_from_slice(payload);
+    frame
 }
 
 pub fn voice_speaking(ssrc: u32, speaking: bool) -> Value {
@@ -592,10 +629,52 @@ mod tests {
         );
         assert_eq!(VoiceOpcode::from_u8(30), Some(VoiceOpcode::MlsWelcome));
         let frame = VoiceFrame {
+            seq: None,
             op: VoiceOpcode::Speaking,
             data: json!({"speaking": 1, "ssrc": 9}),
         };
         let parsed = VoiceFrame::parse(&serde_json::to_vec(&frame.to_json()).unwrap()).unwrap();
         assert_eq!(parsed.op, VoiceOpcode::Speaking);
+    }
+
+    #[test]
+    fn voice_binary_dave_frames_carry_seq_op_and_payload() {
+        // [seq u16 BE][op u8][payload]: seq 0x0102, op 27 (proposals).
+        let frame = VoiceFrame::parse_binary(&[1, 2, 27, 9, 8, 7]).unwrap();
+        assert_eq!(frame.op, VoiceOpcode::MlsProposals);
+        assert_eq!(frame.seq, Some(0x0102));
+        assert_eq!(frame.data, json!({ "data": [9, 8, 7] }));
+        // Too short, or a non-binary opcode, is skipped by callers, not fatal.
+        assert!(matches!(
+            VoiceFrame::parse_binary(&[1, 2]),
+            Err(FrameError::Opcode)
+        ));
+        assert!(matches!(
+            VoiceFrame::parse_binary(&[0, 1, VoiceOpcode::Speaking as u8]),
+            Err(FrameError::Opcode)
+        ));
+        assert_eq!(
+            voice_binary(VoiceOpcode::MlsKeyPackage, &[5, 6]),
+            vec![26, 5, 6]
+        );
+    }
+
+    #[test]
+    fn voice_clients_connect_and_unknown_ops_and_seq() {
+        let connect = VoiceFrame::parse(br#"{"op":11,"d":{"user_ids":["1"]},"seq":4}"#).unwrap();
+        assert_eq!(connect.op, VoiceOpcode::ClientsConnect);
+        assert_eq!(connect.seq, Some(4));
+        // An opcode Rencord does not know is a distinct, skippable error.
+        assert!(matches!(
+            VoiceFrame::parse(br#"{"op":99,"d":{}}"#),
+            Err(FrameError::Opcode)
+        ));
+    }
+
+    #[test]
+    fn voice_heartbeat_acks_the_last_seq_not_the_nonce() {
+        let beat = voice_heartbeat(1_700_000_000_000, 12);
+        assert_eq!(beat["d"]["t"], 1_700_000_000_000u64);
+        assert_eq!(beat["d"]["seq_ack"], 12);
     }
 }

@@ -14,10 +14,14 @@ use crate::opus::FRAME_SAMPLES;
 use crate::pipeline::{PipelineError, VoicePipeline};
 use crate::session::{VoicePhase, VoiceSession};
 use futures_util::{SinkExt, StreamExt};
-use rencord_protocol::{voice_resume, VoiceFrame, VoiceOpcode, VoiceReady, TRANSPORT_MODE};
+use rencord_protocol::{
+    voice_binary, voice_heartbeat, voice_resume, FrameError, VoiceFrame, VoiceHello, VoiceOpcode,
+    VoiceReady, TRANSPORT_MODE,
+};
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
+use tokio::time::Instant;
 use tokio_tungstenite::{
     connect_async, tungstenite::Message as WsMessage, MaybeTlsStream, WebSocketStream,
 };
@@ -108,7 +112,8 @@ pub struct LiveCall {
     pub external_port: u16,
     pub muted: bool,
     pub deafened: bool,
-    pub seq_ack: u64,
+    /// UDP audio packets heard; stamps jitter-buffer arrival times.
+    pub rx_packets: u64,
     pub role: MediaRole,
     pub probes: u32,
     target: VoiceTarget,
@@ -120,6 +125,11 @@ pub struct LiveCall {
     audio: CallAudio,
     path: PathWatch,
     schedule: DiscoverySchedule,
+    /// Last sequence number the server stamped on a frame (voice v8).
+    last_seq: Option<u64>,
+    beat_every: Duration,
+    next_beat: Instant,
+    awaiting_ack: bool,
 }
 
 impl LiveCall {
@@ -230,7 +240,7 @@ impl LiveCall {
             external_port: 0,
             muted: false,
             deafened: false,
-            seq_ack: 0,
+            rx_packets: 0,
             role,
             probes: 0,
             session: VoiceSession::new(
@@ -248,8 +258,12 @@ impl LiveCall {
             audio,
             path: PathWatch::new(),
             schedule,
+            last_seq: None,
+            beat_every: Duration::from_secs(41),
+            next_beat: Instant::now() + Duration::from_secs(41),
+            awaiting_ack: false,
         };
-        if let Err(error) = call.finish_handshake(false).await {
+        if let Err(error) = call.finish_handshake().await {
             return Err(FailedOpen {
                 error,
                 dave: call.take_dave(),
@@ -309,18 +323,19 @@ impl LiveCall {
             if self.deafened {
                 return Ok(vec![0; FRAME_SAMPLES]);
             }
-            self.seq_ack = self.seq_ack.wrapping_add(1);
+            self.rx_packets = self.rx_packets.wrapping_add(1);
             return self
                 .audio
-                .on_rtp(&buf[..read], self.seq_ack.saturating_mul(20), self.ssrc)
+                .on_rtp(&buf[..read], self.rx_packets.saturating_mul(20), self.ssrc)
                 .map_err(VoiceLinkError::from);
         }
     }
 
-    /// Send Discord's UDP ping when it is due, and resume when the path is quiet.
+    /// Send Discord's UDP ping when it is due, and reconnect when the path is quiet.
     pub async fn maintain(&mut self) -> Result<(), VoiceLinkError> {
         if self.path.dead() {
-            self.resume_gateway().await?;
+            // A dead UDP path is not fixed by resuming the websocket, so start over.
+            self.reconnect().await?;
             self.path.inbound();
             return Ok(());
         }
@@ -331,8 +346,30 @@ impl LiveCall {
         Ok(())
     }
 
-    /// Drop the websocket and resume the same media role.
+    /// Reopen the websocket and resume the session: Resume (op 7), answered by
+    /// Resumed (op 9). The UDP path and secret key are unchanged.
     pub async fn resume_gateway(&mut self) -> Result<(), VoiceLinkError> {
+        let (socket, _) = connect_async(&self.target.ws_url).await?;
+        let (write, read) = socket.split();
+        self.write = write;
+        self.read = read;
+        let hello = self.read_frame("hello").await?;
+        let hello: VoiceHello = serde_json::from_value(hello.data)
+            .map_err(|err| VoiceLinkError::Protocol(err.to_string()))?;
+        self.send_json(voice_resume(
+            &self.target.server_id,
+            &self.target.session_id,
+            &self.target.token,
+            self.last_seq.unwrap_or(0),
+        ))
+        .await?;
+        self.read_op(VoiceOpcode::Resumed, "resumed").await?;
+        self.start_heartbeat(hello.heartbeat_interval);
+        Ok(())
+    }
+
+    /// Open a fresh session on a new websocket, with UDP discovery again.
+    pub async fn reconnect(&mut self) -> Result<(), VoiceLinkError> {
         let mut probes = 0u32;
         let mut server = self.server_udp;
         for attempt in 1..=2 {
@@ -340,7 +377,7 @@ impl LiveCall {
             let (write, read) = socket.split();
             self.write = write;
             self.read = read;
-            match self.finish_handshake(true).await {
+            match self.finish_handshake().await {
                 Ok(()) => return Ok(()),
                 Err(VoiceLinkError::DiscoveryFailed(DiscoveryError::Failed {
                     probes: sent,
@@ -363,22 +400,13 @@ impl LiveCall {
         )))
     }
 
-    async fn finish_handshake(&mut self, resume: bool) -> Result<(), VoiceLinkError> {
+    async fn finish_handshake(&mut self) -> Result<(), VoiceLinkError> {
         let hello = self.read_frame("hello").await?;
-        if resume {
-            self.send_json(voice_resume(
-                &self.target.server_id,
-                &self.target.session_id,
-                &self.target.token,
-                self.seq_ack,
-            ))
-            .await?;
-        } else {
-            for message in self.session.handle(hello) {
-                self.send_json(message).await?;
-            }
+        for message in self.session.handle(hello) {
+            self.send_json(message).await?;
         }
-        let ready_frame = self.read_frame("ready").await?;
+        self.start_heartbeat(self.session.heartbeat_interval);
+        let ready_frame = self.read_op(VoiceOpcode::Ready, "ready").await?;
         let ready: VoiceReady = serde_json::from_value(ready_frame.data.clone())
             .map_err(|err| VoiceLinkError::Protocol(err.to_string()))?;
         for message in self.session.handle(ready_frame) {
@@ -408,13 +436,9 @@ impl LiveCall {
             .session
             .select_protocol_message(&self.external_address, self.external_port);
         self.send_json(select).await?;
-        let description = self.read_frame("session description").await?;
-        if description.op != VoiceOpcode::SessionDescription {
-            return Err(VoiceLinkError::Protocol(format!(
-                "expected session description, got {:?}",
-                description.op
-            )));
-        }
+        let description = self
+            .read_op(VoiceOpcode::SessionDescription, "session description")
+            .await?;
         for message in self.session.handle(description) {
             self.send_json(message).await?;
         }
@@ -434,12 +458,26 @@ impl LiveCall {
         Ok(())
     }
 
-    /// Read one control frame and apply DAVE / speaking updates.
+    /// Wait for one control frame and apply DAVE / speaking updates. Sends a
+    /// heartbeat whenever one is due while waiting, and fails if the previous
+    /// one was never acknowledged. Callers run this in a loop; it has no
+    /// read timeout of its own because a quiet control channel is normal.
     pub async fn poll_control(&mut self) -> Result<(), VoiceLinkError> {
-        let frame = self.read_frame("control").await?;
+        let frame = loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(self.next_beat) => self.beat().await?,
+                frame = self.next_frame() => break frame?,
+            }
+        };
         let outgoing = self.session.handle(frame);
         for message in outgoing {
             self.send_json(message).await?;
+        }
+        for commit in std::mem::take(&mut self.session.commits_to_send) {
+            let mut payload = commit.commit;
+            payload.extend(commit.welcome.unwrap_or_default());
+            self.send_binary(VoiceOpcode::MlsCommitWelcome, &payload)
+                .await?;
         }
         if let Some(speaking) = self.session.speaking_message(!self.muted) {
             let _ = speaking;
@@ -448,19 +486,91 @@ impl LiveCall {
         Ok(())
     }
 
-    async fn read_frame(&mut self, what: &'static str) -> Result<VoiceFrame, VoiceLinkError> {
-        let message = tokio::time::timeout(Duration::from_secs(2), self.read.next())
-            .await
-            .map_err(|_| VoiceLinkError::Timeout(what))?
-            .ok_or(VoiceLinkError::Timeout(what))??;
-        let text = match message {
-            WsMessage::Text(text) => text.to_string(),
-            WsMessage::Close(_) => return Err(VoiceLinkError::Timeout(what)),
-            _ => return Err(VoiceLinkError::Protocol("non-text voice frame".into())),
-        };
-        VoiceFrame::parse(text.as_bytes()).map_err(|err| VoiceLinkError::Protocol(err.to_string()))
+    fn start_heartbeat(&mut self, interval_ms: u64) {
+        self.beat_every = Duration::from_millis(interval_ms.max(1));
+        self.next_beat = Instant::now() + self.beat_every;
+        self.awaiting_ack = false;
     }
 
+    async fn beat(&mut self) -> Result<(), VoiceLinkError> {
+        if self.awaiting_ack {
+            return Err(VoiceLinkError::Timeout("heartbeat ack"));
+        }
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis() as u64);
+        self.send_json(voice_heartbeat(nonce, self.last_seq.unwrap_or(0)))
+            .await?;
+        self.awaiting_ack = true;
+        self.next_beat += self.beat_every;
+        Ok(())
+    }
+
+    /// Next frame the session understands, with no timeout. Text and binary
+    /// frames both count; one with an opcode we do not know is skipped, since
+    /// Discord adds opcodes over time.
+    async fn next_frame(&mut self) -> Result<VoiceFrame, VoiceLinkError> {
+        loop {
+            let message = self
+                .read
+                .next()
+                .await
+                .ok_or_else(|| VoiceLinkError::Socket("voice websocket closed".into()))??;
+            let parsed = match message {
+                WsMessage::Text(text) => VoiceFrame::parse(text.as_bytes()),
+                WsMessage::Binary(bytes) => VoiceFrame::parse_binary(&bytes),
+                WsMessage::Close(_) => {
+                    return Err(VoiceLinkError::Socket("voice websocket closed".into()))
+                }
+                _ => continue,
+            };
+            match parsed {
+                Ok(frame) => {
+                    if frame.seq.is_some() {
+                        self.last_seq = frame.seq;
+                    }
+                    if frame.op == VoiceOpcode::HeartbeatAck {
+                        self.awaiting_ack = false;
+                    }
+                    return Ok(frame);
+                }
+                Err(FrameError::Opcode) => continue,
+                Err(err) => return Err(VoiceLinkError::Protocol(err.to_string())),
+            }
+        }
+    }
+
+    /// Handshake steps only: a silent server there means a failed connect.
+    async fn read_frame(&mut self, what: &'static str) -> Result<VoiceFrame, VoiceLinkError> {
+        tokio::time::timeout(Duration::from_secs(2), self.next_frame())
+            .await
+            .map_err(|_| VoiceLinkError::Timeout(what))?
+    }
+
+    /// Handshake read that waits for one opcode. Anything else that arrives
+    /// first (clients connect, a DAVE message) still goes to the session.
+    async fn read_op(
+        &mut self,
+        op: VoiceOpcode,
+        what: &'static str,
+    ) -> Result<VoiceFrame, VoiceLinkError> {
+        loop {
+            let frame = self.read_frame(what).await?;
+            if frame.op == op {
+                return Ok(frame);
+            }
+            for message in self.session.handle(frame) {
+                self.send_json(message).await?;
+            }
+        }
+    }
+
+    async fn send_binary(&mut self, op: VoiceOpcode, payload: &[u8]) -> Result<(), VoiceLinkError> {
+        self.write
+            .send(WsMessage::Binary(voice_binary(op, payload).into()))
+            .await?;
+        Ok(())
+    }
     async fn send_json(&mut self, value: serde_json::Value) -> Result<(), VoiceLinkError> {
         self.write
             .send(WsMessage::Text(value.to_string().into()))
@@ -521,13 +631,18 @@ mod tests {
                     .unwrap();
                 let first = socket.next().await.unwrap().unwrap().into_text().unwrap();
                 if expect_resume {
-                    assert!(
-                        first.contains("\"op\":7") || first.contains("\"op\":0"),
-                        "{first}"
-                    );
-                } else {
-                    assert!(first.contains("\"op\":0"), "{first}");
+                    // Resume carries the last server seq (5, stamped on op 21 below),
+                    // and Discord answers Resumed, with no new Ready.
+                    assert!(first.contains("\"op\":7"), "{first}");
+                    assert!(first.contains("\"seq_ack\":5"), "{first}");
+                    socket
+                        .send(WsMessage::Text(r#"{"op":9,"d":null}"#.into()))
+                        .await
+                        .unwrap();
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    return;
                 }
+                assert!(first.contains("\"op\":0"), "{first}");
                 socket
                     .send(WsMessage::Text(
                         format!(
@@ -563,7 +678,7 @@ mod tests {
                 assert!(speaking.contains("\"op\":5"), "{speaking}");
                 socket
                     .send(WsMessage::Text(
-                        r#"{"op":21,"d":{"transition_id":3,"protocol_version":1}}"#.into(),
+                        r#"{"op":21,"d":{"transition_id":3,"protocol_version":1},"seq":5}"#.into(),
                     ))
                     .await
                     .unwrap();
@@ -797,5 +912,192 @@ mod tests {
         };
         assert_eq!(attempts, 2);
         assert!(probes >= 4, "probes {probes}");
+    }
+
+    type TestSocket = WebSocketStream<tokio::net::TcpStream>;
+
+    fn test_target(ws_url: String) -> VoiceTarget {
+        VoiceTarget {
+            ws_url,
+            server_id: "10".into(),
+            user_id: "1".into(),
+            session_id: "voice-sess".into(),
+            token: "voice-token".into(),
+        }
+    }
+
+    fn text(value: &str) -> WsMessage {
+        WsMessage::Text(value.to_string().into())
+    }
+
+    /// Plays Discord's side of the handshake up to Speaking, then hands the
+    /// socket to `script`. `noisy` sprinkles opcodes Rencord does not know, and
+    /// Clients Connect, into the handshake.
+    async fn control_server<F, Fut, T>(
+        beat_ms: u64,
+        noisy: bool,
+        script: F,
+    ) -> (String, tokio::task::JoinHandle<T>)
+    where
+        F: FnOnce(TestSocket) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let udp = answering_udp().await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            ws.send(text(&format!(
+                r#"{{"op":8,"d":{{"heartbeat_interval":{beat_ms}}}}}"#
+            )))
+            .await
+            .unwrap();
+            ws.next().await.unwrap().unwrap(); // identify
+            if noisy {
+                ws.send(text(r#"{"op":99,"d":{"future":true}}"#))
+                    .await
+                    .unwrap();
+                ws.send(text(r#"{"op":11,"d":{"user_ids":["2"]},"seq":1}"#))
+                    .await
+                    .unwrap();
+            }
+            ws.send(text(&format!(
+                r#"{{"op":2,"d":{{"ssrc":77,"ip":"{}","port":{},"modes":["aead_xchacha20_poly1305_rtpsize"]}}}}"#,
+                udp.ip(),
+                udp.port()
+            )))
+            .await
+            .unwrap();
+            ws.next().await.unwrap().unwrap(); // select protocol
+            if noisy {
+                ws.send(text(r#"{"op":11,"d":{"user_ids":["3"]},"seq":2}"#))
+                    .await
+                    .unwrap();
+            }
+            let key: Vec<u8> = (0..32).collect();
+            ws.send(text(
+                &serde_json::json!({
+                    "op": 4,
+                    "d": { "mode": "aead_xchacha20_poly1305_rtpsize", "secret_key": key,
+                           "dave_protocol_version": 1 }
+                })
+                .to_string(),
+            ))
+            .await
+            .unwrap();
+            ws.next().await.unwrap().unwrap(); // speaking
+            script(ws).await
+        });
+        (format!("ws://{addr}"), task)
+    }
+
+    async fn connect(ws_url: String) -> LiveCall {
+        LiveCall::connect_role(
+            MediaRole::Voice,
+            test_target(ws_url),
+            DaveEngine::Scripted(ScriptedDave::default()),
+            quick_schedule(),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn handshake_skips_unknown_opcodes_and_clients_connect() {
+        let (url, server) = control_server(45000, true, |_ws| async {}).await;
+        let call = connect(url).await;
+        assert_eq!(call.ssrc, 77);
+        assert_eq!(call.phase, VoicePhase::Connected);
+        assert_eq!(call.last_seq, Some(2));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binary_dave_frames_reach_dave_and_commits_go_out_as_binary() {
+        let (url, server) = control_server(45000, false, |mut ws| async move {
+            // [seq u16 BE][op 25 external sender][payload]
+            ws.send(WsMessage::Binary(vec![0, 9, 25, 1, 2, 3].into()))
+                .await
+                .unwrap();
+            ws.send(text(r#"{"op":6,"d":null}"#)).await.unwrap();
+            ws.next().await.unwrap().unwrap()
+        })
+        .await;
+        let mut call = connect(url).await;
+        call.poll_control().await.unwrap();
+        let DaveEngine::Scripted(dave) = &call.session.dave else {
+            panic!("scripted dave");
+        };
+        assert_eq!(dave.external_senders, 1);
+        assert_eq!(call.last_seq, Some(9));
+        call.session
+            .commits_to_send
+            .push(crate::dave::OutgoingCommit {
+                commit: vec![1, 2],
+                welcome: Some(vec![3]),
+            });
+        call.poll_control().await.unwrap();
+        // [op 28 commit+welcome][commit][welcome], sent as a binary frame.
+        let WsMessage::Binary(sent) = server.await.unwrap() else {
+            panic!("commit was not sent as a binary frame");
+        };
+        assert_eq!(&sent[..], &[28, 1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_is_sent_each_interval_and_acks_the_last_seq() {
+        let (url, server) = control_server(30, false, |mut ws| async move {
+            ws.send(text(r#"{"op":5,"d":{"ssrc":9,"speaking":0},"seq":7}"#))
+                .await
+                .unwrap();
+            let beat = ws.next().await.unwrap().unwrap().into_text().unwrap();
+            ws.send(text(r#"{"op":6,"d":null}"#)).await.unwrap();
+            beat.to_string()
+        })
+        .await;
+        let mut call = connect(url).await;
+        call.poll_control().await.unwrap(); // the seq-7 frame
+        call.poll_control().await.unwrap(); // beats, then reads the ack
+        let beat: serde_json::Value = serde_json::from_str(&server.await.unwrap()).unwrap();
+        assert_eq!(beat["op"], 3);
+        assert_eq!(beat["d"]["seq_ack"], 7);
+        assert!(!call.awaiting_ack);
+    }
+
+    #[tokio::test]
+    async fn a_missing_heartbeat_ack_ends_the_call() {
+        let (url, _server) = control_server(30, false, |mut ws| async move {
+            while ws.next().await.is_some() {} // read beats, never ack
+        })
+        .await;
+        let mut call = connect(url).await;
+        let err = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                call.poll_control().await?;
+            }
+            #[allow(unreachable_code)]
+            Ok::<(), VoiceLinkError>(())
+        })
+        .await
+        .expect("poll_control must give up on a missing ack")
+        .unwrap_err();
+        assert!(
+            matches!(err, VoiceLinkError::Timeout("heartbeat ack")),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_quiet_control_channel_is_not_an_error() {
+        let (url, _server) = control_server(45000, false, |mut ws| async move {
+            tokio::time::sleep(Duration::from_millis(2500)).await;
+            ws.send(text(r#"{"op":6,"d":null}"#)).await.unwrap();
+            ws.next().await;
+        })
+        .await;
+        let mut call = connect(url).await;
+        call.poll_control().await.unwrap();
     }
 }
