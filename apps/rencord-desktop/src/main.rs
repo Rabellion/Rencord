@@ -3680,7 +3680,9 @@ fn right_region(kind: RightPanel, palette: Palette) -> impl IntoElement {
     let mut column = v_flex().size_full().bg(rgb(palette.members));
     column = column.child(section_label(kind.title(), palette.muted));
     match kind {
-        RightPanel::Stream => column.child(div().flex_1().min_h(px(0.)).child(golive::viewer(palette))),
+        RightPanel::Stream => {
+            column.child(div().flex_1().min_h(px(0.)).child(golive::viewer(palette)))
+        }
         RightPanel::Pinned => column.child(div().px(px(12.)).child(paint(
             "No pinned messages.",
             palette.muted,
