@@ -132,6 +132,8 @@ fn main() {
         .find(|pair| pair[0] == "--big-file")
         .map(|pair| match pair[1].as_str() {
             "progress" => rencord_upload::Flow::preview_progress(),
+            "upload" => rencord_upload::Flow::preview_upload(),
+            "error" => rencord_upload::Flow::preview_error(),
             _ => rencord_upload::Flow::preview_sheet(),
         });
     let reveal_hover = args.iter().any(|arg| arg == "--reveal-hover");
@@ -3854,6 +3856,8 @@ fn icon(name: &str, size: f32, color: u32) -> Svg {
         "send" => include_str!("../../../docs/design/icons/send.svg"),
         "copy" => include_str!("../../../docs/design/icons/copy.svg"),
         "link" => include_str!("../../../docs/design/icons/link.svg"),
+        "compress" => include_str!("../../../docs/design/icons/compress.svg"),
+        "split" => include_str!("../../../docs/design/icons/split.svg"),
         "star" => include_str!("../../../docs/design/icons/star.svg"),
         "mic-off" => include_str!("../../../docs/design/icons/mic-off.svg"),
         "deafen-off" => include_str!("../../../docs/design/icons/deafen-off.svg"),

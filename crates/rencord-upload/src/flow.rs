@@ -63,6 +63,8 @@ pub struct Flow {
     pub reassemble_note: String,
     pub part_paths: Vec<PathBuf>,
     pub encoder: EncoderChoice,
+    /// The Defaults disclosure on the sheet. Closed until the user opens it.
+    pub defaults_open: bool,
 }
 
 impl Default for Flow {
@@ -85,6 +87,7 @@ impl Default for Flow {
             reassemble_note: String::new(),
             part_paths: Vec::new(),
             encoder: EncoderChoice::software_fallback(),
+            defaults_open: false,
         }
     }
 }
@@ -182,6 +185,10 @@ impl Flow {
         self.staged
             .as_ref()
             .is_some_and(|file| file.size > self.limit.bytes)
+    }
+
+    pub fn toggle_defaults(&mut self) {
+        self.defaults_open = !self.defaults_open;
     }
 
     pub fn cycle_default(&mut self) {
@@ -417,6 +424,26 @@ impl Flow {
             None,
         );
         flow.choose(FlowChoice::Compress);
+        flow
+    }
+
+    pub fn preview_upload() -> Self {
+        let mut flow = Self::preview_sheet();
+        flow.choose(FlowChoice::External);
+        flow.screen = SheetScreen::Progress;
+        flow.progress = Some(ProgressSnap {
+            phase: "Uploading".into(),
+            done: 18_600_000,
+            total: 48_000_000,
+            detail: "litterbox.catbox.moe".into(),
+        });
+        flow.error = None;
+        flow
+    }
+
+    pub fn preview_error() -> Self {
+        let mut flow = Self::preview_upload();
+        flow.fail("Litterbox did not accept the file. Nothing was posted.".into());
         flow
     }
 

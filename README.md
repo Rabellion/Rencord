@@ -74,7 +74,9 @@ Picture in picture: [docs/design/onyx/golive-pip.png](docs/design/onyx/golive-pi
 
 | Over the cap | Progress |
 | :---: | :---: |
-| <img src="docs/design/onyx/big-file.png" alt="Onyx Ink big-file sheet: compress, upload a link, or split a 45.7 MB video under the 20 MB cap" width="480" /> | <img src="docs/design/onyx/big-file-progress.png" alt="Onyx Ink compress progress with cancel and retry" width="480" /> |
+| <img src="docs/design/onyx/big-file.png" alt="Onyx Ink big-file sheet: compress, upload a link, or split a 45.7 MB video under the 20 MB cap" width="480" /> | <img src="docs/design/onyx/big-file-progress.png" alt="Onyx Ink compress progress with cancel" width="480" /> |
+
+Upload in progress: [docs/design/onyx/big-file-upload.png](docs/design/onyx/big-file-upload.png). A failed upload, with Retry: [docs/design/onyx/big-file-error.png](docs/design/onyx/big-file-error.png).
 
 ## Feature status
 

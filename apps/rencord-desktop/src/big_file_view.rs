@@ -1,13 +1,15 @@
 //! Big-file sheet drawn over the composer. The transfer runs on a worker thread.
 
-use super::{meta, paint, RencordWindow};
+use super::{icon, meta, paint, RencordWindow};
 use gpui_kit::base::{h_flex, v_flex};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::*;
 use rencord_desktop::Palette;
-use rencord_upload::{Flow, FlowChoice, SheetScreen};
+use rencord_upload::{Flow, FlowChoice, MediaKind, ProviderKind, SheetScreen};
 use std::path::Path;
 use std::sync::atomic::Ordering;
+
+const BUTTON_H: f32 = 32.0;
 
 pub fn sheet(
     view: Entity<RencordWindow>,
@@ -16,9 +18,9 @@ pub fn sheet(
     palette: Palette,
 ) -> impl IntoElement {
     let mut card = v_flex()
-        .w(px(560.))
-        .p(px(16.))
-        .gap(px(8.))
+        .w(px(520.))
+        .p(px(20.))
+        .gap(px(12.))
         .rounded(px(8.))
         .bg(rgb(palette.chat))
         .border_1()
@@ -26,15 +28,20 @@ pub fn sheet(
     card = match flow.screen {
         SheetScreen::Progress => card.child(progress_block(view.clone(), flow, palette)),
         SheetScreen::Done => card.child(done_block(view.clone(), flow, palette)),
-        SheetScreen::Reassemble => card.child(reassemble_block(view.clone(), flow, palette)),
+        SheetScreen::Reassemble => {
+            card.child(reassemble_block(view.clone(), path_input, flow, palette))
+        }
         SheetScreen::Pick | SheetScreen::Choose => {
             card.child(choose_block(view.clone(), path_input, flow, palette))
         }
     };
-    let top = match flow.screen {
-        SheetScreen::Progress => 200.0,
-        SheetScreen::Done | SheetScreen::Reassemble => 180.0,
-        SheetScreen::Pick | SheetScreen::Choose => 36.0,
+    // Flex centering does not move an absolute child in this tree, so the
+    // card is placed from the measured window (1180×760) and card size.
+    let (top, left) = match flow.screen {
+        SheetScreen::Progress if flow.error.is_some() => (278.0, 329.0),
+        SheetScreen::Progress => (293.0, 329.0),
+        SheetScreen::Done | SheetScreen::Reassemble => (250.0, 329.0),
+        SheetScreen::Pick | SheetScreen::Choose => (126.0, 329.0),
     };
     div()
         .absolute()
@@ -43,7 +50,7 @@ pub fn sheet(
         .w(px(1180.))
         .h(px(760.))
         .bg(rgba(0x000000b8))
-        .child(div().absolute().top(px(top)).left(px(310.)).child(card))
+        .child(div().absolute().top(px(top)).left(px(left)).child(card))
 }
 
 pub fn reassemble_chip(
@@ -78,18 +85,18 @@ fn choose_block(
         "Attach a file"
     };
     let mut column = v_flex()
-        .gap(px(8.))
+        .w_full()
+        .gap(px(12.))
         .child(paint(headline, palette.text, 15.));
     if let Some(offer) = &flow.offer {
         column = column
             .child(meta(offer.meta.clone(), palette.muted, 11., palette))
-            .child(paint(offer.server_note.clone(), palette.muted, 12.));
+            .child(paint(offer.server_note.clone(), palette.muted, 13.));
         column = column.child(choice_row(
             view.clone(),
             flow,
             FlowChoice::Compress,
             &offer.compress.title,
-            &offer.compress.detail,
             offer.compress.available,
             palette,
         ));
@@ -98,7 +105,6 @@ fn choose_block(
             flow,
             FlowChoice::External,
             &offer.external.title,
-            &offer.external.detail,
             true,
             palette,
         ));
@@ -107,13 +113,9 @@ fn choose_block(
             flow,
             FlowChoice::Split,
             &offer.split.title,
-            &offer.split.detail,
             true,
             palette,
         ));
-        if flow.chosen == Some(FlowChoice::External) {
-            column = column.child(warning_box(view.clone(), flow, palette));
-        }
     } else if let Some(file) = &flow.staged {
         column = column.child(meta(
             format!(
@@ -129,26 +131,30 @@ fn choose_block(
         ));
     } else {
         column = column.child(paint(
-            "Paste a path, type one, or drop a file on this field. Discord still enforces the cap.",
+            "Drop a file on the composer, or type a path and choose it. Discord still enforces the cap.",
             palette.muted,
-            12.,
+            13.,
         ));
+        column = column.child(Input::new(path_input));
     }
-    column = column.child(div().mt(px(4.)).child(Input::new(path_input)));
-    column = column.child(settings_row(view.clone(), flow, palette));
+    if flow.chosen == Some(FlowChoice::External) && flow.settings.provider == ProviderKind::Custom {
+        column = column.child(
+            v_flex()
+                .gap(px(4.))
+                .child(meta("Custom endpoint", palette.muted, 11., palette))
+                .child(Input::new(path_input)),
+        );
+    }
+    if let Some(name) = output_name(flow) {
+        column = column.child(meta(format!("Output  {name}"), palette.muted, 11., palette));
+    }
+    column = column.child(defaults_row(view.clone(), flow, palette));
     if let Some(error) = &flow.error {
-        column = column.child(paint(error.clone(), palette.danger, 12.));
+        column = column.child(paint(error.clone(), palette.danger, 13.));
     }
-    if !flow.history.is_empty() {
-        let entry = &flow.history[flow.history.len() - 1];
-        column = column.child(meta(
-            format!("last link  {}  {}", entry.file_name, entry.url),
-            palette.faint,
-            11.,
-            palette,
-        ));
-    }
-    let go_label: &'static str = if !over && flow.staged.is_some() {
+    let go_label: &'static str = if flow.staged.is_none() {
+        "Choose file…"
+    } else if !over {
         "Attach"
     } else {
         match flow.chosen {
@@ -158,42 +164,41 @@ fn choose_block(
             None => "Continue",
         }
     };
-    column = column.child(
-        h_flex()
-            .gap(px(8.))
-            .mt(px(4.))
-            .child(accent_button(
-                view.clone(),
-                "bf-pick",
-                "Pick",
-                palette,
-                |window, cx| {
-                    let text = window.attachment_path.read(cx).value().to_string();
-                    apply_path(window, text.trim());
-                    cx.notify();
-                },
-            ))
-            .child(accent_button(
-                view.clone(),
-                "bf-go",
-                go_label,
-                palette,
-                |window, cx| {
-                    window.start_big_file(cx);
-                },
-            ))
-            .child(ghost_button(
-                view,
-                "bf-close",
-                "Cancel",
-                palette,
-                |window, cx| {
-                    window.shell.flow.close();
-                    cx.notify();
-                },
-            )),
-    );
-    column
+    column.child(action_row(view, palette, go_label, true, |window, cx| {
+        if window.shell.flow.staged.is_none() {
+            let text = window.attachment_path.read(cx).value().to_string();
+            apply_path(window, text.trim());
+        } else if window.shell.flow.settings.provider == ProviderKind::Custom
+            && window.shell.flow.chosen == Some(FlowChoice::External)
+        {
+            let text = window.attachment_path.read(cx).value().to_string();
+            let trimmed = text.trim().to_owned();
+            if trimmed.starts_with("put ") || trimmed.starts_with("s3 ") {
+                window.shell.flow.set_custom_spec(&trimmed);
+            }
+            window.start_big_file(cx);
+        } else {
+            window.start_big_file(cx);
+        }
+    }))
+}
+
+fn output_name(flow: &Flow) -> Option<String> {
+    let file = flow.staged.as_ref()?;
+    match flow.chosen? {
+        FlowChoice::Compress => Some(match file.kind {
+            MediaKind::Image => format!("{}.webp", file.name),
+            MediaKind::Audio => format!("{}.opus", file.name),
+            MediaKind::Video => format!("{}.mkv", file.name),
+            MediaKind::Other => return None,
+        }),
+        FlowChoice::Split => Some(format!(
+            "{}.{}.001",
+            file.name,
+            flow.settings.archive.label()
+        )),
+        FlowChoice::External => None,
+    }
 }
 
 fn choice_row(
@@ -201,7 +206,6 @@ fn choice_row(
     flow: &Flow,
     choice: FlowChoice,
     title: &str,
-    detail: &str,
     enabled: bool,
     palette: Palette,
 ) -> impl IntoElement {
@@ -212,18 +216,62 @@ fn choice_row(
         palette.line
     };
     let title = title.to_owned();
-    let detail = detail.to_owned();
     let id = match choice {
         FlowChoice::Compress => "bf-compress",
         FlowChoice::External => "bf-link",
         FlowChoice::Split => "bf-split",
     };
-    div()
+    let glyph = match choice {
+        FlowChoice::Compress => "compress",
+        FlowChoice::External => "link",
+        FlowChoice::Split => "split",
+    };
+    let icon_color = if selected {
+        palette.accent
+    } else {
+        palette.muted
+    };
+    let mut body = v_flex()
+        .w(px(400.))
+        .gap(px(4.))
+        .child(paint(title, palette.text, 14.))
+        .child(meta_line(view.clone(), flow, choice, selected, palette));
+    if choice == FlowChoice::External {
+        let warning = flow
+            .offer
+            .as_ref()
+            .map(|offer| offer.external.warning.clone())
+            .unwrap_or_else(|| "This upload leaves the machine.".into());
+        body = body.child(paint(warning, palette.muted, 12.));
+        if selected {
+            let mark = if flow.consent { "☑" } else { "☐" };
+            let consent_view = view.clone();
+            body = body.child(
+                div()
+                    .id("bf-consent")
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        consent_view.update(cx, |window, cx| {
+                            window.shell.flow.toggle_consent();
+                            cx.notify();
+                        });
+                    })
+                    .child(meta(
+                        format!("{mark}  I understand. Send it only because I pressed Upload."),
+                        palette.muted,
+                        11.,
+                        palette,
+                    )),
+            );
+        }
+    }
+    h_flex()
         .id(id)
         .w_full()
-        .px(px(10.))
-        .py(px(8.))
-        .rounded(px(6.))
+        .gap(px(12.))
+        .px(px(12.))
+        .py(px(12.))
+        .rounded(px(8.))
         .border_1()
         .border_color(rgb(border))
         .bg(rgb(if selected {
@@ -231,6 +279,7 @@ fn choice_row(
         } else {
             palette.chat
         }))
+        .items_center()
         .cursor_pointer()
         .on_click(move |_, _, cx| {
             view.update(cx, |window, cx| {
@@ -240,111 +289,194 @@ fn choice_row(
                 cx.notify();
             });
         })
-        .child(paint(title, palette.text, 13.))
-        .child(meta(detail, palette.muted, 11., palette))
+        .child(radio(selected, palette))
+        .child(icon(glyph, 18., icon_color))
+        .child(body)
 }
 
-fn warning_box(view: Entity<RencordWindow>, flow: &Flow, palette: Palette) -> impl IntoElement {
-    let warning = flow
-        .offer
-        .as_ref()
-        .map(|offer| offer.external.warning.clone())
-        .unwrap_or_else(|| "This upload leaves the machine.".into());
-    let mark = if flow.consent { "☑" } else { "☐" };
-    v_flex()
-        .gap(px(4.))
-        .p(px(8.))
-        .rounded(px(6.))
-        .border_1()
-        .border_color(rgb(palette.line))
-        .child(paint(warning, palette.text, 12.))
-        .child(
-            div()
-                .id("bf-consent")
-                .cursor_pointer()
-                .on_click(move |_, _, cx| {
-                    view.update(cx, |window, cx| {
-                        window.shell.flow.toggle_consent();
-                        cx.notify();
-                    });
-                })
-                .child(meta(
-                    format!("{mark}  I understand. Send it only because I pressed Upload."),
+fn meta_line(
+    view: Entity<RencordWindow>,
+    flow: &Flow,
+    choice: FlowChoice,
+    selected: bool,
+    palette: Palette,
+) -> impl IntoElement {
+    let offer = flow.offer.as_ref();
+    let mut row = h_flex().w_full().gap(px(6.)).items_center().flex_wrap();
+    match choice {
+        FlowChoice::Compress => {
+            let technical = offer
+                .map(|offer| compress_technical(&offer.compress.detail))
+                .unwrap_or_else(|| "No encoder for this file".into());
+            row = row.child(meta(technical, palette.muted, 11., palette));
+            if selected {
+                let label = flow.settings.quality.label().to_owned();
+                row = row.child(dropdown(view, "bf-quality", label, palette, |flow| {
+                    flow.cycle_quality();
+                }));
+            }
+        }
+        FlowChoice::External => {
+            if selected {
+                row = row
+                    .child(dropdown(
+                        view.clone(),
+                        "bf-host",
+                        flow.settings.provider.label().to_owned(),
+                        palette,
+                        |flow| flow.cycle_provider(),
+                    ))
+                    .child(dropdown(
+                        view,
+                        "bf-expiry",
+                        flow.settings.expiry_label(),
+                        palette,
+                        |flow| flow.cycle_expiry(),
+                    ));
+            } else {
+                row = row.child(meta(
+                    format!(
+                        "{}  ·  {}",
+                        flow.settings.provider.label(),
+                        flow.settings.expiry_label()
+                    ),
                     palette.muted,
                     11.,
                     palette,
-                )),
-        )
+                ));
+            }
+        }
+        FlowChoice::Split => {
+            let volumes = offer.map(|offer| offer.split.volumes).unwrap_or(0);
+            let limit = rencord_upload::format_bytes(flow.limit.bytes);
+            row = row.child(meta(
+                format!("{volumes} volumes under {limit}"),
+                palette.muted,
+                11.,
+                palette,
+            ));
+            if selected {
+                row = row.child(dropdown(
+                    view,
+                    "bf-archive",
+                    flow.settings.archive.label().to_owned(),
+                    palette,
+                    |flow| flow.cycle_archive(),
+                ));
+            }
+        }
+    }
+    row
 }
 
-fn settings_row(view: Entity<RencordWindow>, flow: &Flow, palette: Palette) -> impl IntoElement {
-    let settings = &flow.settings;
-    v_flex()
-        .gap(px(4.))
-        .child(meta(
-            format!(
-                "Settings  {}  ·  {}  ·  {}  ·  {}",
-                settings.default_action.label(),
-                settings.provider.label(),
-                settings.quality.label(),
-                settings.expiry_label()
-            ),
-            palette.muted,
-            11.,
-            palette,
-        ))
-        .child(
-            h_flex()
-                .gap(px(6.))
-                .child(cycle(
-                    view.clone(),
-                    "bf-default",
-                    "Default",
-                    palette,
-                    |flow| {
-                        flow.cycle_default();
-                    },
-                ))
-                .child(cycle(view.clone(), "bf-host", "Host", palette, |flow| {
-                    flow.cycle_provider();
-                }))
-                .child(cycle(
-                    view.clone(),
-                    "bf-quality",
-                    "Quality",
-                    palette,
-                    |flow| {
-                        flow.cycle_quality();
-                    },
-                ))
-                .child(cycle(
-                    view.clone(),
-                    "bf-expiry",
-                    "Expiry",
-                    palette,
-                    |flow| {
-                        flow.cycle_expiry();
-                    },
-                ))
-                .child(cycle(view, "bf-archive", "Archive", palette, |flow| {
-                    flow.cycle_archive();
-                })),
-        )
+/// Drop the quality word from the planned sentence so the dropdown can sit in its place.
+fn compress_technical(detail: &str) -> String {
+    let mut parts: Vec<&str> = detail
+        .split("  ·  ")
+        .filter(|part| {
+            !matches!(
+                part.trim(),
+                "sharp" | "balanced" | "soft" | "small and soft"
+            )
+        })
+        .collect();
+    if parts.len() > 3 {
+        parts.truncate(3);
+    }
+    if parts.is_empty() {
+        detail.to_owned()
+    } else {
+        parts.join("  ·  ")
+    }
 }
 
-fn cycle(
+fn radio(selected: bool, palette: Palette) -> impl IntoElement {
+    let ring = if selected {
+        palette.accent
+    } else {
+        palette.muted
+    };
+    let mut dot = div()
+        .size(px(16.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(rgb(ring))
+        .flex_shrink_0()
+        .items_center()
+        .justify_center();
+    if selected {
+        dot = dot.child(div().size(px(8.)).rounded(px(4.)).bg(rgb(palette.accent)));
+    }
+    dot
+}
+
+fn dropdown(
     view: Entity<RencordWindow>,
     id: &'static str,
-    label: &'static str,
+    label: String,
     palette: Palette,
     apply: impl Fn(&mut Flow) + 'static,
 ) -> impl IntoElement {
-    ghost_button(view, id, label, palette, move |window, cx| {
-        apply(&mut window.shell.flow);
-        let path = rencord_platform::data_dir().join("upload-settings.json");
-        let _ = rencord_upload::save_settings(&path, &window.shell.flow.settings);
-        cx.notify();
-    })
+    h_flex()
+        .id(id)
+        .h(px(22.))
+        .px(px(8.))
+        .gap(px(4.))
+        .items_center()
+        .rounded(px(4.))
+        .border_1()
+        .border_color(rgb(palette.line))
+        .bg(rgb(palette.elevated))
+        .cursor_pointer()
+        .on_click(move |_, _, cx| {
+            view.update(cx, |window, cx| {
+                apply(&mut window.shell.flow);
+                let path = rencord_platform::data_dir().join("upload-settings.json");
+                let _ = rencord_upload::save_settings(&path, &window.shell.flow.settings);
+                cx.notify();
+            });
+        })
+        .child(meta(label, palette.text, 11., palette))
+        .child(paint("▾", palette.muted, 11.))
+}
+
+fn defaults_row(view: Entity<RencordWindow>, flow: &Flow, palette: Palette) -> impl IntoElement {
+    let open = flow.defaults_open;
+    let mark = if open { "▴" } else { "▾" };
+    let toggle = view.clone();
+    let mut column = v_flex().gap(px(8.)).child(
+        h_flex()
+            .id("bf-defaults")
+            .h(px(28.))
+            .gap(px(6.))
+            .items_center()
+            .cursor_pointer()
+            .on_click(move |_, _, cx| {
+                toggle.update(cx, |window, cx| {
+                    window.shell.flow.toggle_defaults();
+                    cx.notify();
+                });
+            })
+            .child(meta(
+                format!("Defaults  {mark}"),
+                palette.muted,
+                11.,
+                palette,
+            )),
+    );
+    if open {
+        let action = flow.settings.default_action.label().to_owned();
+        column = column.child(
+            h_flex()
+                .gap(px(8.))
+                .items_center()
+                .child(meta("Start on", palette.muted, 11., palette))
+                .child(dropdown(view, "bf-default", action, palette, |flow| {
+                    flow.cycle_default()
+                })),
+        );
+    }
+    column
 }
 
 fn progress_block(view: Entity<RencordWindow>, flow: &Flow, palette: Palette) -> impl IntoElement {
@@ -358,9 +490,10 @@ fn progress_block(view: Entity<RencordWindow>, flow: &Flow, palette: Palette) ->
             detail: String::new(),
         });
     let percent = snap.percent();
-    let width = 440.0 * (percent as f32) / 100.0;
-    v_flex()
-        .gap(px(8.))
+    let failed = flow.error.is_some();
+    let mut column = v_flex()
+        .w_full()
+        .gap(px(12.))
         .child(paint(snap.phase.clone(), palette.text, 15.))
         .child(meta(
             format!(
@@ -373,60 +506,67 @@ fn progress_block(view: Entity<RencordWindow>, flow: &Flow, palette: Palette) ->
             palette,
         ))
         .child(meta(snap.detail.clone(), palette.muted, 11., palette))
+        .child(progress_bar(percent, palette));
+    if let Some(error) = &flow.error {
+        column = column.child(paint(error.clone(), palette.danger, 13.));
+    }
+    let mut actions = h_flex()
+        .w_full()
+        .gap(px(8.))
+        .justify_end()
+        .items_center()
+        .child(ghost_button(
+            view.clone(),
+            "bf-cancel-job",
+            "Cancel",
+            palette,
+            |window, cx| {
+                if let Some(flag) = &window.upload_cancel {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                window.shell.flow.fail("Cancelled.".into());
+                cx.notify();
+            },
+        ));
+    if failed {
+        actions = actions.child(accent_button(
+            view,
+            "bf-retry",
+            "Retry",
+            palette,
+            |window, cx| {
+                window.shell.flow.error = None;
+                window.start_big_file(cx);
+            },
+        ));
+    }
+    column.child(actions)
+}
+
+fn progress_bar(percent: u32, palette: Palette) -> impl IntoElement {
+    let width = 480.0 * (percent as f32) / 100.0;
+    div()
+        .w_full()
+        .h(px(6.))
+        .rounded(px(3.))
+        .bg(rgb(palette.line))
         .child(
             div()
-                .w(px(440.))
+                .w(px(width.max(2.)))
                 .h(px(6.))
                 .rounded(px(3.))
-                .bg(rgb(palette.line))
-                .child(
-                    div()
-                        .w(px(width.max(2.)))
-                        .h(px(6.))
-                        .rounded(px(3.))
-                        .bg(rgb(palette.accent)),
-                ),
-        )
-        .child(error_line(flow, palette))
-        .child(
-            h_flex()
-                .gap(px(8.))
-                .child(ghost_button(
-                    view.clone(),
-                    "bf-cancel-job",
-                    "Cancel",
-                    palette,
-                    |window, cx| {
-                        if let Some(flag) = &window.upload_cancel {
-                            flag.store(true, Ordering::Relaxed);
-                        }
-                        window.shell.flow.fail("Cancelled".into());
-                        cx.notify();
-                    },
-                ))
-                .child(ghost_button(
-                    view,
-                    "bf-retry",
-                    "Retry",
-                    palette,
-                    |window, cx| {
-                        if window.shell.flow.can_retry() {
-                            window.shell.flow.error = None;
-                            window.start_big_file(cx);
-                        }
-                        cx.notify();
-                    },
-                )),
+                .bg(rgb(palette.accent)),
         )
 }
 
 fn done_block(view: Entity<RencordWindow>, flow: &Flow, palette: Palette) -> impl IntoElement {
     let outcome = flow.outcome.clone().unwrap_or_else(|| "Done".into());
     v_flex()
-        .gap(px(8.))
+        .w_full()
+        .gap(px(12.))
         .child(paint("Finished", palette.text, 15.))
         .child(meta(outcome, palette.muted, 11., palette))
-        .child(ghost_button(
+        .child(h_flex().w_full().justify_end().child(ghost_button(
             view,
             "bf-done-close",
             "Close",
@@ -435,11 +575,12 @@ fn done_block(view: Entity<RencordWindow>, flow: &Flow, palette: Palette) -> imp
                 window.shell.flow.close();
                 cx.notify();
             },
-        ))
+        )))
 }
 
 fn reassemble_block(
     view: Entity<RencordWindow>,
+    path_input: &Entity<InputState>,
     flow: &Flow,
     palette: Palette,
 ) -> impl IntoElement {
@@ -453,48 +594,54 @@ fn reassemble_block(
                 note.format.label()
             )
         })
-        .unwrap_or_else(|| "Paste a rencord-split note, then Pick the .001 file.".into());
+        .unwrap_or_else(|| "Pick the .001 file.".into());
     v_flex()
-        .gap(px(8.))
+        .w_full()
+        .gap(px(12.))
         .child(paint("Reassemble", palette.text, 15.))
         .child(meta(summary, palette.muted, 11., palette))
-        .child(meta(
-            flow.reassemble_note.clone(),
-            palette.faint,
-            11.,
-            palette,
-        ))
-        .child(error_line(flow, palette))
-        .child(
-            h_flex()
-                .gap(px(8.))
-                .child(accent_button(
-                    view.clone(),
-                    "bf-join",
-                    "Join",
-                    palette,
-                    |window, cx| {
-                        let text = window.attachment_path.read(cx).value().to_string();
-                        window.join_parts(text.trim());
-                        cx.notify();
-                    },
-                ))
-                .child(ghost_button(
-                    view,
-                    "bf-reassemble-close",
-                    "Close",
-                    palette,
-                    |window, cx| {
-                        window.shell.flow.close();
-                        cx.notify();
-                    },
-                )),
+        .child(Input::new(path_input))
+        .children(
+            flow.error
+                .clone()
+                .map(|error| paint(error, palette.danger, 13.)),
         )
+        .child(action_row(view, palette, "Join", false, |window, cx| {
+            let text = window.attachment_path.read(cx).value().to_string();
+            window.join_parts(text.trim());
+            cx.notify();
+        }))
 }
 
-fn error_line(flow: &Flow, palette: Palette) -> impl IntoElement {
-    let text = flow.error.clone().unwrap_or_default();
-    div().child(paint(text, palette.danger, 12.))
+fn action_row(
+    view: Entity<RencordWindow>,
+    palette: Palette,
+    primary: &'static str,
+    _cancel_closes: bool,
+    go: impl Fn(&mut RencordWindow, &mut Context<RencordWindow>) + 'static,
+) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .gap(px(8.))
+        .justify_end()
+        .items_center()
+        .child(ghost_button(
+            view.clone(),
+            "bf-close",
+            "Cancel",
+            palette,
+            |window, cx| {
+                window.shell.flow.close();
+                cx.notify();
+            },
+        ))
+        .child(accent_button(view, "bf-go", primary, palette, go))
+}
+
+struct ButtonStyle {
+    fill: u32,
+    ink: u32,
+    border: bool,
 }
 
 fn accent_button(
@@ -504,19 +651,18 @@ fn accent_button(
     palette: Palette,
     action: impl Fn(&mut RencordWindow, &mut Context<RencordWindow>) + 'static,
 ) -> impl IntoElement {
-    div()
-        .id(id)
-        .h(px(28.))
-        .px(px(12.))
-        .rounded(px(6.))
-        .items_center()
-        .justify_center()
-        .bg(rgb(palette.accent))
-        .cursor_pointer()
-        .child(paint(label, palette.accent_text, 13.))
-        .on_click(move |_, _, cx| {
-            view.update(cx, |window, cx| action(window, cx));
-        })
+    button_shell(
+        view,
+        id,
+        label,
+        ButtonStyle {
+            fill: palette.accent,
+            ink: palette.accent_text,
+            border: false,
+        },
+        palette,
+        action,
+    )
 }
 
 fn ghost_button(
@@ -526,17 +672,48 @@ fn ghost_button(
     palette: Palette,
     action: impl Fn(&mut RencordWindow, &mut Context<RencordWindow>) + 'static,
 ) -> impl IntoElement {
-    div()
+    button_shell(
+        view,
+        id,
+        label,
+        ButtonStyle {
+            fill: palette.chat,
+            ink: palette.text,
+            border: true,
+        },
+        palette,
+        action,
+    )
+}
+
+fn button_shell(
+    view: Entity<RencordWindow>,
+    id: &'static str,
+    label: &'static str,
+    style: ButtonStyle,
+    palette: Palette,
+    action: impl Fn(&mut RencordWindow, &mut Context<RencordWindow>) + 'static,
+) -> impl IntoElement {
+    let mut button = h_flex()
         .id(id)
-        .h(px(28.))
-        .px(px(10.))
-        .rounded(px(6.))
+        .h(px(BUTTON_H))
+        .px(px(14.))
         .items_center()
         .justify_center()
-        .border_1()
-        .border_color(rgb(palette.line))
-        .cursor_pointer()
-        .child(paint(label, palette.text, 12.))
+        .rounded(px(6.))
+        .bg(rgb(style.fill))
+        .cursor_pointer();
+    if style.border {
+        button = button.border_1().border_color(rgb(palette.line));
+    }
+    button
+        .child(
+            div()
+                .text_size(px(13.))
+                .line_height(px(13.))
+                .text_color(rgb(style.ink))
+                .child(label.to_owned()),
+        )
         .on_click(move |_, _, cx| {
             view.update(cx, |window, cx| action(window, cx));
         })
@@ -545,12 +722,13 @@ fn ghost_button(
 fn apply_path(window: &mut RencordWindow, text: &str) {
     if text.starts_with("put ") || text.starts_with("s3 ") {
         window.shell.flow.set_custom_spec(text);
-        window.shell.flow.settings.provider = rencord_upload::ProviderKind::Custom;
+        window.shell.flow.settings.provider = ProviderKind::Custom;
         window.shell.flow.error = None;
         return;
     }
     if text.is_empty() {
         window.shell.flow.open_picker();
+        window.shell.flow.error = Some("Type a path, or drop the file on the composer.".into());
         return;
     }
     match window.shell.flow.stage_path(Path::new(text)) {
