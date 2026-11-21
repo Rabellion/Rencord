@@ -17,7 +17,8 @@ use rencord_desktop::{stacks_login, Palette};
 use rencord_model::Token;
 use rencord_platform::{FileSecretStore, SecretStore};
 
-use super::{BootError, Bootstrap, RencordWindow};
+use super::net::{self, BootError, Bootstrap, GatewayLink};
+use super::RencordWindow;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoginPhase {
@@ -710,26 +711,19 @@ impl RencordWindow {
         self.login.busy = true;
         self.login.status = "Signing in…".into();
         let wire = token.expose().to_owned();
-        let (tx, rx) = async_channel::bounded(1);
-        std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("tokio");
-            let outcome = runtime.block_on(super::fetch_bootstrap(wire));
-            let _ = tx.send_blocking(outcome);
-        });
+        // The shared runtime keeps the gateway started here alive after bootstrap returns.
+        let task = net::runtime().spawn(net::fetch_bootstrap(wire));
         cx.spawn(async move |this, cx| {
-            let Ok(outcome) = rx.recv().await else {
+            let Ok(outcome) = task.await else {
                 return;
             };
             this.update(cx, |view, cx| {
                 match outcome {
-                    Ok(snapshot) => view.finish_sign_in(token, snapshot, migrate_file),
+                    Ok(snapshot) => view.finish_sign_in(token, snapshot, migrate_file, cx),
                     Err(BootError::Unauthorized) => {
                         view.session_machine.restart();
                         view.session_machine.unauthorized();
-                        view.session_token = None;
+                        view.drop_live_session();
                         view.login.busy = false;
                         if migrate_file {
                             let _ = FileSecretStore::in_data_dir().clear_token();
@@ -752,7 +746,13 @@ impl RencordWindow {
         .detach();
     }
 
-    fn finish_sign_in(&mut self, token: Token, snapshot: Bootstrap, migrate_file: bool) {
+    fn finish_sign_in(
+        &mut self,
+        token: Token,
+        snapshot: Bootstrap,
+        migrate_file: bool,
+        cx: &mut Context<Self>,
+    ) {
         let record = AccountRecord::from_user(&snapshot.user);
         match self.vault.save_account(&record, &token) {
             Ok(()) => {
@@ -768,6 +768,35 @@ impl RencordWindow {
         self.session_machine.restart();
         let _ = self.session_machine.established(record.user_id.clone());
         self.session_token = Some(token);
+        self.requested.clear();
+        let api = snapshot.api.clone();
+        self.api = Some(api.clone());
+        let GatewayLink {
+            mut events,
+            commands,
+        } = snapshot.gateway;
+        // Replacing the sender stops the previous account's gateway.
+        self.gateway = Some(commands);
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = events.recv().await {
+                let applied = this.update(cx, |view, cx| {
+                    // Events still queued from a session that was replaced are dropped.
+                    let current = view
+                        .api
+                        .as_ref()
+                        .is_some_and(|live| Arc::ptr_eq(live, &api));
+                    if current {
+                        view.shell.session.apply_gateway(event);
+                        cx.notify();
+                    }
+                    current
+                });
+                if !matches!(applied, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
         self.shell.set_user(snapshot.user);
         self.shell.load_appearance();
         self.shell.consider_discord_appearance(
@@ -1306,7 +1335,7 @@ impl RencordWindow {
         let token = self.session_token.clone();
         let user_id = self.active_user_id();
         self.login.adding = false;
-        self.session_token = None;
+        self.drop_live_session();
         self.shell.session.user = None;
         self.session_machine.logged_out();
         if let Some(id) = &user_id {
@@ -1315,12 +1344,8 @@ impl RencordWindow {
         self.reload_accounts();
         self.shell.note("Signed out.");
         if let Some(token) = token {
-            std::thread::spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("tokio");
-                let _ = runtime.block_on(AuthClient::new().logout(&token));
+            net::runtime().spawn(async move {
+                let _ = AuthClient::new().logout(&token).await;
             });
         }
         self.start_qr(cx);
@@ -1338,7 +1363,7 @@ impl RencordWindow {
         if let Some(id) = self.active_user_id() {
             let _ = self.vault.remove_account(&id);
         }
-        self.session_token = None;
+        self.drop_live_session();
         self.shell.session.user = None;
         self.reload_accounts();
         self.shell.note("The session expired. Sign in again.");
