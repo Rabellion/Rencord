@@ -171,11 +171,11 @@ fn probe_vaapi() -> EncoderProbe {
     let kind = EncoderKind::Vaapi;
     #[cfg(not(target_os = "linux"))]
     {
-        return EncoderProbe {
+        EncoderProbe {
             kind,
             usable: false,
             detail: "VA-API is the Linux encoder. This process is not Linux.".into(),
-        };
+        }
     }
     #[cfg(target_os = "linux")]
     {
