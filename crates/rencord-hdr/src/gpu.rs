@@ -3,7 +3,9 @@
 //! Backends are whatever wgpu builds on this OS: Vulkan, Metal, or D3D12.
 //! A missing adapter is not an error for the caller. [`dispatch`] returns
 //! [`GpuError::NoAdapter`] and the CPU mapper runs instead. Pipeline creation
-//! is cached. The timed region is one submit plus the readback.
+//! is cached. [`dispatch_resident`] times one submit and a GPU wait, and
+//! leaves the storage buffer on the device. [`dispatch`] adds a mapped readback
+//! for tests and the benchmark example.
 
 use crate::color::{luma_coefficients, ColorMatrix};
 use crate::shader::tonemap_wgsl;
@@ -43,8 +45,76 @@ pub struct AdapterReport {
 pub struct GpuDispatch {
     pub report: AdapterReport,
     pub pixels: Vec<[f32; 3]>,
-    /// Submit through mapped readback. Shader compile is not included.
+    /// Submit, GPU wait, and mapped readback. Shader compile is not included.
     pub elapsed: Duration,
+}
+
+/// Tone-mapped pixels that stay in a device-local buffer.
+///
+/// The live path hands this to an encoder. [`GpuResidentFrame::readback`] is
+/// the only way the bytes return to the CPU. The software luma sink calls it
+/// once. A GPU encoder sink does not.
+pub struct GpuResidentFrame {
+    pub report: AdapterReport,
+    pub width: u32,
+    pub height: u32,
+    /// Submit plus a GPU wait. No staging copy and no map.
+    pub elapsed: Duration,
+    buffer: wgpu::Buffer,
+}
+
+impl GpuResidentFrame {
+    pub fn byte_size(&self) -> u64 {
+        self.buffer.size()
+    }
+
+    pub fn format(&self) -> &'static str {
+        "rgba32float-storage"
+    }
+
+    pub fn readback(&self) -> Result<Vec<[f32; 3]>, GpuError> {
+        let session = session()?;
+        let size = self.buffer.size();
+        let staging = session.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hdr-stage"),
+            size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = session
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("hdr-readback"),
+            });
+        encoder.copy_buffer_to_buffer(&self.buffer, 0, &staging, 0, size);
+        session.queue.submit(Some(encoder.finish()));
+        let slice = staging.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = sender.send(result);
+        });
+        session
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|err| GpuError::Wgpu(err.to_string()))?;
+        receiver
+            .recv()
+            .map_err(|err| GpuError::Wgpu(err.to_string()))?
+            .map_err(|err| GpuError::Wgpu(err.to_string()))?;
+        let data = slice
+            .get_mapped_range()
+            .map_err(|err| GpuError::Wgpu(err.to_string()))?;
+        let floats: &[f32] = bytemuck_floats(&data);
+        let count = floats.len() / 4;
+        let mut pixels = Vec::with_capacity(count);
+        for index in 0..count {
+            let base = index * 4;
+            pixels.push([floats[base], floats[base + 1], floats[base + 2]]);
+        }
+        drop(data);
+        staging.unmap();
+        Ok(pixels)
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -83,7 +153,7 @@ fn open_session() -> Result<Session, String> {
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: None,
-        force_fallback_adapter: true,
+        force_fallback_adapter: false,
         apply_limit_buckets: false,
     }))
     .map_err(|err| match err {
@@ -138,14 +208,15 @@ pub fn adapter_report() -> Result<AdapterReport, GpuError> {
     Ok(session()?.report.clone())
 }
 
-pub fn dispatch(params: &ToneMapParams, nits: &[[f32; 3]]) -> Result<GpuDispatch, GpuError> {
+pub fn dispatch_resident(
+    params: &ToneMapParams,
+    width: u32,
+    height: u32,
+    nits: &[[f32; 3]],
+) -> Result<GpuResidentFrame, GpuError> {
     let session = session()?;
     if nits.is_empty() {
-        return Ok(GpuDispatch {
-            report: session.report.clone(),
-            pixels: Vec::new(),
-            elapsed: Duration::ZERO,
-        });
+        return Err(GpuError::Wgpu("empty frame".into()));
     }
     let count = nits.len();
     let mut input = vec![0.0f32; count * 4];
@@ -185,12 +256,6 @@ pub fn dispatch(params: &ToneMapParams, nits: &[[f32; 3]]) -> Result<GpuDispatch
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
-    let staging = session.device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("hdr-stage"),
-        size: output_size,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
     let bind = session
         .device
         .create_bind_group(&wgpu::BindGroupDescriptor {
@@ -228,38 +293,40 @@ pub fn dispatch(params: &ToneMapParams, nits: &[[f32; 3]]) -> Result<GpuDispatch
         pass.set_bind_group(0, &bind, &[]);
         pass.dispatch_workgroups(groups_x, groups_y, 1);
     }
-    encoder.copy_buffer_to_buffer(&output, 0, &staging, 0, output_size);
     let started = Instant::now();
     session.queue.submit(Some(encoder.finish()));
-    let slice = staging.slice(..);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = sender.send(result);
-    });
     session
         .device
         .poll(wgpu::PollType::wait_indefinitely())
         .map_err(|err| GpuError::Wgpu(err.to_string()))?;
-    receiver
-        .recv()
-        .map_err(|err| GpuError::Wgpu(err.to_string()))?
-        .map_err(|err| GpuError::Wgpu(err.to_string()))?;
     let elapsed = started.elapsed();
-    let data = slice
-        .get_mapped_range()
-        .map_err(|err| GpuError::Wgpu(err.to_string()))?;
-    let floats: &[f32] = bytemuck_floats(&data);
-    let mut pixels = Vec::with_capacity(count);
-    for index in 0..count {
-        let base = index * 4;
-        pixels.push([floats[base], floats[base + 1], floats[base + 2]]);
-    }
-    drop(data);
-    staging.unmap();
-    Ok(GpuDispatch {
+    Ok(GpuResidentFrame {
         report: session.report.clone(),
-        pixels,
+        width,
+        height,
         elapsed,
+        buffer: output,
+    })
+}
+
+/// Dispatch and copy the result back. Tests and the benchmark use this.
+/// The Go Live path uses [`dispatch_resident`] and does not call it.
+pub fn dispatch(params: &ToneMapParams, nits: &[[f32; 3]]) -> Result<GpuDispatch, GpuError> {
+    if nits.is_empty() {
+        let report = adapter_report()?;
+        return Ok(GpuDispatch {
+            report,
+            pixels: Vec::new(),
+            elapsed: Duration::ZERO,
+        });
+    }
+    let started = Instant::now();
+    let resident = dispatch_resident(params, nits.len() as u32, 1, nits)?;
+    let pixels = resident.readback()?;
+    Ok(GpuDispatch {
+        report: resident.report,
+        pixels,
+        elapsed: started.elapsed(),
     })
 }
 
