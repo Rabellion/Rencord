@@ -52,8 +52,8 @@ pub struct GpuDispatch {
 /// Tone-mapped pixels that stay in a device-local buffer.
 ///
 /// The live path hands this to an encoder. [`GpuResidentFrame::readback`] is
-/// the only way the bytes return to the CPU, and the encoder trait does not
-/// call it.
+/// the only way the bytes return to the CPU. The software luma sink calls it
+/// once. A GPU encoder sink does not.
 pub struct GpuResidentFrame {
     pub report: AdapterReport,
     pub width: u32,
@@ -153,7 +153,7 @@ fn open_session() -> Result<Session, String> {
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: None,
-        force_fallback_adapter: true,
+        force_fallback_adapter: false,
         apply_limit_buckets: false,
     }))
     .map_err(|err| match err {

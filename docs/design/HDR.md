@@ -42,7 +42,7 @@ On this machine the only adapter is lavapipe (software Vulkan, LLVM 20.1.2). Rel
 | 1920×1080 | 34.0 ms |
 | 3840×2160 | 182 ms |
 
-Mapping that 1080p buffer back to the CPU took another 26.6 ms. Go Live does not map it. `SoftwareFrameSink` owns the buffer and the software H.264 access unit keeps the 8-bit preview.
+Mapping that 1080p buffer back to the CPU took another 26.6 ms. `dispatch_resident` does not map. `SoftwareFrameSink` maps once so the software H.264 access unit is the tone-mapped picture. A GPU encoder sink keeps the buffer.
 
 The error against the CPU formula on 34 pixels was 0.000024. A mid-range GPU budget of under 2 ms at 1080p and under 4 ms at 4K was not measured, because no such GPU is attached. Lavapipe is faster than the CPU BT.2390 path and still too slow for a live frame.
 
@@ -79,7 +79,7 @@ A viewer is HDR-capable only when all of these are true:
 
 When some Rencord peers asked for HDR and the track still has to be SDR, `DeliveryPlan::side_channel_hdr` is true. That means a 10-bit access unit *may* be built for a Rencord-only transport. This crate does not transmit it.
 
-`rencord-media::planned_pixel_path` is the hook the Go Live crate calls into `HdrSignal`. It is stricter than `select_pixel_path`: a Rencord viewer that did not advertise receive stays on SDR. `output_path` is still the SDR decision. `GoLive::send_frame` tone-maps an HDR preview with the GPU shader (CPU if wgpu has no adapter) before the existing 8-bit software encode. When `hdr_send` is set it also calls `Hdr10Encoder`. The reference encoder writes `RHDR` plus HDR10 SEI. `UnlinkedHdr10Encoder` is the NVENC, AMF, QSV, VideoToolbox, and VA-API implementation of that trait: it returns not-linked and does not duplicate their session code.
+`rencord-media::planned_pixel_path` is the hook the Go Live crate calls into `HdrSignal`. It is stricter than `select_pixel_path`: a Rencord viewer that did not advertise receive stays on SDR. `output_path` is still the SDR decision. `GoLive::send_frame` tone-maps an HDR preview with the GPU shader (CPU if wgpu has no adapter). The software encoder then maps that buffer once and encodes the tone-mapped 8-bit picture. When `hdr_send` is set it also calls `Hdr10Encoder`. The reference encoder writes `RHDR` plus HDR10 SEI. `UnlinkedHdr10Encoder` is the NVENC, AMF, QSV, VideoToolbox, and VA-API implementation of that trait: it returns not-linked and does not duplicate their session code.
 
 ### Where the bytes go
 

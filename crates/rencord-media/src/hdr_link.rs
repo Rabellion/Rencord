@@ -127,38 +127,26 @@ pub fn prepare_frame(
     };
     let mut sdr = frame.clone();
     sdr.hdr = HdrFlags::default();
-    // The GPU result stays in a device-local buffer. The software H.264 path
-    // cannot sample that texture, so it keeps the 8-bit preview. A hardware
-    // encoder implements [`GpuFrameSink`] and does not map the buffer.
-    let (tone_map, resident_bytes) = match rencord_hdr::dispatch_resident(
-        &params,
-        frame.width,
-        frame.height,
-        &nits,
-    ) {
-        Ok(resident) => {
-            let bytes = resident.byte_size();
-            let mut sink = SoftwareFrameSink;
-            sink.accept(resident)?;
-            ("wgpu-resident", Some(bytes))
-        }
-        Err(GpuError::NoAdapter) => {
-            let mut linear = vec![[0.0f32; 3]; nits.len()];
-            CpuToneMapper::new(params).map_into(&nits, &mut linear);
-            for (index, pixel) in linear.iter().enumerate() {
-                let rgb = to_srgb8(*pixel);
-                let offset = index * 4;
-                if offset + 3 < sdr.bgra.len() {
-                    sdr.bgra[offset] = rgb[2];
-                    sdr.bgra[offset + 1] = rgb[1];
-                    sdr.bgra[offset + 2] = rgb[0];
-                    sdr.bgra[offset + 3] = 255;
-                }
+    // dispatch_resident leaves the buffer on the device. The software luma
+    // encoder cannot sample it, so SoftwareFrameSink maps once and the access
+    // unit gets the tone-mapped picture. A GPU encoder sink keeps the buffer.
+    let (tone_map, resident_bytes) =
+        match rencord_hdr::dispatch_resident(&params, frame.width, frame.height, &nits) {
+            Ok(resident) => {
+                let bytes = resident.byte_size();
+                let mut sink = SoftwareFrameSink { pixels: Vec::new() };
+                sink.accept(resident)?;
+                write_sdr(&mut sdr, &sink.pixels);
+                ("wgpu-resident", Some(bytes))
             }
-            ("cpu", None)
-        }
-        Err(err) => return Err(err.to_string()),
-    };
+            Err(GpuError::NoAdapter) => {
+                let mut linear = vec![[0.0f32; 3]; nits.len()];
+                CpuToneMapper::new(params).map_into(&nits, &mut linear);
+                write_sdr(&mut sdr, &linear);
+                ("cpu", None)
+            }
+            Err(err) => return Err(err.to_string()),
+        };
     let hdr10 = if hdr_send {
         Some(hdr10_encoder().encode_main10(
             frame.width,
@@ -177,22 +165,37 @@ pub fn prepare_frame(
     })
 }
 
-/// Receives the tone-mapped texture without copying it back to the CPU.
+/// Receives the device-local tone-map. A GPU encoder keeps the buffer.
 pub trait GpuFrameSink {
     fn accept(&mut self, frame: rencord_hdr::GpuResidentFrame) -> Result<(), String>;
 }
 
-/// The software encoder has no GPU input. It records the handoff and leaves
-/// the buffer unmapped. The 8-bit access unit keeps the preview bytes.
-pub struct SoftwareFrameSink;
+/// The software luma encoder reads CPU bytes, so this sink maps the buffer
+/// once. That copy is outside the timed GPU submit.
+pub struct SoftwareFrameSink {
+    pub pixels: Vec<[f32; 3]>,
+}
 
 impl GpuFrameSink for SoftwareFrameSink {
     fn accept(&mut self, frame: rencord_hdr::GpuResidentFrame) -> Result<(), String> {
         if frame.byte_size() == 0 {
             return Err("empty GPU tone-map".into());
         }
-        let _ = frame.format();
+        self.pixels = frame.readback().map_err(|err| err.to_string())?;
         Ok(())
+    }
+}
+
+fn write_sdr(frame: &mut Frame, linear: &[[f32; 3]]) {
+    for (index, pixel) in linear.iter().enumerate() {
+        let rgb = to_srgb8(*pixel);
+        let offset = index * 4;
+        if offset + 3 < frame.bgra.len() {
+            frame.bgra[offset] = rgb[2];
+            frame.bgra[offset + 1] = rgb[1];
+            frame.bgra[offset + 2] = rgb[0];
+            frame.bgra[offset + 3] = 255;
+        }
     }
 }
 
@@ -228,6 +231,11 @@ mod tests {
         ];
         let prepared = prepare_frame(&frame, true, ToneCurve::Bt2390).unwrap();
         assert!(!prepared.sdr.hdr.is_hdr());
+        assert_ne!(
+            &prepared.sdr.bgra[8..12],
+            &[128, 128, 128, 255],
+            "the SDR access unit must carry the tone-mapped picture"
+        );
         let hdr = prepared.hdr10.expect("10-bit sidecar");
         assert!(
             prepared.tone_map == "cpu" || prepared.gpu_resident_bytes.is_some(),

@@ -5,8 +5,7 @@ use std::time::Instant;
 
 use rencord_hdr::{
     av1_hdr_metadata_obus, dispatch_resident, hevc_hdr10_sei, CpuToneMapper, Hdr10StaticMetadata,
-    ToneCurve,
-    ToneMapParams, ToneMapper,
+    ToneCurve, ToneMapParams, ToneMapper,
 };
 
 fn main() {
