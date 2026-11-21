@@ -139,7 +139,7 @@ cargo run -p rencord-desktop --bin rencord-measure -- --offline
 | Next / previous server | Ctrl+Alt+Down / Ctrl+Alt+Up |
 | Settings | Ctrl+, or Cmd+, or the Settings button |
 
-Settings > Appearance switches presets, syncs light and dark with the system, and edits a free custom theme. Density is compact 28 px rows, cozy 32 px, or spacious 36 px. Type size steps through 13–17 px. It lists cpal input and output names, shows the last loopback jitter line, and states that Go Live defaults to 720p30. The HDR row (Send, Receive, curve) is off by default. It configures the tone-map and the Rencord-to-Rencord plan. It does not start a capture. There is no Nitro row. Appearance stays on this machine unless Follow Discord is on, and even then Rencord only reads Discord's theme.
+Settings opens to a left nav. Appearance shows preset cards, sync with the system, density, and accessibility switches. Custom edits a base and an accent with an OKLCH plane, a hex field, and a gradient, plus sliders for type size, spacing, radius, saturation, and grain. Advanced lists tokens with contrast badges. Voice & Video holds the input and output devices, the loopback line, and the HDR row (Send, Receive, curve), which stays off and does not start a capture. There is no Nitro row. Appearance stays on this machine unless Follow Discord is on, and even then Rencord only reads Discord's theme.
 
 <img src="docs/design/onyx/hdr-settings.png" alt="Onyx Ink settings with HDR send and receive off and the BT.2390 curve." width="640" />
 

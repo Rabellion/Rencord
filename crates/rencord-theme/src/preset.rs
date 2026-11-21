@@ -574,6 +574,7 @@ fn colors(spec: InkSpec) -> Colors {
     } else {
         (c(0xb91c1c), c(0xffffff))
     };
+    let badge_fg = ensure_contrast(badge_fg, badge_bg, 4.5);
     let (voice_bg, voice_border, _voice_label, voice_meta) = if onyx_ink {
         (c(spec.bg_chat), line, c(spec.link), c(spec.secondary))
     } else {
