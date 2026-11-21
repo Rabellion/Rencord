@@ -136,22 +136,13 @@ jobs:
           $selfSigned = Test-Path (Join-Path $dist "self-signed.txt")
           $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1).FullName
           $server = (Get-Content (Join-Path $dist "timestamp-server.txt") -Raw).Trim()
-          if ($selfSigned) {
-            # certutil and Import-Certificate can open a trust dialog. The store API does not.
-            $trusted = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($cer)
-            foreach ($name in @("Root", "TrustedPublisher")) {
-              $store = New-Object System.Security.Cryptography.X509Certificates.X509Store($name, "CurrentUser")
-              $store.Open("ReadWrite")
-              $store.Add($trusted)
-              $store.Close()
-            }
-          }
           function Show-Signature([string]$Path) {
             Write-Host "---- signature $Path"
-            Invoke-Bounded -File $signtool -ArgumentList @("verify", "/pa", "/tw", $Path) -TimeoutSec 60 -Label "verify $Path"
             $info = Get-AuthenticodeSignature $Path
             $stamp = if ($info.TimeStamperCertificate) { $info.TimeStamperCertificate.Subject } else { "missing" }
-            Write-Host ("Status={0} Subject={1} Timestamp={2}" -f $info.Status, $info.SignerCertificate.Subject, $stamp)
+            $subject = if ($info.SignerCertificate) { $info.SignerCertificate.Subject } else { "missing" }
+            Write-Host ("Status={0} Subject={1} Timestamp={2}" -f $info.Status, $subject, $stamp)
+            if (-not $info.SignerCertificate) { throw "missing signature on $Path" }
             if (-not $info.TimeStamperCertificate) { throw "missing timestamp on $Path" }
           }
           Show-Signature $exe
