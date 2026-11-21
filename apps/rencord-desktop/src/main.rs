@@ -31,6 +31,7 @@ use rencord_desktop::{Palette, Shell, ThemeMode, MOTION_OVERLAY_MS};
 
 mod golive;
 mod hdr_ui;
+mod stub;
 use rencord_markdown::{parse, Block, Inline};
 use rencord_model::{Message, Snowflake};
 
@@ -103,6 +104,19 @@ fn main() {
         std::process::exit(rencord_media::worker_main());
     }
     let demo = args.iter().any(|arg| arg == "--demo");
+    let stub_scene = args
+        .windows(2)
+        .find(|pair| pair[0] == "--stub")
+        .and_then(|pair| match pair[1].as_str() {
+            "guilds" => Some(stub::StubScene::Guilds),
+            "scroll" => Some(stub::StubScene::Scroll),
+            "retry" => Some(stub::StubScene::Retry),
+            _ => None,
+        });
+    if let Some(scene) = stub_scene {
+        let (api_base, gateway) = net::runtime().block_on(stub::serve(scene));
+        net::set_endpoints(api_base, gateway);
+    }
     let bench = args.iter().any(|arg| arg == "--bench");
     let theme = args
         .windows(2)
@@ -289,7 +303,7 @@ fn main() {
         gpui_kit::open_window(options, cx, move |window, cx| {
             cx.new(|cx| {
                 RencordWindow::new(
-                    demo && preview.is_none(),
+                    demo && preview.is_none() && stub_scene.is_none(),
                     bench,
                     theme,
                     layout,
@@ -435,6 +449,7 @@ struct RencordWindow {
     persist_layout: bool,
     screenshot: Option<String>,
     screenshot_frames: u32,
+    screenshot_waits: u32,
     metrics: ColumnMetrics,
     frame: Option<ResolvedLayout>,
     suppress_split: Option<SplitEdge>,
@@ -649,6 +664,7 @@ impl RencordWindow {
             persist_layout,
             screenshot,
             screenshot_frames: 0,
+            screenshot_waits: 0,
             metrics: ColumnMetrics::onyx(),
             frame: None,
             suppress_split: None,
@@ -836,6 +852,15 @@ impl RencordWindow {
     }
 
     fn grab_screenshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.stub_shot_ready() {
+            self.screenshot_waits += 1;
+            if self.screenshot_waits < 400 {
+                cx.on_next_frame(window, |this, window, cx| {
+                    this.grab_screenshot(window, cx);
+                });
+                return;
+            }
+        }
         self.screenshot_frames += 1;
         if self.screenshot_frames < 4 {
             cx.on_next_frame(window, |this, window, cx| {
@@ -879,6 +904,26 @@ impl RencordWindow {
             Err(err) => eprintln!("screenshot ffmpeg failed: {err}"),
         }
         cx.quit();
+    }
+
+    fn stub_shot_ready(&self) -> bool {
+        match stub::current() {
+            None => true,
+            Some(stub::StubScene::Guilds) => {
+                self.shell
+                    .session
+                    .guilds
+                    .iter()
+                    .any(|guild| guild.name == "Analytical Engines")
+                    && self
+                        .shell
+                        .session
+                        .selected_channel
+                        .is_some_and(|channel| !self.shell.session.messages_for(channel).is_empty())
+            }
+            Some(stub::StubScene::Retry) => !self.failed.is_empty(),
+            Some(stub::StubScene::Scroll) => self.loading_older.is_some(),
+        }
     }
 
     fn store_columns(&mut self) {
@@ -1494,6 +1539,9 @@ impl Render for RencordWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_queries(cx);
         self.load_selection(cx);
+        if stub::current() == Some(stub::StubScene::Scroll) && self.loading_older.is_none() {
+            self.scroll_back(cx);
+        }
         self.tick_theme(window, cx);
         let palette = rencord_desktop::Palette::from_theme(
             &self.shown,
@@ -1996,6 +2044,12 @@ impl RencordWindow {
             messages.len() + usize::from(self.loading_older == self.shell.session.selected_channel);
         if self.timeline.item_count() != count {
             self.timeline.reset(count);
+        }
+        if stub::current() == Some(stub::StubScene::Scroll) && self.loading_older.is_some() {
+            self.timeline.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.),
+            });
         }
         if self.shell.demo && !self.bench && !self.pinned_top {
             self.timeline.scroll_to(ListOffset {

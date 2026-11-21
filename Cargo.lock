@@ -7626,6 +7626,7 @@ version = "0.6.0"
 dependencies = [
  "async-channel",
  "embed-resource",
+ "futures-util",
  "gpui-kit",
  "image",
  "rencord-api",
@@ -7643,6 +7644,7 @@ dependencies = [
  "resvg 0.46.0",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
 ]
 

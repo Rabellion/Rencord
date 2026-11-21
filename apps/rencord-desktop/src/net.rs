@@ -59,8 +59,31 @@ pub(crate) fn boot_error(err: ApiError) -> BootError {
     }
 }
 
+struct LiveEndpoints {
+    api_base: String,
+    gateway: String,
+}
+
+static ENDPOINTS: OnceLock<LiveEndpoints> = OnceLock::new();
+
+/// Points REST and the gateway at a local stub. The default stays Discord.
+pub(crate) fn set_endpoints(api_base: String, gateway: String) {
+    let _ = ENDPOINTS.set(LiveEndpoints { api_base, gateway });
+}
+
+fn endpoints() -> (String, String) {
+    match ENDPOINTS.get() {
+        Some(live) => (live.api_base.clone(), live.gateway.clone()),
+        None => (
+            "https://discord.com/api/v10".into(),
+            "wss://gateway.discord.gg/?v=10&encoding=json".into(),
+        ),
+    }
+}
+
 pub(crate) async fn fetch_bootstrap(token: String) -> Result<Bootstrap, BootError> {
-    let api = Arc::new(DiscordApi::new(Token::new(token.clone())));
+    let (api_base, gateway_url) = endpoints();
+    let api = Arc::new(DiscordApi::with_base(Token::new(token.clone()), api_base));
     let user = api.current_user().await.map_err(boot_error)?;
     let guilds = api.guilds().await.map_err(boot_error)?;
     let mut channels = api.private_channels().await.map_err(boot_error)?;
@@ -68,7 +91,8 @@ pub(crate) async fn fetch_bootstrap(token: String) -> Result<Bootstrap, BootErro
         let mut guild_channels = api.guild_channels(guild.id).await.map_err(boot_error)?;
         channels.append(&mut guild_channels);
     }
-    let (gateway, gateway_note, discord_theme, discord_client_theme) = spawn_gateway(token).await;
+    let (gateway, gateway_note, discord_theme, discord_client_theme) =
+        spawn_gateway(token, gateway_url).await;
     Ok(Bootstrap {
         api,
         user,
@@ -83,14 +107,17 @@ pub(crate) async fn fetch_bootstrap(token: String) -> Result<Bootstrap, BootErro
 
 /// Starts the gateway and waits up to 8 s for READY, only to read the theme
 /// and report status. The gateway keeps running either way.
-async fn spawn_gateway(token: String) -> (GatewayLink, String, Option<String>, Option<String>) {
+async fn spawn_gateway(
+    token: String,
+    gateway_url: String,
+) -> (GatewayLink, String, Option<String>, Option<String>) {
     let (events_tx, mut events) = mpsc::channel(256);
     let (commands, cmd_rx) = mpsc::channel(8);
     let (ended_tx, ended) = oneshot::channel();
     tokio::spawn(async move {
         let outcome = rencord_gateway::run(
             GatewayConfig {
-                url: "wss://gateway.discord.gg/?v=10&encoding=json".into(),
+                url: gateway_url,
                 token,
             },
             events_tx,
