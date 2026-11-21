@@ -58,6 +58,29 @@ mod tests {
     }
 
     #[test]
+    fn add_buttons_use_the_accent_not_the_online_green() {
+        for id in [PresetId::OnyxInk, PresetId::Dark, PresetId::Light] {
+            let theme = Theme::preset(id);
+            assert_eq!(
+                theme.colors.text_add.to_u32(),
+                theme.colors.accent.to_u32(),
+                "{}",
+                id.label()
+            );
+            assert_eq!(
+                theme.colors.border_add.to_u32(),
+                theme.colors.accent.to_u32(),
+                "{}",
+                id.label()
+            );
+            assert_ne!(
+                theme.colors.text_add.to_u32(),
+                theme.colors.status_online.to_u32()
+            );
+        }
+    }
+
+    #[test]
     fn crisp_keeps_the_previous_dark_canvas() {
         assert_eq!(
             Theme::preset(PresetId::Crisp).colors.bg_base.to_u32(),

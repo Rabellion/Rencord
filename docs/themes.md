@@ -33,7 +33,7 @@ Settings can follow the operating system, with one preset for light and another 
 
 The window checks about once a second, so a system change shows up without a restart.
 
-Appearance is stored per account under the data directory, in `accounts/<id>/appearance.json`. It is not written back to Discord. "Follow Discord" is opt-in and only reads the legacy `user_settings.theme` / `client_theme` fields on READY. On the first sign-in, if nothing is saved yet, those fields are used once as the starting preset.
+Appearance is stored per account under the data directory, in `accounts/<id>/appearance.json`. It is not written back to Discord. A new account starts on Onyx Ink. "Follow Discord" is opt-in and only then reads the legacy `user_settings.theme` / `client_theme` fields on READY.
 
 ## Custom themes
 

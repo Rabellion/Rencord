@@ -8,7 +8,7 @@ mod settings_ui;
 
 use std::borrow::Cow;
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
@@ -31,6 +31,7 @@ use rencord_desktop::{Palette, Shell, ThemeMode, MOTION_OVERLAY_MS};
 
 mod golive;
 mod hdr_ui;
+mod stub;
 use rencord_markdown::{parse, Block, Inline};
 use rencord_model::{Message, Snowflake};
 
@@ -104,6 +105,19 @@ fn main() {
         std::process::exit(rencord_media::worker_main());
     }
     let demo = args.iter().any(|arg| arg == "--demo");
+    let stub_scene = args
+        .windows(2)
+        .find(|pair| pair[0] == "--stub")
+        .and_then(|pair| match pair[1].as_str() {
+            "guilds" => Some(stub::StubScene::Guilds),
+            "scroll" => Some(stub::StubScene::Scroll),
+            "retry" => Some(stub::StubScene::Retry),
+            _ => None,
+        });
+    if let Some(scene) = stub_scene {
+        let (api_base, gateway) = net::runtime().block_on(stub::serve(scene));
+        net::set_endpoints(api_base, gateway);
+    }
     let bench = args.iter().any(|arg| arg == "--bench");
     let theme = args
         .windows(2)
@@ -290,7 +304,7 @@ fn main() {
         gpui_kit::open_window(options, cx, move |window, cx| {
             cx.new(|cx| {
                 RencordWindow::new(
-                    demo && preview.is_none(),
+                    demo && preview.is_none() && stub_scene.is_none(),
                     bench,
                     theme,
                     layout,
@@ -397,6 +411,11 @@ struct RencordWindow {
     voice_status: Option<std::sync::mpsc::Receiver<String>>,
     /// Guilds and channels whose channels or history were already requested.
     requested: HashSet<Snowflake>,
+    /// Fetches that failed. They stay failed until Retry, so render does not try again.
+    failed: HashMap<Snowflake, String>,
+    loading_older: Option<Snowflake>,
+    /// Channels whose history has reached the first message.
+    history_start: HashSet<Snowflake>,
     login_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     remote_generation: u64,
     booted: bool,
@@ -416,6 +435,8 @@ struct RencordWindow {
     resize_us: Vec<u128>,
     collapsed: HashSet<&'static str>,
     pinned_top: bool,
+    following_tail: bool,
+    followed_channel: Option<Snowflake>,
     reveal_hover: bool,
     golive: golive::GoLiveMode,
     columns: SavedColumns,
@@ -432,6 +453,7 @@ struct RencordWindow {
     persist_layout: bool,
     screenshot: Option<String>,
     screenshot_frames: u32,
+    screenshot_waits: u32,
     metrics: ColumnMetrics,
     frame: Option<ResolvedLayout>,
     suppress_split: Option<SplitEdge>,
@@ -609,6 +631,9 @@ impl RencordWindow {
             voice_cmd: None,
             voice_status: None,
             requested: HashSet::new(),
+            failed: HashMap::new(),
+            loading_older: None,
+            history_start: HashSet::new(),
             login_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             remote_generation: 0,
             booted: preview.is_some(),
@@ -628,6 +653,8 @@ impl RencordWindow {
             resize_us: Vec::new(),
             collapsed: HashSet::new(),
             pinned_top: false,
+            following_tail: true,
+            followed_channel: None,
             reveal_hover,
             golive,
             columns: SavedColumns::default(),
@@ -644,6 +671,7 @@ impl RencordWindow {
             persist_layout,
             screenshot,
             screenshot_frames: 0,
+            screenshot_waits: 0,
             metrics: ColumnMetrics::onyx(),
             frame: None,
             suppress_split: None,
@@ -831,6 +859,15 @@ impl RencordWindow {
     }
 
     fn grab_screenshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.stub_shot_ready() {
+            self.screenshot_waits += 1;
+            if self.screenshot_waits < 400 {
+                cx.on_next_frame(window, |this, window, cx| {
+                    this.grab_screenshot(window, cx);
+                });
+                return;
+            }
+        }
         self.screenshot_frames += 1;
         if self.screenshot_frames < 4 {
             cx.on_next_frame(window, |this, window, cx| {
@@ -874,6 +911,26 @@ impl RencordWindow {
             Err(err) => eprintln!("screenshot ffmpeg failed: {err}"),
         }
         cx.quit();
+    }
+
+    fn stub_shot_ready(&self) -> bool {
+        match stub::current() {
+            None => true,
+            Some(stub::StubScene::Guilds) => {
+                self.shell
+                    .session
+                    .guilds
+                    .iter()
+                    .any(|guild| guild.name == "Analytical Engines")
+                    && self
+                        .shell
+                        .session
+                        .selected_channel
+                        .is_some_and(|channel| !self.shell.session.messages_for(channel).is_empty())
+            }
+            Some(stub::StubScene::Retry) => !self.failed.is_empty(),
+            Some(stub::StubScene::Scroll) => self.loading_older.is_some(),
+        }
     }
 
     fn store_columns(&mut self) {
@@ -1275,6 +1332,9 @@ impl RencordWindow {
         self.api = None;
         self.gateway = None;
         self.requested.clear();
+        self.failed.clear();
+        self.loading_older = None;
+        self.history_start.clear();
     }
 
     /// Loads what the selection needs the first time it is shown: a guild's
@@ -1285,7 +1345,10 @@ impl RencordWindow {
             return;
         };
         if let Some(guild) = self.shell.session.selected_guild {
-            if self.shell.session.guild_channels(guild).is_empty() && self.requested.insert(guild) {
+            if self.shell.session.guild_channels(guild).is_empty()
+                && !self.failed.contains_key(&guild)
+                && self.requested.insert(guild)
+            {
                 let api = api.clone();
                 let task = net::runtime().spawn(async move { api.guild_channels(guild).await });
                 cx.spawn(async move |this, cx| {
@@ -1305,10 +1368,15 @@ impl RencordWindow {
                                     session.select_guild(guild);
                                 }
                             }
-                            Err(err) => view.shell.note(format!(
-                                "Could not load channels: {}",
-                                rencord_auth::redact(&err.to_string())
-                            )),
+                            Err(err) => {
+                                record_fetch_failure(
+                                    &mut view.requested,
+                                    &mut view.failed,
+                                    guild,
+                                    fetch_failure_text("channels", &err),
+                                    true,
+                                );
+                            }
                         }
                         cx.notify();
                     })
@@ -1318,7 +1386,7 @@ impl RencordWindow {
             }
         }
         if let Some(channel) = self.shell.session.selected_channel {
-            if self.requested.insert(channel) {
+            if !self.failed.contains_key(&channel) && self.requested.insert(channel) {
                 let task = net::runtime().spawn(async move { api.messages(channel, 50).await });
                 cx.spawn(async move |this, cx| {
                     let Ok(result) = task.await else {
@@ -1327,10 +1395,15 @@ impl RencordWindow {
                     this.update(cx, |view, cx| {
                         match result {
                             Ok(history) => view.shell.session.merge_history(channel, history),
-                            Err(err) => view.shell.note(format!(
-                                "Could not load history: {}",
-                                rencord_auth::redact(&err.to_string())
-                            )),
+                            Err(err) => {
+                                record_fetch_failure(
+                                    &mut view.requested,
+                                    &mut view.failed,
+                                    channel,
+                                    fetch_failure_text("messages", &err),
+                                    true,
+                                );
+                            }
                         }
                         cx.notify();
                     })
@@ -1339,6 +1412,77 @@ impl RencordWindow {
                 .detach();
             }
         }
+    }
+
+    /// One older page when the timeline is at the top. Not called again until
+    /// this page returns, and not at all once a short page marks the start.
+    fn scroll_back(&mut self, cx: &mut Context<Self>) {
+        let Some(api) = self.api.clone() else {
+            return;
+        };
+        let Some(channel) = self.shell.session.selected_channel else {
+            return;
+        };
+        if self.loading_older.is_some()
+            || self.history_start.contains(&channel)
+            || self.failed.contains_key(&channel)
+        {
+            return;
+        }
+        if !self.requested.contains(&channel) {
+            return;
+        }
+        let Some(oldest) = self
+            .shell
+            .session
+            .messages_for(channel)
+            .first()
+            .map(|message| message.id)
+        else {
+            return;
+        };
+        self.loading_older = Some(channel);
+        cx.notify();
+        let task =
+            net::runtime().spawn(async move { api.messages_before(channel, oldest, 50).await });
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = task.await else {
+                return;
+            };
+            this.update(cx, |view, cx| {
+                if view.loading_older == Some(channel) {
+                    view.loading_older = None;
+                }
+                match result {
+                    Ok(history) => {
+                        if history.len() < 50 {
+                            view.history_start.insert(channel);
+                        }
+                        let top = view.timeline.logical_scroll_top();
+                        let anchor = top.item_ix.saturating_sub(1);
+                        let prepended = view.shell.session.merge_older(channel, history);
+                        let count = view.shell.session.messages_for(channel).len();
+                        view.timeline.reset(count);
+                        view.timeline.scroll_to(ListOffset {
+                            item_ix: anchor + prepended,
+                            offset_in_item: top.offset_in_item,
+                        });
+                    }
+                    Err(err) => {
+                        record_fetch_failure(
+                            &mut view.requested,
+                            &mut view.failed,
+                            channel,
+                            fetch_failure_text("messages", &err),
+                            false,
+                        );
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn reopen_audio(&mut self) {
@@ -1558,6 +1702,9 @@ impl Render for RencordWindow {
         self.drain_voice_status();
         self.sync_queries(cx);
         self.load_selection(cx);
+        if stub::current() == Some(stub::StubScene::Scroll) && self.loading_older.is_none() {
+            self.scroll_back(cx);
+        }
         self.tick_theme(window, cx);
         let palette = rencord_desktop::Palette::from_theme(
             &self.shown,
@@ -1820,12 +1967,19 @@ impl RencordWindow {
             let fill = tile_colors.fill;
             let border = tile_colors.border;
             let letter = tile_colors.letter;
+            let guild_unread = self.shell.session.unread.iter().any(|channel_id| {
+                self.shell
+                    .session
+                    .channels
+                    .get(channel_id)
+                    .is_some_and(|channel| channel.guild_id == Some(id))
+            });
             rail = rail.child(rail_slot(
                 format!("guild-{id}").into(),
                 active,
                 if active {
                     Pill::Selected
-                } else if guild.name != "Analytical Engines" {
+                } else if guild_unread {
                     Pill::Unread
                 } else {
                     Pill::None
@@ -1952,7 +2106,7 @@ impl RencordWindow {
                         format!("* {}", channel.name),
                         selected == Some(channel.id),
                         palette,
-                        None,
+                        self.shell.session.unread.contains(&channel.id).then_some(1),
                         false,
                         row_px,
                         false,
@@ -1967,13 +2121,24 @@ impl RencordWindow {
             text_open,
             palette,
         ));
+        if let Some(guild) = self.shell.session.selected_guild {
+            if let Some(message) = self.failed.get(&guild).cloned() {
+                nav = nav.child(fetch_error(
+                    this.clone(),
+                    "retry-channels",
+                    "retry-channels-button",
+                    message,
+                    palette,
+                    move |view, cx| {
+                        view.failed.remove(&guild);
+                        cx.notify();
+                    },
+                ));
+            }
+        }
         if text_open {
             for channel in channels.iter().filter(|channel| channel.kind.is_text()) {
-                let badge = if channel.name == "general" {
-                    Some(1)
-                } else {
-                    None
-                };
+                let badge = self.shell.session.unread.contains(&channel.id).then_some(1);
                 let shown_as_favorite = favorites_open && favorite_ids.contains(&channel.id);
                 nav = nav.child(channel_row(
                     this.clone(),
@@ -2025,7 +2190,7 @@ impl RencordWindow {
                     format!("dm {}", channel.name),
                     selected == Some(channel.id),
                     palette,
-                    None,
+                    self.shell.session.unread.contains(&channel.id).then_some(1),
                     false,
                     row_px,
                     false,
@@ -2034,9 +2199,20 @@ impl RencordWindow {
         }
         sidebar = sidebar.child(nav);
 
-        let count = messages.len();
+        if self.followed_channel != selected {
+            self.followed_channel = selected;
+            self.following_tail = true;
+        }
+        let count =
+            messages.len() + usize::from(self.loading_older == self.shell.session.selected_channel);
         if self.timeline.item_count() != count {
             self.timeline.reset(count);
+        }
+        if stub::current() == Some(stub::StubScene::Scroll) && self.loading_older.is_some() {
+            self.timeline.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.),
+            });
         }
         if self.shell.demo && !self.bench && !self.pinned_top {
             self.timeline.scroll_to(ListOffset {
@@ -2055,16 +2231,56 @@ impl RencordWindow {
         let list_entity = this.clone();
         let list_reactions = reactions.clone();
         let reveal_hover = self.reveal_hover;
+        let loading_older = self.loading_older == self.shell.session.selected_channel;
         let _density = density;
+        {
+            let view = cx.entity();
+            self.timeline.set_scroll_handler(move |event, _window, cx| {
+                view.update(cx, |this, cx| {
+                    if this.following_tail != event.is_following_tail {
+                        this.following_tail = event.is_following_tail;
+                        cx.notify();
+                    }
+                    if event.visible_range.start == 0 && event.is_scrolled {
+                        this.scroll_back(cx);
+                    }
+                });
+            });
+        }
+        let list_now = rencord_desktop::now_local();
         let timeline = list(timeline_state, move |index, _window, _cx| {
-            let Some(message) = list_messages.get(index).cloned() else {
+            let message_index = if loading_older {
+                if index == 0 {
+                    return div()
+                        .h(px(28.))
+                        .px(px(16.))
+                        .flex()
+                        .items_center()
+                        .text_size(px(12.))
+                        .text_color(rgb(list_palette.muted))
+                        .child("Loading earlier messages")
+                        .into_any_element();
+                }
+                index - 1
+            } else {
+                index
+            };
+            let Some(message) = list_messages.get(message_index).cloned() else {
                 return div().into_any_element();
             };
-            let grouped = index > 0
-                && list_messages
-                    .get(index - 1)
-                    .is_some_and(|previous| previous.author.id == message.author.id);
-            message_row(
+            let stamp = rencord_desktop::present_time(&message.timestamp, list_now);
+            let previous = message_index
+                .checked_sub(1)
+                .and_then(|index| list_messages.get(index));
+            let show_day = rencord_desktop::day_changed(
+                previous.map(|item| item.timestamp.as_str()),
+                &message.timestamp,
+                list_now,
+            );
+            let grouped = !show_day
+                && message_index > 0
+                && previous.is_some_and(|item| item.author.id == message.author.id);
+            let row = message_row(
                 list_entity.clone(),
                 &message,
                 grouped,
@@ -2076,8 +2292,17 @@ impl RencordWindow {
                 &list_theme,
                 font_px,
                 reveal_hover && message.content.contains("Mention"),
-            )
-            .into_any_element()
+                &stamp,
+                reveal_hover,
+            );
+            if show_day {
+                v_flex()
+                    .child(date_pill(&stamp.day, list_palette))
+                    .child(row)
+                    .into_any_element()
+            } else {
+                row.into_any_element()
+            }
         })
         .size_full();
 
@@ -2201,10 +2426,34 @@ impl RencordWindow {
                                 },
                             )),
                     ),
-            )
-            .child(new_messages_banner(palette))
-            .child(date_pill("Today", palette))
-            .child(message_column(&plan, timeline));
+            );
+        if !self.following_tail {
+            chat = chat.child(jump_to_present(this.clone(), palette));
+        }
+        chat = chat.child(message_column(
+            &plan,
+            v_flex()
+                .size_full()
+                .children(self.shell.session.selected_channel.and_then(|channel| {
+                    self.failed.get(&channel).cloned().map(|message| {
+                        fetch_error(
+                            this.clone(),
+                            "retry-history",
+                            "retry-history-button",
+                            message,
+                            palette,
+                            move |view, cx| {
+                                view.failed.remove(&channel);
+                                if view.requested.contains(&channel) {
+                                    view.scroll_back(cx);
+                                }
+                                cx.notify();
+                            },
+                        )
+                    })
+                }))
+                .child(timeline),
+        ));
         let hits = self.shell.search_hits();
         if !self.shell.search.trim().is_empty() {
             chat = chat.child(search_hits_bar(this.clone(), &hits, palette));
@@ -3040,6 +3289,27 @@ fn dock_circle(
         })
 }
 
+fn fetch_error(
+    view: Entity<RencordWindow>,
+    row_id: &'static str,
+    button_id: &'static str,
+    message: String,
+    palette: Palette,
+    retry: impl Fn(&mut RencordWindow, &mut Context<RencordWindow>) + 'static,
+) -> impl IntoElement {
+    h_flex()
+        .id(row_id)
+        .px(px(12.))
+        .py(px(6.))
+        .gap(px(8.))
+        .items_center()
+        .bg(rgb(palette.elevated))
+        .text_size(px(12.))
+        .text_color(rgb(palette.danger))
+        .child(div().flex_1().child(message))
+        .child(small_button(view, button_id, "Retry", retry))
+}
+
 fn small_button(
     view: Entity<RencordWindow>,
     id: &'static str,
@@ -3140,7 +3410,6 @@ fn rail_slot(
             .border_1()
             .border_color(rgb(border))
             .cursor_pointer()
-            .overflow_hidden()
             .hover(move |style| style.bg(rgb(hover)))
             .child(mark)
             .on_click(on_click),
@@ -3262,6 +3531,76 @@ fn guild_mark(name: &str) -> String {
         .to_uppercase()
 }
 
+struct TimeTip {
+    text: String,
+    bg: u32,
+    fg: u32,
+    line: u32,
+}
+
+impl Render for TimeTip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(6.))
+            .bg(rgb(self.bg))
+            .border_1()
+            .border_color(rgb(self.line))
+            .text_size(px(12.))
+            .text_color(rgb(self.fg))
+            .child(self.text.clone())
+    }
+}
+
+fn timestamp_label(
+    message_id: u64,
+    stamp: &rencord_desktop::Presented,
+    reveal: bool,
+    palette: Palette,
+) -> impl IntoElement {
+    let full = stamp.full.clone();
+    let bg = palette.elevated;
+    let fg = palette.text;
+    let line = palette.line;
+    let mut label = h_flex()
+        .id(SharedString::from(format!("stamp-{message_id}")))
+        .items_center()
+        .gap(px(6.))
+        .font_family(palette.font_meta)
+        .text_size(px(11.))
+        .text_color(rgb(palette.muted))
+        .child(stamp.short.clone());
+    if full != stamp.short {
+        let hover = full.clone();
+        label = label.tooltip(move |_window, cx| {
+            cx.new(|_| TimeTip {
+                text: hover.clone(),
+                bg,
+                fg,
+                line,
+            })
+            .into()
+        });
+    }
+    if reveal && full != stamp.short {
+        label = label.child(
+            div()
+                .ml(px(8.))
+                .px(px(8.))
+                .py(px(2.))
+                .rounded(px(6.))
+                .bg(rgb(bg))
+                .border_1()
+                .border_color(rgb(line))
+                .text_size(px(12.))
+                .text_color(rgb(fg))
+                .child(full),
+        );
+    }
+    label
+}
+
 #[allow(clippy::too_many_arguments)]
 fn message_row(
     view: Entity<RencordWindow>,
@@ -3272,6 +3611,8 @@ fn message_row(
     theme: &rencord_desktop::Theme,
     font_px: f32,
     pin_actions: bool,
+    stamp: &rencord_desktop::Presented,
+    reveal_time: bool,
 ) -> impl IntoElement {
     let id = message.id;
     let onyx = palette.ink_chrome;
@@ -3310,13 +3651,12 @@ fn message_row(
                         .text_color(rgb(role))
                         .child(name.clone()),
                 )
-                .child(
-                    div()
-                        .font_family(palette.font_meta)
-                        .text_size(px(11.))
-                        .text_color(rgb(palette.muted))
-                        .child(message.timestamp.clone()),
-                ),
+                .child(timestamp_label(
+                    message.id.get(),
+                    stamp,
+                    reveal_time,
+                    palette,
+                )),
         );
     }
     if let Some(note) = reply_note {
@@ -3970,7 +4310,6 @@ fn hexwave_mark(size: f32, ink: u32, scale: f32) -> impl IntoElement {
     img(std::sync::Arc::new(image))
         .size(px(size))
         .flex_shrink_0()
-        .object_fit(ObjectFit::Fill)
 }
 
 fn icon(name: &str, size: f32, color: u32) -> Svg {
@@ -4430,8 +4769,9 @@ fn panel(palette: Palette, fill: u32) -> gpui_kit::Div {
     }
 }
 
-fn new_messages_banner(palette: Palette) -> impl IntoElement {
+fn jump_to_present(view: Entity<RencordWindow>, palette: Palette) -> impl IntoElement {
     h_flex()
+        .id("jump-to-present")
         .mx(px(12.))
         .mt(px(6.))
         .h(px(28.))
@@ -4440,8 +4780,15 @@ fn new_messages_banner(palette: Palette) -> impl IntoElement {
         .items_center()
         .justify_between()
         .bg(rgb(palette.accent))
-        .child(banner_ink("4 new messages", palette.accent_text, 13.))
-        .child(banner_ink("Mark as read", palette.accent_text, 12.))
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            view.update(cx, |this, cx| {
+                this.timeline.scroll_to_end();
+                this.following_tail = true;
+                cx.notify();
+            });
+        })
+        .child(banner_ink("Jump to present", palette.accent_text, 13.))
 }
 
 fn banner_ink(text: &str, color: u32, size: f32) -> impl IntoElement {
@@ -4593,6 +4940,45 @@ fn bench_photo() -> impl IntoElement {
     img(std::sync::Arc::new(image)).size_full()
 }
 
+fn fetch_failure_text(kind: &str, err: &rencord_api::ApiError) -> String {
+    tracing::debug!(
+        "{kind} fetch failed: {}",
+        rencord_auth::redact(&err.to_string())
+    );
+    match err {
+        rencord_api::ApiError::Status { status, body } => {
+            rencord_auth::redact(&rencord_api::explain_http_failure(kind, *status, body))
+        }
+        other => format!(
+            "Couldn't load {kind}. {}",
+            rencord_auth::redact(&other.to_string())
+        ),
+    }
+}
+
+fn record_fetch_failure(
+    requested: &mut HashSet<Snowflake>,
+    failed: &mut HashMap<Snowflake, String>,
+    id: Snowflake,
+    message: String,
+    drop_request: bool,
+) {
+    if drop_request {
+        requested.remove(&id);
+    }
+    failed.insert(id, message);
+}
+
+/// True while a fetch is in flight or waiting for an explicit retry.
+#[cfg(test)]
+fn fetch_is_blocked(
+    requested: &HashSet<Snowflake>,
+    failed: &HashMap<Snowflake, String>,
+    id: Snowflake,
+) -> bool {
+    failed.contains_key(&id) || requested.contains(&id)
+}
+
 fn rss_kib() -> u64 {
     let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
         return 0;
@@ -4603,4 +4989,29 @@ fn rss_kib() -> u64 {
         .and_then(|rest| rest.split_whitespace().next())
         .and_then(|kb| kb.parse().ok())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod fetch_failure {
+    use super::{fetch_is_blocked, record_fetch_failure};
+    use rencord_model::Snowflake;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn a_failed_fetch_is_not_retried_until_retry_is_pressed() {
+        let id = Snowflake::new(8);
+        let mut requested = HashSet::from([id]);
+        let mut failed = HashMap::new();
+        record_fetch_failure(
+            &mut requested,
+            &mut failed,
+            id,
+            "discord returned 500".into(),
+            true,
+        );
+        assert!(!requested.contains(&id));
+        assert!(fetch_is_blocked(&requested, &failed, id));
+        failed.remove(&id);
+        assert!(!fetch_is_blocked(&requested, &failed, id));
+    }
 }

@@ -563,11 +563,11 @@ fn colors(spec: InkSpec) -> Colors {
             (c(0x2a2e38), accent, text, c(0xffffff), c(0x2a2e38), accent)
         };
     let (add_bg, add_border, add_glyph) = if onyx_ink {
-        (c(0x000000), strong, c(spec.muted))
+        (c(0x000000), accent, accent)
     } else if lightish {
-        (c(0xffffff), c(0x14804a), c(0x14804a))
+        (c(0xffffff), accent, accent)
     } else {
-        (c(spec.bg_rail), online, online)
+        (c(spec.bg_rail), accent, accent)
     };
     let (badge_bg, badge_fg) = if onyx_ink {
         (accent, c(spec.accent_fg))

@@ -159,7 +159,9 @@ impl RencordWindow {
     ) -> impl IntoElement {
         if !self.booted {
             self.booted = true;
-            if self.preview.is_none() && !self.shell.demo {
+            if crate::stub::current().is_some() {
+                self.begin_session(rencord_model::Token::new(crate::stub::TOKEN), false, cx);
+            } else if self.preview.is_none() && !self.shell.demo {
                 self.boot_login(cx);
             }
         }
@@ -754,21 +756,26 @@ impl RencordWindow {
         cx: &mut Context<Self>,
     ) {
         let record = AccountRecord::from_user(&snapshot.user);
-        match self.vault.save_account(&record, &token) {
-            Ok(()) => {
-                if migrate_file {
-                    let _ = FileSecretStore::in_data_dir().clear_token();
+        if crate::stub::current().is_none() {
+            match self.vault.save_account(&record, &token) {
+                Ok(()) => {
+                    if migrate_file {
+                        let _ = FileSecretStore::in_data_dir().clear_token();
+                    }
                 }
-            }
-            Err(err) => {
-                self.shell.note(err.public_message());
-                self.session_machine.storage_unavailable();
+                Err(err) => {
+                    self.shell.note(err.public_message());
+                    self.session_machine.storage_unavailable();
+                }
             }
         }
         self.session_machine.restart();
         let _ = self.session_machine.established(record.user_id.clone());
         self.session_token = Some(token);
         self.requested.clear();
+        self.failed.clear();
+        self.loading_older = None;
+        self.history_start.clear();
         let api = snapshot.api.clone();
         self.api = Some(api.clone());
         let GatewayLink {
@@ -787,7 +794,16 @@ impl RencordWindow {
                         .as_ref()
                         .is_some_and(|live| Arc::ptr_eq(live, &api));
                     if current {
+                        let reaction = match &event {
+                            rencord_gateway::GatewayEvent::Reaction { message_id, .. } => {
+                                Some(message_id.get())
+                            }
+                            _ => None,
+                        };
                         view.on_gateway_event(event, cx);
+                        if let Some(message_id) = reaction {
+                            view.shell.mirror_reaction(message_id);
+                        }
                         cx.notify();
                     }
                     current

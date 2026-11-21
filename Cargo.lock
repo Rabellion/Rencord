@@ -7625,7 +7625,9 @@ name = "rencord-desktop"
 version = "0.6.1"
 dependencies = [
  "async-channel",
+ "chrono",
  "embed-resource",
+ "futures-util",
  "gpui-kit",
  "image",
  "rencord-api",
@@ -7643,6 +7645,7 @@ dependencies = [
  "resvg 0.46.0",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
 ]
 
@@ -7729,6 +7732,7 @@ version = "0.6.1"
 dependencies = [
  "rencord-gateway",
  "rencord-model",
+ "rencord-protocol",
  "rusqlite",
  "serde",
  "serde_json",

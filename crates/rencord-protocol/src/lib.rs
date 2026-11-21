@@ -279,7 +279,11 @@ pub struct ReadyGuild {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
     pub unavailable: bool,
+    #[serde(default)]
+    pub channels: Vec<WireChannel>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -307,7 +311,7 @@ pub struct VoiceStateDispatch {
 
 /// Discord channel JSON is wider than [`rencord_model::Channel`]. This is the
 /// subset Milestone 1 reads.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct WireChannel {
     pub id: Snowflake,
     #[serde(default, rename = "type")]
