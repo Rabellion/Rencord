@@ -19,6 +19,8 @@ pub enum StubScene {
     Scroll,
     /// History responds 500 so the retry row stays up.
     Retry,
+    /// Categories, join lines, several days, and a direct message.
+    Layout,
 }
 
 static SCENE: OnceLock<StubScene> = OnceLock::new();
@@ -27,6 +29,16 @@ pub const TOKEN: &str = "stub-local-token";
 
 pub fn current() -> Option<StubScene> {
     SCENE.get().copied()
+}
+
+static OPEN_HOME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn request_home() {
+    OPEN_HOME.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn take_home() -> bool {
+    OPEN_HOME.swap(false, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Binds the HTTP API and the gateway, then returns their base URLs.
@@ -91,6 +103,39 @@ async fn handle_http(mut stream: TcpStream, scene: StubScene) {
 }
 
 fn respond(scene: StubScene, path: &str) -> (&'static str, String) {
+    if scene == StubScene::Layout {
+        if path.contains("/channels/") && path.contains("/messages") {
+            return ("200 OK", layout_messages());
+        }
+        if path.contains("/users/@me/channels") {
+            return (
+                "200 OK",
+                r#"[{"id":"200","type":1,"recipients":[{"id":"2","username":"munch","global_name":"Munch"}]}]"#
+                    .into(),
+            );
+        }
+        if path.contains("/guilds/") && path.contains("/channels") {
+            return (
+                "200 OK",
+                r#"[{"id":"1","type":4,"name":"Start here","guild_id":"10","position":0},{"id":"100","type":0,"name":"welcome","guild_id":"10","parent_id":"1","position":0},{"id":"101","type":0,"name":"general","guild_id":"10","parent_id":"1","position":1},{"id":"2","type":4,"name":"Voice","guild_id":"10","position":1},{"id":"110","type":2,"name":"Lounge","guild_id":"10","parent_id":"2","position":0}]"#
+                    .into(),
+            );
+        }
+        if path.contains("/users/@me/guilds") {
+            return (
+                "200 OK",
+                r#"[{"id":"10","name":"Analytical Engines","icon":null},{"id":"11","name":"Difference Club","icon":null}]"#
+                    .into(),
+            );
+        }
+        if path.contains("/users/@me") {
+            return (
+                "200 OK",
+                r#"{"id":"1","username":"agentprivate","global_name":"Agent Private","bot":false}"#
+                    .into(),
+            );
+        }
+    }
     if path.contains("/channels/") && path.contains("/messages") {
         if scene == StubScene::Retry && !path.contains("before=") {
             return (
@@ -128,6 +173,17 @@ fn respond(scene: StubScene, path: &str) -> (&'static str, String) {
         );
     }
     ("404 Not Found", r#"{"message":"stub"}"#.into())
+}
+
+fn layout_messages() -> String {
+    r#"[
+        {"id":"6","channel_id":"100","type":0,"content":"Still here.","timestamp":"2026-11-21T18:06:00Z","author":{"id":"2","username":"munch","global_name":"Munch"}},
+        {"id":"5","channel_id":"100","type":0,"content":"Hello from the lobby.","timestamp":"2026-11-21T18:04:00Z","author":{"id":"2","username":"munch","global_name":"Munch"}},
+        {"id":"4","channel_id":"100","type":0,"content":"The notes are in.","timestamp":"2026-11-20T15:00:00Z","author":{"id":"1","username":"agentprivate","global_name":"Agent Private"}},
+        {"id":"3","channel_id":"100","type":7,"content":"","timestamp":"2026-11-19T12:00:00Z","author":{"id":"3","username":"nosh","global_name":"Nosh"}},
+        {"id":"2","channel_id":"100","type":7,"content":"","timestamp":"2026-11-18T12:00:00Z","author":{"id":"2","username":"munch","global_name":"Munch"}}
+    ]"#
+    .into()
 }
 
 fn messages(channel: u64, first: u64, count: u64) -> String {

@@ -309,6 +309,19 @@ impl Session {
             .unwrap_or(&[])
     }
 
+    /// Home is the direct-message list. A guild's sidebar does not include it.
+    pub fn open_home(&mut self) {
+        self.selected_guild = None;
+        self.selected_channel = self
+            .dm_channels()
+            .into_iter()
+            .next()
+            .map(|channel| channel.id);
+        if let Some(channel) = self.selected_channel {
+            self.unread.remove(&channel);
+        }
+    }
+
     pub fn select_guild(&mut self, guild_id: Snowflake) {
         self.selected_guild = Some(guild_id);
         self.selected_channel = self
@@ -394,6 +407,7 @@ impl Session {
             author: user,
             content: "Hello **Rencord**. Mention <@2>, a [link](https://example.com), and `code`.\n\n```\nfn main() {}\n```"
                 .into(),
+            kind: 0,
             timestamp: "2026-11-20T00:00:00Z".into(),
         });
         session.insert_message(Message {
@@ -408,6 +422,7 @@ impl Session {
                 avatar: None,
             },
             content: "The voice channel is the one named voice.".into(),
+            kind: 0,
             timestamp: "2026-11-20T00:01:00Z".into(),
         });
         session.select_guild(Snowflake::new(10));
@@ -507,6 +522,7 @@ mod tests {
             channel_id: Snowflake::new(100),
             author: session.user.clone().unwrap(),
             content: "live".into(),
+            kind: 0,
             timestamp: "t".into(),
         }));
         let messages = session.messages_for(Snowflake::new(100));
@@ -523,6 +539,7 @@ mod tests {
             channel_id: Snowflake::new(110),
             author: author.clone(),
             content: "notes".into(),
+            kind: 0,
             timestamp: "t".into(),
         }));
         assert!(session.unread.contains(&Snowflake::new(110)));
@@ -533,6 +550,7 @@ mod tests {
             channel_id: Snowflake::new(100),
             author,
             content: "back in general".into(),
+            kind: 0,
             timestamp: "t".into(),
         }));
         assert!(session.unread.contains(&Snowflake::new(100)));
@@ -550,6 +568,7 @@ mod tests {
             channel_id: channel,
             author: author.clone(),
             content: id.to_string(),
+            kind: 0,
             timestamp: "t".into(),
         };
         // A live message arrives first; history comes back newest-first.
@@ -580,6 +599,7 @@ mod tests {
             channel_id: channel,
             author: author.clone(),
             content: id.to_string(),
+            kind: 0,
             timestamp: "t".into(),
         };
         for id in 50..4050 {
