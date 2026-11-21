@@ -27,7 +27,7 @@ Waver is the README wordmark. Hexwave is the app icon. These files are the expor
 | `hexwave.ico` | Windows icon, 16–256. 16 and 24 are the 3-bar cut |
 | `hexwave.icns` | macOS bundle icon, packed from `icon.iconset/` |
 | `icon.iconset/` | iconutil source (16 through 1024, including @2x) |
-| `hexwave-mark.svg` | Hexwave A knockout. `currentColor` body, `#4F6BFF` middle bar. In-app mark above 24 px |
+| `hexwave-mark.svg` | Hexwave A knockout. `currentColor` body, `#4F6BFF` middle bar. Login and settings, above 24 px |
 | `hexwave-mark-color.svg` | Same mark with `#F2F3FA` body |
 | `hexwave-mark-mono.svg` | Same mark, one ink |
 | `hexwave-mark-on-dark.svg` | Color mark on `#000000` |
@@ -69,4 +69,4 @@ Waver is the README wordmark. Hexwave is the app icon. These files are the expor
 - Linux: install `linux/rencord.desktop` and `linux/hicolor/`. The desktop file's icon name matches the hicolor files.
 - Runtime: GPUI `WindowOptions::icon` is `linux/hexwave-64.png` (X11 `_NET_WM_ICON`). A 128 px or 256 px image is accepted by the API and comes back as an empty property, so the runtime icon is 64 px. `app_id` is `rencord`, which Wayland uses to find the hicolor icon. macOS and Windows take the icon from the bundle and the exe resource.
 - Tray: nothing creates a tray. `rencord_platform::TRAY_ICON_SVG` is `hexwave-tray.svg` for that later hook.
-- In the window: the server-rail home button, the token login screen, and the settings header use the mark. The home glyph is `tile - 16` px (28 px in the 44 px Onyx tile), so it uses the four-bar mark. A glyph at 24 px or below uses the tray cut. The tile's fill, border, hover, and selection pill are unchanged.
+- In the window: the server-rail home button, the token login screen, and the settings header use the mark. GPUI paints an SVG as a single-color mask, so the rail glyph is a 32 px raster inside the 44 px tile: four whole-pixel bars, the third one 3×8 of `#4F6BFF`, with a 1 px gap between bars. Login and settings still use `hexwave-mark.svg`. A glyph at 24 px or below uses the tray cut. The tile's fill, border, hover, and selection pill are unchanged.

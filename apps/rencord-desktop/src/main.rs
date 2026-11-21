@@ -5,6 +5,7 @@
 
 mod big_file_view;
 
+use image::ImageEncoder;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::HashSet;
@@ -1385,7 +1386,7 @@ impl RencordWindow {
                 rail_w,
                 tile,
                 tile_radius,
-                hexwave_mark(rencord_desktop::rail_home_glyph_px(tile), palette.text),
+                rail_hexwave(palette.text),
                 move |_, _, cx| {
                     view.update(cx, |this, cx| {
                         this.shell
@@ -3820,6 +3821,36 @@ fn window_icon() -> std::sync::Arc<image::RgbaImage> {
         .expect("Hexwave window icon")
         .into_rgba8();
     std::sync::Arc::new(icon)
+}
+
+/// Rail mark. SVG would be tinted as one color, so this is the 32 px raster.
+fn rail_hexwave(ink: u32) -> impl IntoElement {
+    let rgba = rencord_desktop::rail_hexwave_rgba(ink);
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(&rgba, 32, 32, image::ExtendedColorType::Rgba8)
+        .expect("rail mark png");
+    let image = Image::from_bytes(ImageFormat::Png, png);
+    // The third bar is a real element. A blue texel in the PNG was not
+    // surviving GPUI's image upload, and an SVG is painted as one color.
+    div()
+        .relative()
+        .size(px(32.))
+        .flex_shrink_0()
+        .child(
+            img(std::sync::Arc::new(image))
+                .size(px(32.))
+                .object_fit(ObjectFit::Fill),
+        )
+        .child(
+            div()
+                .absolute()
+                .left(px(16.))
+                .top(px(11.))
+                .w(px(3.))
+                .h(px(8.))
+                .bg(rgb(0x004f6bff)),
+        )
 }
 
 /// Hexwave body in `ink` (the theme text color). The `#4F6BFF` bar is left as drawn.
