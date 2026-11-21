@@ -765,7 +765,7 @@ pub fn ink_metrics(shadow: bool) -> Metrics {
     Metrics {
         font_ui: FontFace::Inter,
         font_mono: FontFace::JetBrainsMono,
-        font_meta: FontFace::JetBrainsMono,
+        font_meta: FontFace::Inter,
         font_scale: 1.0,
         radius_scale: 1.0,
         message_spacing: 1.0,
