@@ -895,6 +895,22 @@ impl RencordWindow {
         }
     }
 
+    fn sync_hex_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let theme = self.shell.prefs.resolved(self.system_dark);
+        let base = theme.base.unwrap_or(theme.colors.bg_base).to_hex();
+        let accent = theme.accent_seed.unwrap_or(theme.colors.accent).to_hex();
+        for (field, hex) in [
+            (self.base_hex.clone(), base),
+            (self.accent_hex.clone(), accent),
+        ] {
+            let focused = field.read(cx).focus_handle(cx).is_focused(window);
+            let current = field.read(cx).value().to_string();
+            if !focused && current != hex {
+                field.update(cx, |state, cx| state.set_value(hex, window, cx));
+            }
+        }
+    }
+
     fn choose_preset(&mut self, mode: rencord_desktop::ThemeMode) {
         self.shell.set_theme(mode);
         self.shell.save_appearance();
@@ -2305,6 +2321,7 @@ impl RencordWindow {
             ));
         }
         if settings {
+            self.sync_hex_fields(window, cx);
             let jitter = voice
                 .as_ref()
                 .map(|report| {

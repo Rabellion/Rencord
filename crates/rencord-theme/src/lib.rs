@@ -29,9 +29,9 @@ pub use theme::{
 };
 
 /// Swatches the appearance editor can offer without embedding hex in UI code.
-pub const EDITOR_SWATCHES: [u32; 12] = [
-    0x000000, 0x1e1f22, 0x313338, 0x5865f2, 0x4f6bff, 0x0e5e6b, 0xf7f8fb, 0xffffff, 0xc2410c,
-    0x14804a, 0x88c0d0, 0x1a1040,
+pub const EDITOR_SWATCHES: [u32; 10] = [
+    0x000000, 0x1e1f22, 0x313338, 0x4f6bff, 0x0e5e6b, 0xf7f8fb, 0xc2410c, 0x14804a, 0x88c0d0,
+    0x1a1040,
 ];
 
 pub const SCHEMA: &str = include_str!("../../../docs/themes/theme.schema.json");
