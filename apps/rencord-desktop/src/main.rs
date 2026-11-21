@@ -2864,11 +2864,17 @@ impl RencordWindow {
                     } else {
                         member.activity.clone()
                     };
-                    let face = member
-                        .avatar
-                        .as_deref()
-                        .map(|hash| rencord_desktop::user_avatar_url(member.id, hash))
-                        .unwrap_or_else(|| rencord_desktop::default_avatar_url(member.id, None));
+                    let face = if let Some(hash) = member.guild_avatar.as_deref() {
+                        selected_guild
+                            .map(|guild| {
+                                rencord_desktop::member_avatar_url(guild.get(), member.id, hash)
+                            })
+                            .unwrap_or_else(|| rencord_desktop::user_avatar_url(member.id, hash))
+                    } else if let Some(hash) = member.avatar.as_deref() {
+                        rencord_desktop::user_avatar_url(member.id, hash)
+                    } else {
+                        rencord_desktop::default_avatar_url(member.id, None)
+                    };
                     let face = self.cached_image(&face, cx).map(|image| {
                         div()
                             .size(px(32.))

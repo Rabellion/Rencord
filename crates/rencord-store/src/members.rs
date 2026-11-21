@@ -13,6 +13,8 @@ pub struct RosterMember {
     pub status: String,
     pub activity: String,
     pub avatar: Option<String>,
+    /// Guild-specific avatar hash. Preferred over `avatar` when drawing the row.
+    pub guild_avatar: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,12 +168,17 @@ fn member_from_item(item: &Value) -> Option<RosterMember> {
         .get("avatar")
         .and_then(|avatar| avatar.as_str())
         .map(str::to_owned);
+    let guild_avatar = member
+        .get("avatar")
+        .and_then(|avatar| avatar.as_str())
+        .map(str::to_owned);
     Some(RosterMember {
         id,
         name,
         status,
         activity,
         avatar,
+        guild_avatar,
     })
 }
 
