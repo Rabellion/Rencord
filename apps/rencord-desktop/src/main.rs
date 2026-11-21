@@ -8,7 +8,7 @@ mod settings_ui;
 
 use std::borrow::Cow;
 use std::cell::Cell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
@@ -393,6 +393,8 @@ struct RencordWindow {
     gateway: Option<tokio::sync::mpsc::Sender<rencord_gateway::GatewayCommand>>,
     /// Guilds and channels whose channels or history were already requested.
     requested: HashSet<Snowflake>,
+    /// Fetches that failed. They stay failed until Retry, so render does not try again.
+    failed: HashMap<Snowflake, String>,
     loading_older: Option<Snowflake>,
     /// Channels whose history has reached the first message.
     history_start: HashSet<Snowflake>,
@@ -605,6 +607,7 @@ impl RencordWindow {
             api: None,
             gateway: None,
             requested: HashSet::new(),
+            failed: HashMap::new(),
             loading_older: None,
             history_start: HashSet::new(),
             login_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1273,6 +1276,7 @@ impl RencordWindow {
         self.api = None;
         self.gateway = None;
         self.requested.clear();
+        self.failed.clear();
         self.loading_older = None;
         self.history_start.clear();
     }
@@ -1285,7 +1289,10 @@ impl RencordWindow {
             return;
         };
         if let Some(guild) = self.shell.session.selected_guild {
-            if self.shell.session.guild_channels(guild).is_empty() && self.requested.insert(guild) {
+            if self.shell.session.guild_channels(guild).is_empty()
+                && !self.failed.contains_key(&guild)
+                && self.requested.insert(guild)
+            {
                 let api = api.clone();
                 let task = net::runtime().spawn(async move { api.guild_channels(guild).await });
                 cx.spawn(async move |this, cx| {
@@ -1305,10 +1312,15 @@ impl RencordWindow {
                                     session.select_guild(guild);
                                 }
                             }
-                            Err(err) => view.shell.note(format!(
-                                "Could not load channels: {}",
-                                rencord_auth::redact(&err.to_string())
-                            )),
+                            Err(err) => {
+                                record_fetch_failure(
+                                    &mut view.requested,
+                                    &mut view.failed,
+                                    guild,
+                                    rencord_auth::redact(&err.to_string()),
+                                    true,
+                                );
+                            }
                         }
                         cx.notify();
                     })
@@ -1318,7 +1330,7 @@ impl RencordWindow {
             }
         }
         if let Some(channel) = self.shell.session.selected_channel {
-            if self.requested.insert(channel) {
+            if !self.failed.contains_key(&channel) && self.requested.insert(channel) {
                 let task = net::runtime().spawn(async move { api.messages(channel, 50).await });
                 cx.spawn(async move |this, cx| {
                     let Ok(result) = task.await else {
@@ -1327,10 +1339,15 @@ impl RencordWindow {
                     this.update(cx, |view, cx| {
                         match result {
                             Ok(history) => view.shell.session.merge_history(channel, history),
-                            Err(err) => view.shell.note(format!(
-                                "Could not load history: {}",
-                                rencord_auth::redact(&err.to_string())
-                            )),
+                            Err(err) => {
+                                record_fetch_failure(
+                                    &mut view.requested,
+                                    &mut view.failed,
+                                    channel,
+                                    rencord_auth::redact(&err.to_string()),
+                                    true,
+                                );
+                            }
                         }
                         cx.notify();
                     })
@@ -1350,7 +1367,10 @@ impl RencordWindow {
         let Some(channel) = self.shell.session.selected_channel else {
             return;
         };
-        if self.loading_older.is_some() || self.history_start.contains(&channel) {
+        if self.loading_older.is_some()
+            || self.history_start.contains(&channel)
+            || self.failed.contains_key(&channel)
+        {
             return;
         }
         if !self.requested.contains(&channel) {
@@ -1392,10 +1412,15 @@ impl RencordWindow {
                             offset_in_item: top.offset_in_item,
                         });
                     }
-                    Err(err) => view.shell.note(format!(
-                        "Could not load earlier messages: {}",
-                        rencord_auth::redact(&err.to_string())
-                    )),
+                    Err(err) => {
+                        record_fetch_failure(
+                            &mut view.requested,
+                            &mut view.failed,
+                            channel,
+                            rencord_auth::redact(&err.to_string()),
+                            false,
+                        );
+                    }
                 }
                 cx.notify();
             })
@@ -1874,6 +1899,21 @@ impl RencordWindow {
             text_open,
             palette,
         ));
+        if let Some(guild) = self.shell.session.selected_guild {
+            if let Some(message) = self.failed.get(&guild).cloned() {
+                nav = nav.child(fetch_error(
+                    this.clone(),
+                    "retry-channels",
+                    "retry-channels-button",
+                    message,
+                    palette,
+                    move |view, cx| {
+                        view.failed.remove(&guild);
+                        cx.notify();
+                    },
+                ));
+            }
+        }
         if text_open {
             for channel in channels.iter().filter(|channel| channel.kind.is_text()) {
                 let badge = if channel.name == "general" {
@@ -2137,7 +2177,30 @@ impl RencordWindow {
             )
             .child(new_messages_banner(palette))
             .child(date_pill("Today", palette))
-            .child(message_column(&plan, timeline));
+            .child(message_column(
+                &plan,
+                v_flex()
+                    .size_full()
+                    .children(self.shell.session.selected_channel.and_then(|channel| {
+                        self.failed.get(&channel).cloned().map(|message| {
+                            fetch_error(
+                                this.clone(),
+                                "retry-history",
+                                "retry-history-button",
+                                message,
+                                palette,
+                                move |view, cx| {
+                                    view.failed.remove(&channel);
+                                    if view.requested.contains(&channel) {
+                                        view.scroll_back(cx);
+                                    }
+                                    cx.notify();
+                                },
+                            )
+                        })
+                    }))
+                    .child(timeline),
+            ));
         let hits = self.shell.search_hits();
         if !self.shell.search.trim().is_empty() {
             chat = chat.child(search_hits_bar(this.clone(), &hits, palette));
@@ -2969,6 +3032,27 @@ fn dock_circle(
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| action(this, cx));
         })
+}
+
+fn fetch_error(
+    view: Entity<RencordWindow>,
+    row_id: &'static str,
+    button_id: &'static str,
+    message: String,
+    palette: Palette,
+    retry: impl Fn(&mut RencordWindow, &mut Context<RencordWindow>) + 'static,
+) -> impl IntoElement {
+    h_flex()
+        .id(row_id)
+        .px(px(12.))
+        .py(px(6.))
+        .gap(px(8.))
+        .items_center()
+        .bg(rgb(palette.elevated))
+        .text_size(px(12.))
+        .text_color(rgb(palette.danger))
+        .child(div().flex_1().child(message))
+        .child(small_button(view, button_id, "Retry", retry))
 }
 
 fn small_button(
@@ -4524,6 +4608,29 @@ fn bench_photo() -> impl IntoElement {
     img(std::sync::Arc::new(image)).size_full()
 }
 
+fn record_fetch_failure(
+    requested: &mut HashSet<Snowflake>,
+    failed: &mut HashMap<Snowflake, String>,
+    id: Snowflake,
+    message: String,
+    drop_request: bool,
+) {
+    if drop_request {
+        requested.remove(&id);
+    }
+    failed.insert(id, message);
+}
+
+/// True while a fetch is in flight or waiting for an explicit retry.
+#[cfg(test)]
+fn fetch_is_blocked(
+    requested: &HashSet<Snowflake>,
+    failed: &HashMap<Snowflake, String>,
+    id: Snowflake,
+) -> bool {
+    failed.contains_key(&id) || requested.contains(&id)
+}
+
 fn rss_kib() -> u64 {
     let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
         return 0;
@@ -4534,4 +4641,29 @@ fn rss_kib() -> u64 {
         .and_then(|rest| rest.split_whitespace().next())
         .and_then(|kb| kb.parse().ok())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod fetch_failure {
+    use super::{fetch_is_blocked, record_fetch_failure};
+    use rencord_model::Snowflake;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn a_failed_fetch_is_not_retried_until_retry_is_pressed() {
+        let id = Snowflake::new(8);
+        let mut requested = HashSet::from([id]);
+        let mut failed = HashMap::new();
+        record_fetch_failure(
+            &mut requested,
+            &mut failed,
+            id,
+            "discord returned 500".into(),
+            true,
+        );
+        assert!(!requested.contains(&id));
+        assert!(fetch_is_blocked(&requested, &failed, id));
+        failed.remove(&id);
+        assert!(!fetch_is_blocked(&requested, &failed, id));
+    }
 }

@@ -769,6 +769,7 @@ impl RencordWindow {
         let _ = self.session_machine.established(record.user_id.clone());
         self.session_token = Some(token);
         self.requested.clear();
+        self.failed.clear();
         self.loading_older = None;
         self.history_start.clear();
         let api = snapshot.api.clone();
