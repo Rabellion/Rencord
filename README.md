@@ -72,6 +72,10 @@ Go Live, from `rencord --demo --golive picker|viewer|pip`. The pictures are prev
 
 Picture in picture: [docs/design/onyx/golive-pip.png](docs/design/onyx/golive-pip.png).
 
+| Over the cap | Progress |
+| :---: | :---: |
+| <img src="docs/design/onyx/big-file.png" alt="Onyx Ink big-file sheet: compress, upload a link, or split a 45.7 MB video under the 20 MB cap" width="480" /> | <img src="docs/design/onyx/big-file-progress.png" alt="Onyx Ink compress progress with cancel and retry" width="480" /> |
+
 ## Feature status
 
 Honest status for this repository. "Implemented" means the code path and tests exist. It does not mean a live Discord session was signed in from CI.
@@ -95,7 +99,7 @@ Honest status for this repository. "Implemented" means the code path and tests e
 | Responsive layout | Implemented | Breakpoints use width, height, and aspect ratio. 16:9 and 16:10 keep the four columns, including 1440×900, 1366×768, 1280×800, and 1280×720. 21:9 and 32:9 cap the message measure and leave the spare width as a gutter unless a stream, thread, or profile panel is open. Portrait keeps a narrow rail, a channel button, and drawers for channels and members. Column edges drag, double-click resets, and widths are stored per aspect and scale. `--window WxH` and `--scale` open a sized window. |
 | Search | Implemented locally | `from:`, `in:`, `has:`, `before:`, and `after:` across cached channels, plus the guild search URL. A hit jumps to that message. Not verified against Discord's search service. |
 | Reactions, reply, edit | Implemented locally; REST client tested against a mock | Optimistic update with rollback. Demo mode does not call Discord. |
-| Threads, forums, uploads | Not implemented | |
+| Big-file flow | Implemented | Discord still rejects a file over the account cap. The composer compares the size with the cap from `premium_type` and the guild boost tier, or uses `attachment_size_limit` when the API sends one. Over the cap, one sheet offers compress, an external link, or a split. Nothing is uploaded until you press the button, and a third-party host also needs the warning checked. |
 
 ## Build
 
@@ -218,6 +222,7 @@ flowchart LR
   voice --> dave["davey DAVE"]
   voice --> jitter["Adaptive jitter + Opus"]
   ui --> media["rencord-media presets"]
+  ui --> upload["rencord-upload big files"]
   login --> platform["rencord-platform secrets"]
 ```
 
@@ -234,7 +239,8 @@ rencord/
     ├── rencord-voice/        RTP, transport AEAD, DAVE, Opus, jitter
     ├── rencord-media/        Stream presets, HDR policy, worker messages
     ├── rencord-hdr/          HDR probes, tone-map, 10-bit metadata, signalling
-    └── rencord-platform/     Data dir, token file, login requirements
+    ├── rencord-platform/     Data dir, token file, login requirements
+    └── rencord-upload/       Cap check, compress, external hosts, split volumes
 ```
 
 The UI does not embed egui. Protocol crates do not depend on GPUI.
@@ -252,7 +258,7 @@ The UI does not embed egui. Protocol crates do not depend on GPUI.
 | 5. Voice against Discord | Not started | Point `LiveCall` at a real voice server and keep DAVE rekeys without dropping the call. |
 | 6. Go Live | In progress | Preview frames, `rencord-stream`, software encode, RTP, DAVE wrap, and `--golive` screens are on `main`. VA-API, oneVPL, NVENC, AMF, and VideoToolbox are probed by loading the system library and opening a session. They do not encode until a GPU session succeeds. Real Windows Graphics Capture, ScreenCaptureKit, and a PipeWire consumer are not producing frames yet. 120 fps is offered only when the display reports that refresh and the encoder sustains the budget. |
 | 7. HDR between Rencord users (Milestone 5) | Software path | `rencord-hdr`: detection traits, BT.2390/Hable/ACES, HEVC Main10 and AV1 10-bit parameter blocks with HDR10 SEI/OBU, opt-in signalling, SDR fallback. `planned_pixel_path` is the hook the worker can call. `output_path` still tone-maps, so a running Go Live preview stays 8-bit. A Discord SFU test is not included. [docs/design/HDR.md](docs/design/HDR.md). |
-| 8. Files over the attachment cap | Not started | Discord enforces the upload size on the server, so the client cannot lift it. When a file is over the account cap, one dialog offers a saved default: re-encode video or downscale images to fit, upload to Litterbox, Catbox, or a host the user configures and post the link (Rencord shows an inline preview), or split the file into parts. |
+| 8. Files over the attachment cap | Implemented | Discord enforces the per-file cap on the server. This client cannot lift it. The composer sheet plans against the API reference default of 20 MiB with no Nitro (the older account-caps table still says 10 MB; Nitro Basic 50 MiB; Nitro 1 GiB; boost level 2 is 50 MiB and level 3 is 100 MiB, server-only, taking the maximum). `attachment_size_limit` wins when the API sends it. Over the cap: compress (ffmpeg two-pass when a hardware encoder is on PATH, WebP or JPEG in-process, Opus for 48 kHz WAV), upload to Litterbox, Catbox, a 0x0.st-compatible host, or a presigned PUT / S3-compatible endpoint and post the link, or split into zip or 7z volumes under the cap. A Rencord message with the split note has a Reassemble control. Screenshots: [docs/design/onyx/big-file.png](docs/design/onyx/big-file.png), [docs/design/onyx/big-file-progress.png](docs/design/onyx/big-file-progress.png). |
 
 The UI must not promise that Discord will accept a Go Live preset or a 10-bit stream. The capture worker publishes preview frames and tone-maps HDR to 8-bit. It does not send them to Discord. A 10-bit track stays off until a caller has proof the SFU forwarded HDR. There is no such proof in this repository.
 

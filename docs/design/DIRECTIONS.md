@@ -58,4 +58,4 @@ B and C captures from the earlier pass are still in this folder (`b-*.png`, `c-*
 
 ## Files over the cap
 
-Not built. See the roadmap in the README and in `UX.md`. Discord enforces the size on the server.
+The composer sheet handles a file over the cap. Discord still enforces the size on the server. See the README and [UX.md](UX.md).
