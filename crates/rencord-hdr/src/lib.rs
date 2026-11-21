@@ -17,6 +17,7 @@
 
 mod color;
 mod encode;
+mod gpu;
 mod metadata;
 mod present;
 mod probe;
@@ -38,19 +39,22 @@ pub use encode::{
     HardwareContractEncoder, HdrCodec, HdrEncodeConfig, HdrEncoder, HdrPicture,
     ReferenceContainerEncoder,
 };
+pub use gpu::{adapter_report, dispatch, map_shader_formula, AdapterReport, GpuDispatch, GpuError};
 pub use metadata::{
     av1_hdr_metadata_obus, hevc_hdr10_sei, hevc_prefix_sei, metadata_from_sei, parse_annex_b_sei,
     Hdr10StaticMetadata, SeiMessage,
 };
 pub use present::{
-    decide_presentation, open_access_unit, present_decoded, present_nits, surface_name,
-    PresentError, PresentMode, PresentedFrame, ViewerFrame,
+    decide_presentation, open_access_unit, platform_decoders, present_decoded, present_nits,
+    surface_name, swapchain_format, DecoderStatus, PlatformDecoder, PresentError, PresentMode,
+    PresentedFrame, SwapchainFormat, ViewerFrame,
 };
 pub use probe::{
-    classify_apple_format, classify_dxgi, parse_edid_chromaticity, parse_edid_hdr,
-    parse_pipewire_caps, wayland_primaries, wayland_transfer, ApplePixelClass, CapturedColorDesc,
-    DescriptorProbe, DisplayHdrInfo, DisplaySource, EdidHdrBlock, HdrCaptureProbe, HdrSourceReport,
-    HostProbe, Platform, ProbeError,
+    capture_pixel_format, classify_apple_format, classify_dxgi, parse_edid_chromaticity,
+    parse_edid_hdr, parse_pipewire_caps, samples_to_nits, wayland_primaries, wayland_transfer,
+    ApplePixelClass, CapturePixelFormat, CapturedColorDesc, DescriptorProbe, DisplayHdrInfo,
+    DisplaySource, EdidHdrBlock, HdrCaptureProbe, HdrSourceReport, HostProbe, Platform, ProbeError,
+    DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
 };
 pub use signal::{
     decode_capability_payload, decode_capability_sei, AudienceMember, DeliveryPlan, DiscordTrack,
@@ -133,7 +137,11 @@ mod tests {
             .iter()
             .any(|item| item.level == SupportLevel::NotLinked && item.name.contains("hardware")));
         let gpu = GpuToneMapper::new(ToneMapParams::hdr10_to_sdr100(ToneCurve::Bt2390));
-        assert!(gpu.dispatch_status().contains("CPU"));
+        let status = gpu.dispatch_status();
+        assert!(
+            status.contains("wgpu") || status.contains("No Vulkan"),
+            "{status}"
+        );
         assert!(gpu.shader_source().contains("fn tonemap"));
     }
 }

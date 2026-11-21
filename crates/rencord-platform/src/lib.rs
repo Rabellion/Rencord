@@ -1,10 +1,8 @@
-//! Platform services for Milestone 1.
+//! Platform services.
 //!
-//! The token store is a file created with mode `0600` on Unix. An OS keyring
-//! (Secret Service, Keychain, Credential Manager) is the intended production
-//! backend; this crate exposes the trait and the file implementation that CI
-//! can run without a secret service. Official login is described, not opened:
-//! Milestone 1 accepts a pasted user token.
+//! Tokens belong in the OS keychain (`rencord-auth`). [`FileSecretStore`] is
+//! the Milestone 1 file, kept so an existing `0600` file can be read once and
+//! deleted after the keychain accepts it. New sessions are not written here.
 
 mod appearance;
 
@@ -48,8 +46,8 @@ pub struct OfficialLoginRequirements {
 pub fn official_login_requirements() -> OfficialLoginRequirements {
     OfficialLoginRequirements {
         hosted_url: "https://discord.com/login",
-        windows_macos: "Ephemeral WebView2 or WKWebView via gpui-wry. Load the hosted login page, accept only a discord.com origin, read the session token from the official handoff, store it, and destroy the webview.",
-        linux: "gpui-wry does not cover Linux. The login window has to be a separate GTK4 / WebKitGTK 6.0 process, same origin check, then torn down. It is not linked in Milestone 1.",
+        windows_macos: "A separate login window uses WebView2 or WKWebView through wry. It loads the hosted login page. The session is read from Discord's own response, stored in the OS keychain, and the webview is destroyed. Rencord does not attempt to solve a captcha.",
+        linux: "The login window is a separate process using WebKitGTK through wry. It loads the hosted page, reads the session Discord returns, stores it in the keychain, and exits. Email and password are the fallback when WebKitGTK cannot start.",
     }
 }
 

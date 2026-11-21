@@ -1,0 +1,55 @@
+[package]
+name = "rencord-auth"
+version = "0.1.0"
+description = "Discord sign-in for Rencord: remote auth, the login page, and the OS keychain"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# System webview (WebView2, WKWebView, WebKitGTK) via wry. The desktop app enables this.
+webview = ["dep:wry", "dep:tao"]
+
+[dependencies]
+base64 = "0.22"
+flate2.workspace = true
+futures-util.workspace = true
+http = "1"
+qrcode = "0.14"
+resvg = "0.45"
+rand = "0.8"
+rencord-model.workspace = true
+rencord-protocol.workspace = true
+reqwest.workspace = true
+rsa = { version = "0.9", features = ["sha2", "pem"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["sync-secret-service"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
+
+[dependencies.wry]
+version = "0.53"
+optional = true
+
+[dependencies.tao]
+version = "0.30"
+optional = true
+
+[dev-dependencies]
+rqrr = "0.8"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

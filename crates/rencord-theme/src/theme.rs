@@ -69,6 +69,7 @@ color_bag! {
     bg_reaction_mine => "bg.reaction.mine",
     bg_hangup => "bg.hangup",
     bg_stage => "bg.stage",
+    bg_qr => "bg.qr",
     text_primary => "text.primary",
     text_muted => "text.muted",
     text_faint => "text.faint",

@@ -23,6 +23,7 @@ path = "src/measure.rs"
 async-channel.workspace = true
 gpui-kit.workspace = true
 rencord-api.workspace = true
+rencord-auth = { workspace = true, features = ["webview"] }
 rencord-gateway.workspace = true
 rencord-markdown.workspace = true
 rencord-hdr.workspace = true

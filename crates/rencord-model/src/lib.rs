@@ -103,6 +103,8 @@ pub struct User {
     #[serde(default)]
     pub discriminator: Option<String>,
     #[serde(default)]
+    pub avatar: Option<String>,
+    #[serde(default)]
     pub bot: bool,
 }
 
