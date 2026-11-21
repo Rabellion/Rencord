@@ -29,6 +29,7 @@ rencord-hdr.workspace = true
 rencord-media.workspace = true
 rencord-model.workspace = true
 rencord-platform.workspace = true
+rencord-theme.workspace = true
 rencord-store.workspace = true
 rencord-upload.workspace = true
 rencord-voice = { workspace = true, features = ["cpal"] }

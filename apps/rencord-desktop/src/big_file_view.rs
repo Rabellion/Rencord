@@ -49,7 +49,7 @@ pub fn sheet(
         .left(px(0.))
         .w(px(1180.))
         .h(px(760.))
-        .bg(rgba(0x000000b8))
+        .bg(rgba(palette.overlay))
         .child(div().absolute().top(px(top)).left(px(left)).child(card))
 }
 

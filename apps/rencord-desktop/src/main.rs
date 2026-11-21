@@ -138,6 +138,11 @@ fn main() {
             _ => rencord_upload::Flow::preview_sheet(),
         });
     let reveal_hover = args.iter().any(|arg| arg == "--reveal-hover");
+    let open_settings = args.iter().any(|arg| arg == "--open-settings");
+    let theme_file = args
+        .windows(2)
+        .find(|pair| pair[0] == "--theme-file")
+        .map(|pair| std::path::PathBuf::from(&pair[1]));
     let frame = args
         .windows(2)
         .find(|pair| pair[0] == "--window" || pair[0] == "--size")
@@ -231,15 +236,15 @@ fn main() {
         let options = WindowOptions {
             window_bounds,
             window_min_size: Some(size(px(480.), px(360.))),
-            // Client decorations drop the desktop app-menu button. Settings stays in the dock.
-            window_decorations: Some(WindowDecorations::Client),
+            // Server decorations keep the client area opaque and edge to edge.
+            // A client border would leave a transparent margin around the theme.
+            // The Hexwave icon still rides on the window for X11, macOS, and Windows.
+            window_background: WindowBackgroundAppearance::Opaque,
+            window_decorations: Some(WindowDecorations::Server),
             titlebar: Some(TitlebarOptions {
                 title: Some("Rencord".into()),
                 ..Default::default()
             }),
-            // Wayland looks up rencord.desktop / hicolor by this id. X11 also
-            // gets _NET_WM_ICON from `icon`. macOS and Windows take the icon
-            // from the bundle and the exe resource.
             app_id: Some(rencord_platform::APP_ID.to_string()),
             icon: Some(window_icon()),
             ..Default::default()
@@ -263,6 +268,8 @@ fn main() {
                     layout_store.clone(),
                     layout_path.clone(),
                     big_file,
+                    open_settings,
+                    theme_file,
                     window,
                     cx,
                 )
@@ -370,6 +377,16 @@ struct RencordWindow {
     suppress_split: Option<SplitEdge>,
     _bounds_observer: Subscription,
     _display_observer: Subscription,
+    shown: rencord_desktop::Theme,
+    fade_from: rencord_desktop::Theme,
+    fade_to: rencord_desktop::Theme,
+    fade_at: Option<Instant>,
+    system_dark: Option<bool>,
+    user_themes: Vec<rencord_desktop::Theme>,
+    theme_stamp: u64,
+    advanced_tokens: bool,
+    token_index: usize,
+    theme_code: Entity<InputState>,
 }
 
 struct SplitGhost;
@@ -406,6 +423,8 @@ impl RencordWindow {
         layout_store: LayoutStore,
         layout_path: PathBuf,
         big_file: Option<rencord_upload::Flow>,
+        open_settings: bool,
+        theme_file: Option<std::path::PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -418,9 +437,23 @@ impl RencordWindow {
         } else {
             Shell::login()
         };
+        let had_saved = shell.load_appearance();
+        if !had_saved && rencord_platform::system_reduced_motion() == Some(true) {
+            shell.prefs.reduced_motion = true;
+        }
         if let Some(mode) = theme {
             shell.set_theme(mode);
         }
+        if let Some(path) = theme_file {
+            if let Some(loaded) = rencord_desktop::theme_file_from_path(&path) {
+                shell.prefs.custom = Some(loaded);
+            }
+        }
+        if open_settings {
+            shell.settings_open = true;
+        }
+        let system_dark = rencord_platform::system_scheme().map(|scheme| scheme.prefers_dark());
+        let initial = shell.prefs.resolved(system_dark);
         if let Some(layout) = layout {
             shell.prefs.layout = layout;
         }
@@ -447,6 +480,7 @@ impl RencordWindow {
             cx.new(|cx| InputState::new(window, cx).placeholder("Jump to a channel or command"));
         let attachment_path =
             cx.new(|cx| InputState::new(window, cx).placeholder("Path, or put/s3 endpoint"));
+        let theme_code = cx.new(|cx| InputState::new(window, cx).placeholder("Paste a theme code"));
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let bounds_observer = cx.observe_window_bounds(window, |this, window, cx| {
@@ -455,6 +489,26 @@ impl RencordWindow {
         let display_observer = cx.observe_window_display(window, |this, window, cx| {
             this.remember_bounds(window, cx);
         });
+        let user_themes = rencord_theme::load_theme_dir(&rencord_platform::themes_dir());
+        let theme_stamp = rencord_theme::dir_stamp(&rencord_platform::themes_dir());
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            let scheme = rencord_platform::system_scheme().map(|item| item.prefers_dark());
+            let stamp = rencord_theme::dir_stamp(&rencord_platform::themes_dir());
+            let themes = rencord_theme::load_theme_dir(&rencord_platform::themes_dir());
+            this.update(cx, |view, cx| {
+                let scheme_changed = view.system_dark != scheme;
+                let folder_changed = view.theme_stamp != stamp;
+                if scheme_changed || folder_changed {
+                    view.system_dark = scheme;
+                    view.theme_stamp = stamp;
+                    view.user_themes = themes;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
         Self {
             shell,
             token_input,
@@ -494,6 +548,16 @@ impl RencordWindow {
             suppress_split: None,
             _bounds_observer: bounds_observer,
             _display_observer: display_observer,
+            shown: initial.clone(),
+            fade_from: initial.clone(),
+            fade_to: initial,
+            fade_at: None,
+            system_dark,
+            user_themes,
+            theme_stamp,
+            advanced_tokens: false,
+            token_index: 0,
+            theme_code,
         }
     }
 
@@ -550,22 +614,32 @@ impl RencordWindow {
 
     fn current_plan(&self, window: &Window) -> ResolvedLayout {
         let size = window.viewport_size();
-        let ink = matches!(self.shell.prefs.palette().mode, ThemeMode::Onyx);
+        let palette = self.shell.prefs.palette_for(self.system_dark);
+        let ink = palette.ink_chrome;
+        let mut metrics = if ink {
+            ColumnMetrics::onyx()
+        } else {
+            ColumnMetrics::crisp()
+        };
+        metrics.gap = palette.shell_gap;
+        metrics.rail = palette.rail_w;
+        metrics.channels = palette.side_w;
+        metrics.members = palette.member_w;
         layout::resolve(&LayoutInput {
             width: size.width.as_f32(),
             height: size.height.as_f32(),
             scale: window.scale_factor(),
-            message_px: if ink { 14.0 } else { self.shell.prefs.font_px },
+            message_px: if ink {
+                palette.body_size
+            } else {
+                self.shell.prefs.font_px
+            },
             show_members: self.shell.prefs.show_members,
             show_channels: self.shell.prefs.show_sidebar,
             reading_anchor: self.reading_anchor,
             right: self.right_choice,
             saved: self.columns,
-            metrics: if ink {
-                ColumnMetrics::onyx()
-            } else {
-                ColumnMetrics::crisp()
-            },
+            metrics,
             monitor: None,
         })
     }
@@ -675,6 +749,8 @@ impl RencordWindow {
                 "error",
                 "-f",
                 "x11grab",
+                "-draw_mouse",
+                "0",
                 "-video_size",
                 &format!("{width}x{height}"),
                 "-i",
@@ -705,6 +781,149 @@ impl RencordWindow {
         );
         if self.persist_layout {
             let _ = self.layout_store.save(&self.layout_path);
+        }
+    }
+
+    fn tick_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let target = self.shell.prefs.resolved(self.system_dark);
+        if target.signature() != self.fade_to.signature() {
+            self.fade_from = self.shown.clone();
+            self.fade_to = target;
+            self.fade_at = if self.shell.prefs.reduced_motion {
+                None
+            } else {
+                Some(Instant::now())
+            };
+        }
+        if self.shell.prefs.reduced_motion || self.fade_at.is_none() {
+            self.shown = self.fade_to.clone();
+            self.fade_at = None;
+            return;
+        }
+        let started = self.fade_at.unwrap_or_else(Instant::now);
+        let t = started.elapsed().as_secs_f32() / 0.18;
+        if t >= 1.0 {
+            self.shown = self.fade_to.clone();
+            self.fade_at = None;
+        } else {
+            self.shown = self
+                .fade_from
+                .lerp(&self.fade_to, rencord_theme::ease_out_cubic(t));
+            cx.on_next_frame(window, |this, window, cx| {
+                this.tick_theme(window, cx);
+                cx.notify();
+            });
+        }
+    }
+
+    fn choose_preset(&mut self, mode: rencord_desktop::ThemeMode) {
+        self.shell.set_theme(mode);
+        self.shell.save_appearance();
+    }
+
+    fn toggle_pref(&mut self, kind: &str) {
+        match kind {
+            "system" => self.shell.prefs.sync_system = !self.shell.prefs.sync_system,
+            "discord" => self.shell.prefs.sync_discord = !self.shell.prefs.sync_discord,
+            "contrast" => self.shell.prefs.high_contrast = !self.shell.prefs.high_contrast,
+            "motion" => self.shell.prefs.reduced_motion = !self.shell.prefs.reduced_motion,
+            "colorblind" => {
+                self.shell.prefs.colorblind_status = !self.shell.prefs.colorblind_status
+            }
+            "light" => self.shell.prefs.light_preset = self.shell.prefs.light_preset.cycle(),
+            "dark" => self.shell.prefs.dark_preset = self.shell.prefs.dark_preset.cycle(),
+            _ => {}
+        }
+        self.shell.save_appearance();
+    }
+
+    fn recolor(&mut self, hex: u32, accent: bool) {
+        let current = self.shell.prefs.base_theme();
+        let color = rencord_theme::Color::rgb(hex);
+        let base = if accent {
+            current.base.unwrap_or(current.colors.bg_chat)
+        } else {
+            color
+        };
+        let accent_color = if accent {
+            color
+        } else {
+            current.accent_seed.unwrap_or(current.colors.accent)
+        };
+        let mut derived = rencord_theme::derive_theme(
+            "Custom",
+            base,
+            accent_color,
+            Some(current.mode),
+            current.chrome,
+        );
+        derived.background = current.background;
+        derived.metrics.font_ui = current.metrics.font_ui;
+        self.shell.prefs.custom = Some(derived);
+        self.shell.save_appearance();
+    }
+
+    fn nudge_token(&mut self, delta: f32) {
+        let keys = rencord_theme::Colors::keys();
+        if keys.is_empty() {
+            return;
+        }
+        let key = keys[self.token_index % keys.len()];
+        let mut theme = self.shell.prefs.ensure_custom().clone();
+        if let Some(color) = theme.colors.get(key) {
+            theme.colors.set(key, color.shift_lightness(delta));
+        }
+        theme.derived = false;
+        theme.preset = None;
+        self.shell.prefs.custom = Some(theme);
+        self.shell.save_appearance();
+    }
+
+    fn toggle_gradient(&mut self) {
+        let mut theme = self.shell.prefs.ensure_custom().clone();
+        theme.background.kind = match theme.background.kind {
+            rencord_theme::BackgroundKind::Solid => rencord_theme::BackgroundKind::Gradient {
+                angle: 160.0,
+                stops: vec![
+                    theme.colors.bg_base,
+                    theme.colors.accent,
+                    theme.colors.bg_sidebar,
+                ],
+            },
+            rencord_theme::BackgroundKind::Gradient { .. } => rencord_theme::BackgroundKind::Solid,
+        };
+        theme.preset = None;
+        self.shell.prefs.custom = Some(theme);
+        self.shell.save_appearance();
+    }
+
+    fn cycle_ui_font(&mut self) {
+        let mut theme = self.shell.prefs.ensure_custom().clone();
+        theme.metrics.font_ui = theme.metrics.font_ui.cycle();
+        theme.preset = None;
+        self.shell.prefs.custom = Some(theme);
+        self.shell.save_appearance();
+    }
+
+    fn save_theme_folder(&self) {
+        let theme = self.shell.prefs.resolved(self.system_dark);
+        let dir = rencord_platform::themes_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(text) = theme.to_toml() {
+            let _ = std::fs::write(dir.join(format!("{}.toml", theme.id)), text);
+        }
+    }
+
+    fn import_theme_code(&mut self, text: &str) {
+        if let Ok(theme) = rencord_theme::theme_from_code(text) {
+            self.shell.prefs.custom = Some(theme);
+            self.shell.save_appearance();
+        } else if let Ok(theme) = rencord_theme::theme_from_toml(text) {
+            self.shell.prefs.custom = Some(theme);
+            self.shell.save_appearance();
+        } else if let Ok(theme) = rencord_theme::theme_from_json(text) {
+            self.shell.prefs.custom = Some(theme);
+            self.shell.save_appearance();
         }
     }
 
@@ -837,6 +1056,11 @@ impl RencordWindow {
                 match outcome {
                     Ok(snapshot) => {
                         view.shell.set_user(snapshot.user);
+                        view.shell.load_appearance();
+                        view.shell.consider_discord_appearance(
+                            snapshot.discord_theme.as_deref(),
+                            snapshot.discord_client_theme.as_deref(),
+                        );
                         for guild in snapshot.guilds {
                             view.shell.session.upsert_guild(guild);
                         }
@@ -1076,6 +1300,8 @@ struct Bootstrap {
     guilds: Vec<rencord_model::Guild>,
     channels: Vec<rencord_model::Channel>,
     gateway_note: String,
+    discord_theme: Option<String>,
+    discord_client_theme: Option<String>,
 }
 
 async fn fetch_bootstrap(token: String) -> Result<Bootstrap, String> {
@@ -1093,19 +1319,21 @@ async fn fetch_bootstrap(token: String) -> Result<Bootstrap, String> {
             .map_err(|err| err.to_string())?;
         channels.append(&mut guild_channels);
     }
-    let gateway_note = match spawn_gateway(token).await {
-        Ok(note) => note,
-        Err(err) => format!("gateway did not stay up ({err})"),
+    let (gateway_note, discord_theme, discord_client_theme) = match spawn_gateway(token).await {
+        Ok(hello) => hello,
+        Err(err) => (format!("gateway did not stay up ({err})"), None, None),
     };
     Ok(Bootstrap {
         user,
         guilds,
         channels,
         gateway_note,
+        discord_theme,
+        discord_client_theme,
     })
 }
 
-async fn spawn_gateway(token: String) -> Result<String, String> {
+async fn spawn_gateway(token: String) -> Result<(String, Option<String>, Option<String>), String> {
     let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(32);
     let (_cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(8);
     tokio::spawn(async move {
@@ -1123,10 +1351,17 @@ async fn spawn_gateway(token: String) -> Result<String, String> {
         .await
         .map_err(|_| "timed out waiting for the gateway".to_string())?;
     match first {
-        Some(rencord_gateway::GatewayEvent::Ready { session_id, .. }) => {
-            Ok(format!("ready, session {session_id}"))
-        }
-        Some(other) => Ok(format!("first event {other:?}")),
+        Some(rencord_gateway::GatewayEvent::Ready {
+            session_id,
+            discord_theme,
+            discord_client_theme,
+            ..
+        }) => Ok((
+            format!("ready, session {session_id}"),
+            discord_theme,
+            discord_client_theme,
+        )),
+        Some(other) => Ok((format!("first event {other:?}"), None, None)),
         None => Err("gateway closed".into()),
     }
 }
@@ -1134,7 +1369,13 @@ async fn spawn_gateway(token: String) -> Result<String, String> {
 impl Render for RencordWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_queries(cx);
-        apply_kit_theme(&self.shell.prefs.palette(), cx);
+        self.tick_theme(window, cx);
+        let palette = rencord_desktop::Palette::from_theme(
+            &self.shown,
+            self.shell.prefs.font_px,
+            self.shell.prefs.density,
+        );
+        apply_kit_theme(&palette, cx);
         if self.bench && self.bench_frames == 0 {
             cx.on_next_frame(window, |this, window, cx| {
                 this.note_bench_frame(window, cx);
@@ -1146,7 +1387,6 @@ impl Render for RencordWindow {
             });
         }
         let signed_in = self.shell.session.user.is_some();
-        let palette = self.shell.prefs.palette();
         let root = div()
             .id("rencord-root")
             .role(Role::Document)
@@ -1154,11 +1394,7 @@ impl Render for RencordWindow {
             .track_focus(&self.focus)
             .size_full()
             .bg(rgb(palette.app_bg))
-            .font_family(if matches!(palette.mode, ThemeMode::Onyx) {
-                "Inter"
-            } else {
-                "Figtree"
-            })
+            .font_family(palette.font_ui)
             .text_color(rgb(palette.text))
             .text_size(px(self.shell.prefs.font_px))
             .on_action(cx.listener(|this, _: &QuickSwitcher, _, cx| {
@@ -1240,7 +1476,11 @@ impl Render for RencordWindow {
 
 impl RencordWindow {
     fn login(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = self.shell.prefs.palette();
+        let palette = rencord_desktop::Palette::from_theme(
+            &self.shown,
+            self.shell.prefs.font_px,
+            self.shell.prefs.density,
+        );
         let this = cx.entity();
         v_flex()
             .size_full()
@@ -1265,7 +1505,11 @@ impl RencordWindow {
     }
 
     fn shell_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = self.shell.prefs.palette();
+        let palette = rencord_desktop::Palette::from_theme(
+            &self.shown,
+            self.shell.prefs.font_px,
+            self.shell.prefs.density,
+        );
         let density = self.shell.prefs.density;
         let this = cx.entity();
         let guilds = self.shell.session.guilds.clone();
@@ -1321,7 +1565,8 @@ impl RencordWindow {
             .map(|guild| guild.name.clone())
             .unwrap_or_else(|| "Direct Messages".into());
         let home_active = selected.is_some_and(|id| dms.iter().any(|channel| channel.id == id));
-        let ink = matches!(palette.mode, ThemeMode::Onyx);
+        let ink = palette.ink_chrome;
+        let theme = self.shown.clone();
         self.sync_profile(window, cx);
         let plan = self.current_plan(window);
         self.channels_as_drawer = plan.channels_as_drawer;
@@ -1333,9 +1578,17 @@ impl RencordWindow {
             ColumnMetrics::crisp()
         };
         self.frame = Some(plan.clone());
-        let rail_w = self.metrics.rail;
-        let tile = if plan.touch || ink { 44. } else { 48. };
-        let tile_radius = if ink { 8. } else { 12. };
+        let rail_w = if plan.rail > 0.0 {
+            plan.rail
+        } else {
+            palette.rail_w
+        };
+        let tile = if plan.touch {
+            layout::TOUCH_TARGET.min(palette.tile.max(40.))
+        } else {
+            palette.tile
+        };
+        let tile_radius = palette.tile_radius;
         let hit = if plan.touch {
             layout::TOUCH_TARGET
         } else {
@@ -1343,24 +1596,24 @@ impl RencordWindow {
         };
         let header_h = if plan.touch {
             layout::TOUCH_TARGET
-        } else if ink {
-            42.
         } else {
-            48.
+            palette.header_h
         };
-        let pill_ink = if ink {
-            palette.accent
-        } else if matches!(palette.mode, ThemeMode::Light) {
-            0x060607
+        let pill_ink = palette.pill;
+        let home_fill = if home_active {
+            palette.home_bg_active
         } else {
-            0xffffff
+            palette.home_bg
         };
-        let home_fill = if ink {
-            0x000000
-        } else if home_active {
-            0x5865f2
+        let home_ink = if home_active {
+            palette.home_glyph_active
         } else {
-            0x2a2e38
+            palette.home_glyph
+        };
+        let home_border = if home_active {
+            palette.home_border_active
+        } else {
+            palette.home_border
         };
         let mut rail = v_flex()
             .w(px(rail_w))
@@ -1368,7 +1621,7 @@ impl RencordWindow {
             .bg(rgb(palette.rail))
             .items_center()
             .gap(px(8.))
-            .py(px(if ink { 10. } else { 12. }));
+            .py(px(palette.rail_pad));
         {
             let view = this.clone();
             rail = rail.child(rail_slot(
@@ -1382,11 +1635,11 @@ impl RencordWindow {
                 home_fill,
                 home_fill,
                 pill_ink,
-                if ink { palette.line } else { home_fill },
+                home_border,
                 rail_w,
                 tile,
                 tile_radius,
-                rail_hexwave(palette.text),
+                rail_hexwave(home_ink, palette.accent),
                 move |_, _, cx| {
                     view.update(cx, |this, cx| {
                         this.shell
@@ -1396,7 +1649,7 @@ impl RencordWindow {
                 },
             ));
         }
-        if !ink {
+        if palette.show_top_rule {
             rail = rail.child(rail_rule(rail_w, palette.line));
         }
         for guild in guilds {
@@ -1404,27 +1657,10 @@ impl RencordWindow {
             let mark = guild_mark(&guild.name);
             let active = selected_guild == Some(id);
             let view = this.clone();
-            let fill = if ink {
-                if guild.name == "Analytical Engines" {
-                    0x0a0a16
-                } else {
-                    0x000000
-                }
-            } else {
-                guild_fill(&guild.name)
-            };
-            let border = if ink && active {
-                palette.accent
-            } else if ink {
-                palette.line
-            } else {
-                fill
-            };
-            let letter = if ink && !active {
-                0xc5c8de
-            } else {
-                palette.text
-            };
+            let tile_colors = rencord_desktop::guild_tile(&guild.name, active, &theme);
+            let fill = tile_colors.fill;
+            let border = tile_colors.border;
+            let letter = tile_colors.letter;
             rail = rail.child(rail_slot(
                 format!("guild-{id}").into(),
                 active,
@@ -1451,7 +1687,7 @@ impl RencordWindow {
                 },
             ));
         }
-        rail = rail.child(rail_rule(rail_w, if ink { 0x1c1c38 } else { palette.line }));
+        rail = rail.child(rail_rule(rail_w, palette.border_strong));
         rail = rail.child(rail_action(
             this.clone(),
             "rail-add",
@@ -1487,13 +1723,13 @@ impl RencordWindow {
             .bg(rgb(palette.sidebar))
             .child(
                 div()
-                    .h(px(if ink { 42. } else { 48. }))
-                    .px(px(if ink { 14. } else { 12. }))
+                    .h(px(palette.header_h))
+                    .px(px(palette.header_px))
                     .flex()
                     .items_center()
                     .border_b_1()
                     .border_color(rgb(palette.line))
-                    .text_size(px(if ink { 15. } else { 16. }))
+                    .text_size(px(palette.title_px))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(palette.text))
                     .child(guild_name.clone()),
@@ -1656,6 +1892,7 @@ impl RencordWindow {
         let timeline_state = self.timeline.clone();
         let list_messages = messages.clone();
         let list_palette = palette;
+        let list_theme = theme.clone();
         let list_entity = this.clone();
         let list_reactions = reactions.clone();
         let reveal_hover = self.reveal_hover;
@@ -1677,6 +1914,7 @@ impl RencordWindow {
                     .cloned()
                     .unwrap_or_default(),
                 list_palette,
+                &list_theme,
                 font_px,
                 reveal_hover && message.content.contains("Mention"),
             )
@@ -1716,21 +1954,19 @@ impl RencordWindow {
                                     hit.max(layout::TOUCH_TARGET),
                                 ))
                             })
-                            .child(icon("hash", if ink { 16. } else { 20. }, palette.muted))
+                            .child(icon("hash", palette.hash_icon, palette.muted))
                             .child(
                                 div()
-                                    .text_size(px(if ink { 15. } else { 16. }))
+                                    .text_size(px(palette.title_px))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(palette.text))
                                     .child(channel_name.clone()),
                             )
                             .when(topic, |title| {
                                 title
-                                    .child(div().w(px(1.)).h(px(16.)).bg(rgb(if ink {
-                                        0x1c1c38
-                                    } else {
-                                        palette.line
-                                    })))
+                                    .child(
+                                        div().w(px(1.)).h(px(16.)).bg(rgb(palette.border_strong)),
+                                    )
                                     .child(paint(
                                         "Voice, notes, and no upsells",
                                         palette.muted,
@@ -1827,10 +2063,8 @@ impl RencordWindow {
                 .px(px(4.))
                 .h(px(if plan.touch {
                     layout::TOUCH_TARGET
-                } else if matches!(palette.mode, ThemeMode::Onyx) {
-                    38.
                 } else {
-                    47.
+                    palette.composer_h
                 }))
                 .items_center()
                 .gap(px(2.))
@@ -1928,30 +2162,19 @@ impl RencordWindow {
                 .split_once(" · ")
                 .map(|(name, activity)| (name.to_owned(), activity.to_owned()))
                 .unwrap_or_else(|| (member.clone(), "Online".into()));
-            let role = role_color(&name, palette);
-            let dot = if matches!(palette.mode, ThemeMode::Onyx) {
-                match activity.as_str() {
-                    "Idle" => 0xd4c05a,
-                    "Offline" => 0x80848e,
-                    _ => 0x5abb72,
-                }
-            } else {
-                match activity.as_str() {
-                    "Idle" => 0xf0b232,
-                    "Offline" => 0x80848e,
-                    _ => 0x23a559,
-                }
+            let role = role_color(&name, &theme);
+            let dot = match activity.as_str() {
+                "Idle" => palette.status_idle,
+                "Offline" => palette.status_offline,
+                "In voice" => palette.status_online,
+                _ => palette.status_online,
             };
-            let speaking = activity == "In voice" && matches!(palette.mode, ThemeMode::Onyx);
+            let speaking = activity == "In voice" && palette.ink_chrome;
             people = people.child(
                 h_flex()
                     .mx(px(8.))
                     .px(px(6.))
-                    .h(px(if speaking || matches!(palette.mode, ThemeMode::Onyx) {
-                        38.
-                    } else {
-                        44.
-                    }))
+                    .h(px(palette.member_row))
                     .gap(px(8.))
                     .items_center()
                     .rounded(px(6.))
@@ -2103,16 +2326,22 @@ impl RencordWindow {
             ));
         }
         if settings {
-            layer = layer.child(self.settings_layer(
-                cx,
-                palette,
-                density,
-                &inputs,
-                &outputs,
-                chosen_in.as_deref(),
-                chosen_out.as_deref(),
-                voice.as_ref(),
-            ));
+            return div()
+                .size_full()
+                .overflow_hidden()
+                .bg(rgb(palette.app_bg))
+                .p(px(16.))
+                .child(self.settings_layer(
+                    cx,
+                    palette,
+                    density,
+                    &inputs,
+                    &outputs,
+                    chosen_in.as_deref(),
+                    chosen_out.as_deref(),
+                    voice.as_ref(),
+                ))
+                .into_any_element();
         }
         if self.shell.flow.open {
             let flow = self.shell.flow.clone();
@@ -2123,7 +2352,7 @@ impl RencordWindow {
                 palette,
             ));
         }
-        layer
+        layer.into_any_element()
     }
 
     fn inbox_layer(&mut self, cx: &mut Context<Self>, palette: Palette) -> impl IntoElement {
@@ -2207,29 +2436,26 @@ impl RencordWindow {
         } else {
             "Online"
         };
-        let onyx = matches!(palette.mode, ThemeMode::Onyx);
+        let onyx = palette.ink_chrome;
         let dot = if muted || deafened {
-            0xf23f43
-        } else if onyx {
-            0x5abb72
+            palette.status_dnd
         } else {
-            0x23a559
+            palette.status_online
         };
         let mut column = v_flex().w_full().flex_shrink_0().bg(rgb(palette.sidebar));
         if let Some(report) = voice {
             let view = this.clone();
-            let label_color = if onyx { palette.link } else { 0x23a559 };
             column = column.child(
                 v_flex()
-                    .mx(px(if onyx { 8. } else { 0. }))
-                    .mt(px(if onyx { 6. } else { 0. }))
-                    .px(px(if onyx { 10. } else { 8. }))
+                    .mx(px(palette.voice_mx))
+                    .mt(px(palette.voice_mt))
+                    .px(px(palette.voice_px))
                     .py(px(8.))
                     .gap(px(2.))
-                    .rounded(px(if onyx { 6. } else { 0. }))
+                    .rounded(px(palette.voice_radius))
                     .border_1()
-                    .border_color(rgb(if onyx { palette.line } else { palette.elevated }))
-                    .bg(rgb(if onyx { palette.chat } else { palette.elevated }))
+                    .border_color(rgb(palette.voice_border))
+                    .bg(rgb(palette.voice_bg))
                     .child(
                         h_flex()
                             .items_center()
@@ -2238,17 +2464,13 @@ impl RencordWindow {
                                 div()
                                     .text_size(px(12.))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(rgb(label_color))
-                                    .font_family(if onyx { "JetBrains Mono" } else { "Figtree" })
+                                    .text_color(rgb(palette.voice_label))
+                                    .font_family(palette.font_meta)
                                     .child("Voice Connected"),
                             )
-                            .child(hang_up_button(view)),
+                            .child(hang_up_button(view, palette)),
                     )
-                    .child(paint(
-                        "voice",
-                        if onyx { 0xc5c8de } else { palette.muted },
-                        12.,
-                    ))
+                    .child(paint("voice", palette.voice_meta, 12.))
                     .child(waveform(if onyx { palette.accent } else { palette.link }))
                     .child(meta(
                         format!("{} ms  ·  0.2% plc", report.target_ms),
@@ -2261,8 +2483,8 @@ impl RencordWindow {
         column.child(
             h_flex()
                 .h(px(52.))
-                .pl(px(if onyx { 10. } else { 8. }))
-                .pr(px(if onyx { 6. } else { 8. }))
+                .pl(px(palette.dock_pl))
+                .pr(px(palette.dock_pr))
                 .gap(px(6.))
                 .items_center()
                 .border_t_1()
@@ -2275,7 +2497,7 @@ impl RencordWindow {
                         .overflow_hidden()
                         .child(
                             div()
-                                .text_size(px(if onyx { 13. } else { 14. }))
+                                .text_size(px(palette.dock_name))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(palette.text))
                                 .child(user_name.to_owned()),
@@ -2411,10 +2633,9 @@ impl RencordWindow {
                 )
             })
             .unwrap_or_else(|| "Join voice to fill jitter stats.".into());
-        overlay(
-            palette,
-            v_flex()
-                .w(px(520.))
+        v_flex()
+                .w(px(880.))
+                .overflow_hidden()
                 .p(px(16.))
                 .gap_2()
                 .rounded(px(12.))
@@ -2433,16 +2654,18 @@ impl RencordWindow {
                         ),
                 )
                 .child(Label::new(format!(
-                    "Theme {} · {} · {} px",
-                    self.shell.prefs.theme.label(),
+                    "{} · {} · {} px · saturation {:.0}%",
+                    self.shell.prefs.theme_label(),
                     density.label(),
-                    self.shell.prefs.font_px
+                    self.shell.prefs.font_px,
+                    self.shell.prefs.saturation * 100.0
                 )))
                 .child(
                     h_flex()
                         .gap_2()
-                        .child(small_button(this.clone(), "theme", "Theme", |view, cx| {
+                        .child(small_button(this.clone(), "theme", "Next theme", |view, cx| {
                             view.shell.cycle_theme();
+                            view.shell.save_appearance();
                             cx.notify();
                         }))
                         .child(small_button(this.clone(), "layout", "Layout", |view, cx| {
@@ -2485,6 +2708,13 @@ impl RencordWindow {
                     "Reading {}",
                     self.reading_anchor.as_str()
                 )))
+                .child(appearance_controls(
+                    this.clone(),
+                    palette,
+                    &self.theme_code,
+                    &self.shown,
+                    self.token_index,
+                ))
                 .child(Label::new("Input device"))
                 .child(device_list(this.clone(), inputs, chosen_in, true, palette))
                 .child(Label::new("Output device"))
@@ -2539,9 +2769,396 @@ impl RencordWindow {
                             "Go Live defaults to 720p30. Higher presets are a request, not a grant. Nitro gate in the UI is {}. There is no purchase surface.",
                             rencord_media::nitro_gate_in_ui()
                         ))),
+                )
+    }
+}
+
+fn appearance_controls(
+    view: Entity<RencordWindow>,
+    palette: Palette,
+    code: &Entity<InputState>,
+    theme: &rencord_desktop::Theme,
+    token_index: usize,
+) -> impl IntoElement {
+    let mut presets = h_flex().gap_1().flex_wrap();
+    for mode in rencord_desktop::ThemeMode::ALL {
+        let button = view.clone();
+        presets = presets.child(small_button(
+            button,
+            mode.id(),
+            mode.label(),
+            move |window, cx| {
+                window.choose_preset(mode);
+                cx.notify();
+            },
+        ));
+    }
+    let mut swatches = h_flex().gap_1().flex_wrap();
+    for (index, hex) in rencord_theme::EDITOR_SWATCHES.iter().enumerate() {
+        let hex = *hex;
+        let button = view.clone();
+        swatches = swatches.child(
+            div()
+                .id(SharedString::from(format!("swatch-{index}")))
+                .size(px(22.))
+                .rounded(px(4.))
+                .bg(rgb(hex))
+                .border_1()
+                .border_color(rgb(palette.line))
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
+                    button.update(cx, |window, cx| {
+                        window.recolor(hex, index % 2 == 1);
+                        cx.notify();
+                    });
+                }),
+        );
+    }
+    let keys = rencord_theme::Colors::keys();
+    let token_name = keys
+        .get(token_index % keys.len().max(1))
+        .copied()
+        .unwrap_or("accent");
+    let token_hex = theme
+        .colors
+        .get(token_name)
+        .map(|color| color.to_hex())
+        .unwrap_or_default();
+    v_flex()
+        .gap_2()
+        .child(Label::new("Appearance"))
+        .child(presets)
+        .child(
+            h_flex()
+                .gap_2()
+                .flex_wrap()
+                .child(flag_button(
+                    view.clone(),
+                    "flag-system",
+                    "system",
+                    "Sync system",
+                ))
+                .child(flag_button(
+                    view.clone(),
+                    "flag-discord",
+                    "discord",
+                    "Follow Discord",
+                ))
+                .child(flag_button(
+                    view.clone(),
+                    "flag-contrast",
+                    "contrast",
+                    "High contrast",
+                ))
+                .child(flag_button(
+                    view.clone(),
+                    "flag-motion",
+                    "motion",
+                    "Reduced motion",
+                ))
+                .child(flag_button(
+                    view.clone(),
+                    "flag-colorblind",
+                    "colorblind",
+                    "Colorblind status",
+                ))
+                .child(flag_button(
+                    view.clone(),
+                    "flag-light",
+                    "light",
+                    "Light preset",
+                ))
+                .child(flag_button(
+                    view.clone(),
+                    "flag-dark",
+                    "dark",
+                    "Dark preset",
+                )),
+        )
+        .child(Label::new(
+            "Base and accent. Odd swatches set the accent and derive an accessible palette.",
+        ))
+        .child(swatches)
+        .child(
+            h_flex()
+                .gap_2()
+                .flex_wrap()
+                .child(small_button(
+                    view.clone(),
+                    "gradient",
+                    "Gradient",
+                    |window, cx| {
+                        window.toggle_gradient();
+                        cx.notify();
+                    },
+                ))
+                .child(small_button(
+                    view.clone(),
+                    "grain-up",
+                    "Grain +",
+                    |window, cx| {
+                        let _ = window.shell.prefs.ensure_custom();
+                        window.shell.prefs.bump_grain(1);
+                        window.shell.save_appearance();
+                        cx.notify();
+                    },
+                ))
+                .child(small_button(
+                    view.clone(),
+                    "grain-down",
+                    "Grain -",
+                    |window, cx| {
+                        let _ = window.shell.prefs.ensure_custom();
+                        window.shell.prefs.bump_grain(-1);
+                        window.shell.save_appearance();
+                        cx.notify();
+                    },
+                ))
+                .child(small_button(
+                    view.clone(),
+                    "font-face",
+                    "Font",
+                    |window, cx| {
+                        window.cycle_ui_font();
+                        cx.notify();
+                    },
+                ))
+                .child(small_button(
+                    view.clone(),
+                    "space-up",
+                    "Spacing +",
+                    |window, cx| {
+                        window.shell.prefs.bump_spacing(1);
+                        window.shell.save_appearance();
+                        cx.notify();
+                    },
+                ))
+                .child(small_button(
+                    view.clone(),
+                    "space-down",
+                    "Spacing -",
+                    |window, cx| {
+                        window.shell.prefs.bump_spacing(-1);
+                        window.shell.save_appearance();
+                        cx.notify();
+                    },
+                ))
+                .child(small_button(
+                    view.clone(),
+                    "radius-up",
+                    "Radius +",
+                    |window, cx| {
+                        window.shell.prefs.bump_radius(1);
+                        window.shell.save_appearance();
+                        cx.notify();
+                    },
+                ))
+                .child(small_button(
+                    view.clone(),
+                    "radius-down",
+                    "Radius -",
+                    |window, cx| {
+                        window.shell.prefs.bump_radius(-1);
+                        window.shell.save_appearance();
+                        cx.notify();
+                    },
+                ))
+                .child(small_button(
+                    view.clone(),
+                    "sat-down",
+                    "Less color",
+                    |window, cx| {
+                        window.shell.prefs.bump_saturation(-1);
+                        window.shell.save_appearance();
+                        cx.notify();
+                    },
+                ))
+                .child(small_button(
+                    view.clone(),
+                    "sat-up",
+                    "More color",
+                    |window, cx| {
+                        window.shell.prefs.bump_saturation(1);
+                        window.shell.save_appearance();
+                        cx.notify();
+                    },
+                )),
+        )
+        .child(
+            h_flex()
+                .gap_2()
+                .child(small_button(
+                    view.clone(),
+                    "advanced",
+                    "Advanced token",
+                    |window, cx| {
+                        window.advanced_tokens = !window.advanced_tokens;
+                        cx.notify();
+                    },
+                ))
+                .child(small_button(
+                    view.clone(),
+                    "token-next",
+                    "Next token",
+                    |window, cx| {
+                        let len = rencord_theme::Colors::keys().len();
+                        window.token_index = (window.token_index + 1) % len.max(1);
+                        cx.notify();
+                    },
+                ))
+                .child(small_button(
+                    view.clone(),
+                    "token-lighter",
+                    "Lighter",
+                    |window, cx| {
+                        window.nudge_token(0.04);
+                        cx.notify();
+                    },
+                ))
+                .child(small_button(
+                    view.clone(),
+                    "token-darker",
+                    "Darker",
+                    |window, cx| {
+                        window.nudge_token(-0.04);
+                        cx.notify();
+                    },
+                )),
+        )
+        .child(Label::new(format!("Token {token_name} {token_hex}")))
+        .child(theme_preview(palette))
+        .child(Label::new(rencord_theme::warnings_text(theme)))
+        .child(Input::new(code))
+        .child(
+            h_flex()
+                .gap_2()
+                .child(small_button(
+                    view.clone(),
+                    "import-code",
+                    "Import",
+                    |window, cx| {
+                        let text = window.theme_code.read(cx).value().to_string();
+                        window.import_theme_code(&text);
+                        cx.notify();
+                    },
+                ))
+                .child(small_button(
+                    view.clone(),
+                    "export-code",
+                    "Copy code",
+                    |window, cx| {
+                        if let Ok(code) = window.shell.prefs.resolved(window.system_dark).to_code()
+                        {
+                            cx.write_to_clipboard(ClipboardItem::new_string(code));
+                            window.shell.note("Copied the theme code.");
+                        }
+                        cx.notify();
+                    },
+                ))
+                .child(small_button(
+                    view,
+                    "save-theme",
+                    "Save file",
+                    |window, cx| {
+                        window.save_theme_folder();
+                        window.shell.note("Saved the theme into the themes folder.");
+                        cx.notify();
+                    },
+                )),
+        )
+}
+
+fn flag_button(
+    view: Entity<RencordWindow>,
+    id: &'static str,
+    kind: &'static str,
+    label: &'static str,
+) -> impl IntoElement {
+    small_button(view, id, label, move |window, cx| {
+        window.toggle_pref(kind);
+        cx.notify();
+    })
+}
+
+fn theme_preview(palette: Palette) -> impl IntoElement {
+    h_flex()
+        .w_full()
+        .h(px(168.))
+        .rounded(px(palette.radius_panel))
+        .overflow_hidden()
+        .border_1()
+        .border_color(rgb(palette.line))
+        .bg(rgb(palette.app_bg))
+        .child(
+            v_flex()
+                .w(px(92.))
+                .h_full()
+                .bg(rgb(palette.sidebar))
+                .p(px(8.))
+                .gap_1()
+                .child(paint("general", palette.text, 12.))
+                .child(paint("voice", palette.muted, 12.)),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .h_full()
+                .bg(rgb(palette.chat))
+                .p(px(8.))
+                .gap_1()
+                .child(paint("Ada", palette.text, 13.))
+                .child(
+                    div()
+                        .px(px(6.))
+                        .rounded(px(4.))
+                        .bg(rgb(palette.mention_bg))
+                        .child(paint("@Ada", palette.mention_fg, 12.)),
+                )
+                .child(
+                    div()
+                        .px(px(6.))
+                        .py(px(4.))
+                        .rounded(px(palette.radius_code))
+                        .bg(rgb(palette.code_bg))
+                        .border_1()
+                        .border_color(rgb(palette.line))
+                        .font_family(palette.font_mono)
+                        .child(paint("fn jitter()", palette.syntax_keyword, 12.)),
+                )
+                .child(
+                    h_flex()
+                        .h(px(28.))
+                        .px(px(6.))
+                        .items_center()
+                        .rounded(px(palette.voice_radius))
+                        .bg(rgb(palette.voice_bg))
+                        .border_1()
+                        .border_color(rgb(palette.voice_border))
+                        .child(paint("Voice", palette.voice_label, 11.)),
+                )
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .px(px(8.))
+                                .h(px(22.))
+                                .rounded(px(palette.radius_control))
+                                .bg(rgb(palette.accent))
+                                .child(paint("Send", palette.accent_text, 11.)),
+                        )
+                        .child(
+                            div()
+                                .px(px(8.))
+                                .h(px(22.))
+                                .rounded(px(palette.radius_control))
+                                .bg(rgb(palette.elevated))
+                                .border_1()
+                                .border_color(rgb(palette.line))
+                                .child(paint("Cancel", palette.text, 11.)),
+                        ),
                 ),
         )
-    }
 }
 
 fn overlay(palette: Palette, child: impl IntoElement) -> impl IntoElement {
@@ -2555,7 +3172,7 @@ fn overlay(palette: Palette, child: impl IntoElement) -> impl IntoElement {
                 .size_full()
                 .items_center()
                 .justify_center()
-                .bg(rgba(0x00000099u32))
+                .bg(rgba(palette.overlay))
                 .child(child),
         )
 }
@@ -2568,7 +3185,7 @@ fn category_header(
     palette: Palette,
 ) -> impl IntoElement {
     let mark = if open { "⌄" } else { "›" };
-    let onyx = matches!(palette.mode, ThemeMode::Onyx);
+    let onyx = palette.ink_chrome;
     div()
         .id(SharedString::from(format!("cat-{key}")))
         .px(px(8.))
@@ -2630,11 +3247,11 @@ fn channel_row(
     } else {
         ("hash", label.clone())
     };
-    let onyx = matches!(palette.mode, ThemeMode::Onyx);
+    let onyx = palette.ink_chrome;
     let color = if active {
         palette.text
     } else if onyx {
-        0xc5c8de
+        palette.text_secondary
     } else {
         palette.muted
     };
@@ -2643,18 +3260,14 @@ fn channel_row(
     } else {
         color
     };
-    let label_px = if onyx { 14. } else { 16. };
-    let glyph_px = if onyx { 15. } else { 20. };
+    let label_px = palette.channel_label;
+    let glyph_px = palette.channel_icon;
     let height = if kind == "dm" {
         row_px.max(32.)
     } else {
         row_px
     };
-    let (badge_bg, badge_fg) = if onyx {
-        (palette.accent, palette.accent_text)
-    } else {
-        (0xb91c1c, 0xffffff)
-    };
+    let (badge_bg, badge_fg) = (palette.badge_bg, palette.badge_fg);
     div()
         .id(SharedString::from(format!("channel-{id}")))
         .mx(px(8.))
@@ -2664,7 +3277,7 @@ fn channel_row(
         .overflow_hidden()
         .bg(rgb(bg))
         .border_l_3()
-        .border_color(rgb(if active && matches!(palette.mode, ThemeMode::Onyx) {
+        .border_color(rgb(if active && palette.ink_chrome {
             palette.accent
         } else {
             bg
@@ -2683,8 +3296,8 @@ fn channel_row(
                         .child(if kind == "dm" {
                             portrait_status(
                                 &title,
-                                if onyx { 20. } else { 24. },
-                                if onyx { 0x5abb72 } else { 0x23a559 },
+                                palette.dm_avatar,
+                                palette.status_online,
                                 palette.sidebar,
                             )
                             .into_any_element()
@@ -2712,7 +3325,7 @@ fn channel_row(
                         div()
                             .size(px(6.))
                             .rounded(px(3.))
-                            .bg(rgb(if onyx { 0x5abb72 } else { 0x23a559 }))
+                            .bg(rgb(palette.status_online))
                             .into_any_element(),
                     )
                 } else {
@@ -2752,7 +3365,7 @@ fn hint_bar(palette: Palette, text: String) -> impl IntoElement {
         .child(Label::new(text))
 }
 
-fn hang_up_button(view: Entity<RencordWindow>) -> impl IntoElement {
+fn hang_up_button(view: Entity<RencordWindow>, palette: Palette) -> impl IntoElement {
     h_flex()
         .id("voice-leave")
         .size(px(28.))
@@ -2761,8 +3374,8 @@ fn hang_up_button(view: Entity<RencordWindow>) -> impl IntoElement {
         .items_center()
         .justify_center()
         .cursor_pointer()
-        .bg(rgba(0xc8463c29))
-        .child(icon("phone", 14., 0xe05550))
+        .bg(rgba(palette.hangup_bg))
+        .child(icon("phone", 14., palette.hangup_fg))
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| {
                 this.shell.leave_voice();
@@ -2901,14 +3514,6 @@ enum Pill {
     Selected,
 }
 
-fn guild_fill(name: &str) -> u32 {
-    match name {
-        "Analytical Engines" => 0x3d4a6b,
-        "Difference Club" => 0x3a4150,
-        _ => 0x343844,
-    }
-}
-
 fn tile_initial(letter: &str, color: u32) -> impl IntoElement {
     div()
         .font_weight(FontWeight::SEMIBOLD)
@@ -2988,18 +3593,15 @@ fn rail_action(
     radius: f32,
     action: impl Fn(&mut RencordWindow, &mut Context<RencordWindow>) + 'static,
 ) -> impl IntoElement {
-    let ink = matches!(palette.mode, ThemeMode::Onyx);
-    let border = if ink { 0x1c1c38 } else { 0x23a55a };
-    let glyph_color = if ink { palette.muted } else { 0x23a55a };
     let tile_el = h_flex()
         .size(px(tile))
         .flex_shrink_0()
         .rounded(px(radius))
         .items_center()
         .justify_center()
-        .bg(rgb(if ink { 0x000000 } else { 0x1c1f26 }))
+        .bg(rgb(palette.add_bg))
         .border_1()
-        .border_color(rgb(border));
+        .border_color(rgb(palette.add_border));
     let tile_el = if dashed {
         tile_el.border_dashed()
     } else {
@@ -3009,7 +3611,7 @@ fn rail_action(
         .id(id)
         .cursor_pointer()
         .hover(|style| style.border_color(rgb(palette.text)))
-        .child(icon(glyph, 18., glyph_color))
+        .child(icon(glyph, 18., palette.add_glyph))
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| action(this, cx));
         });
@@ -3094,19 +3696,21 @@ fn guild_mark(name: &str) -> String {
         .to_uppercase()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn message_row(
     view: Entity<RencordWindow>,
     message: &Message,
     grouped: bool,
     reactions: Vec<rencord_desktop::Reaction>,
     palette: Palette,
+    theme: &rencord_desktop::Theme,
     font_px: f32,
     pin_actions: bool,
 ) -> impl IntoElement {
     let id = message.id;
-    let onyx = matches!(palette.mode, ThemeMode::Onyx);
+    let onyx = palette.ink_chrome;
     let name = message.author.display_name().to_string();
-    let role = role_color(&name, palette);
+    let role = role_color(&name, theme);
     let body_source = message.content.clone();
     let (reply_note, body_source) = if let Some(rest) = body_source.strip_prefix("replying to ") {
         let (target, text) = rest.split_once(':').unwrap_or(("a message", rest));
@@ -3142,11 +3746,7 @@ fn message_row(
                 )
                 .child(
                     div()
-                        .font_family(if matches!(palette.mode, ThemeMode::Onyx) {
-                            "JetBrains Mono"
-                        } else {
-                            "Figtree"
-                        })
+                        .font_family(palette.font_meta)
                         .text_size(px(11.))
                         .text_color(rgb(palette.muted))
                         .child(message.timestamp.clone()),
@@ -3205,7 +3805,11 @@ fn message_row(
             .child(paint("Jitter notes", palette.link, 14.))
             .child(paint(
                 "How the adaptive buffer stays under the idle budget.",
-                if onyx { 0xc5c8de } else { palette.text },
+                if onyx {
+                    palette.text_secondary
+                } else {
+                    palette.text
+                },
                 13.,
             ));
         body = body.child(if onyx {
@@ -3314,7 +3918,7 @@ fn message_row(
                 .rounded(px(8.))
                 .bg(rgb(palette.elevated))
                 .border_1()
-                .border_color(rgb(if onyx { 0x1c1c38 } else { palette.line }))
+                .border_color(rgb(palette.hover_border))
                 .opacity(if pin_actions { 1. } else { 0. })
                 .group_hover(group, |style| style.opacity(1.))
                 .child(react_action(view.clone(), id, palette))
@@ -3327,7 +3931,7 @@ fn message_row(
                     palette,
                 ))
                 .child(link_action(view.clone(), id, palette))
-                .child(div().w(px(1.)).h(px(16.)).bg(rgb(0x1c1c38)))
+                .child(div().w(px(1.)).h(px(16.)).bg(rgb(palette.hover_divider)))
                 .child(delete_action(view, id, palette)),
         )
 }
@@ -3406,29 +4010,8 @@ fn icon_action(
         })
 }
 
-fn role_color(name: &str, palette: Palette) -> u32 {
-    if matches!(palette.mode, ThemeMode::Light) {
-        return match name {
-            "Ada" => 0x1d4ed8,
-            "Charles" => 0x15803d,
-            "Lovelace" => 0xc2410c,
-            _ => palette.text,
-        };
-    }
-    if matches!(palette.mode, ThemeMode::Onyx) {
-        return match name {
-            "Ada" => 0xa8b0e0,
-            "Charles" => 0x7ecca0,
-            "Lovelace" => 0xc4a6f0,
-            _ => palette.text,
-        };
-    }
-    match name {
-        "Ada" => 0xa8b0d4,
-        "Charles" => 0x8fb89a,
-        "Lovelace" => 0xc4a48a,
-        _ => palette.text,
-    }
+fn role_color(name: &str, theme: &rencord_desktop::Theme) -> u32 {
+    rencord_desktop::role_color(name, theme).to_u32()
 }
 
 fn delete_action(view: Entity<RencordWindow>, id: Snowflake, palette: Palette) -> impl IntoElement {
@@ -3443,15 +4026,7 @@ fn delete_action(view: Entity<RencordWindow>, id: Snowflake, palette: Palette) -
         .cursor_pointer()
         .aria_label("Delete")
         .hover(move |style| style.bg(rgb(hover)))
-        .child(icon(
-            "trash",
-            15.,
-            if matches!(palette.mode, ThemeMode::Onyx) {
-                0xd46a5c
-            } else {
-                palette.danger
-            },
-        ))
+        .child(icon("trash", 15., palette.text_danger))
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| {
                 if let Some(message) = this.shell.delete_local(id) {
@@ -3499,7 +4074,7 @@ fn code_block(
     let copy_text = text.clone();
     let copy_group = SharedString::from(format!("code-copy-{id}-{index}"));
     let copy_hover = copy_group.clone();
-    let onyx = matches!(palette.mode, ThemeMode::Onyx);
+    let onyx = palette.ink_chrome;
     let mut source: Vec<&str> = text.split('\n').collect();
     if source.last().is_some_and(|line| line.is_empty()) {
         source.pop();
@@ -3587,14 +4162,14 @@ fn highlight_code_line(line: &str, palette: Palette) -> StyledText {
         let keyword = KEYWORDS.contains(&token);
         let numeric = !token.is_empty() && token.chars().all(|ch| ch.is_ascii_digit());
         text.push_str(token);
-        let mut font = font("JetBrains Mono");
+        let mut font = font(palette.font_mono);
         if keyword {
             font.weight = FontWeight::BOLD;
         }
         let color = if keyword {
-            palette.link
-        } else if numeric && matches!(palette.mode, ThemeMode::Onyx) {
-            0xc4a6f0
+            palette.syntax_keyword
+        } else if numeric {
+            palette.syntax_number
         } else {
             palette.text
         };
@@ -3779,20 +4354,12 @@ fn collect_plain(inlines: &[Inline], out: &mut String) {
 }
 
 fn apply_kit_theme(palette: &Palette, cx: &mut App) {
-    let mode = if matches!(palette.mode, ThemeMode::Light) {
-        "light"
-    } else {
-        "dark"
-    };
+    let mode = if palette.light { "light" } else { "dark" };
     let hex = |color: u32| format!("#{color:06X}");
     let value = serde_json::json!({
         "name": "Rencord",
         "mode": mode,
-            "font.family": if matches!(palette.mode, ThemeMode::Onyx) {
-                "Inter"
-            } else {
-                "Figtree"
-            },
+            "font.family": palette.font_ui,
         "font.size": 15,
         "colors": {
             "background": hex(palette.chat),
@@ -3824,7 +4391,7 @@ fn window_icon() -> std::sync::Arc<image::RgbaImage> {
 }
 
 /// Rail mark. SVG would be tinted as one color, so this is the 32 px raster.
-fn rail_hexwave(ink: u32) -> impl IntoElement {
+fn rail_hexwave(ink: u32, accent: u32) -> impl IntoElement {
     let rgba = rencord_desktop::rail_hexwave_rgba(ink);
     let mut png = Vec::new();
     image::codecs::png::PngEncoder::new(&mut png)
@@ -3849,11 +4416,11 @@ fn rail_hexwave(ink: u32) -> impl IntoElement {
                 .top(px(11.))
                 .w(px(3.))
                 .h(px(8.))
-                .bg(rgb(0x004f6bff)),
+                .bg(rgb(accent)),
         )
 }
 
-/// Hexwave body in `ink` (the theme text color). The `#4F6BFF` bar is left as drawn.
+/// Hexwave body in `ink` (the theme text color). The accent bar stays as drawn in the mark.
 fn hexwave_mark(size: f32, ink: u32) -> Svg {
     let colored =
         rencord_desktop::hexwave_svg_for_px(size).replace("currentColor", &format!("#{ink:06X}"));
@@ -4082,14 +4649,14 @@ fn discord_columns(
     if plan.rail > 0.0 && plan.channels > 0.0 {
         row = row
             .child(
-                panel(palette, palette.rail)
+                hairline(panel(palette, palette.rail), palette, Hairline::Right)
                     .w(px(plan.rail))
                     .flex_shrink_0()
                     .child(rail),
             )
             .child(column_gap(gap))
             .child(
-                panel(palette, palette.sidebar)
+                hairline(panel(palette, palette.sidebar), palette, Hairline::Right)
                     .w(px(plan.channels))
                     .flex_shrink_0()
                     .child(sidebar),
@@ -4105,7 +4672,7 @@ fn discord_columns(
     } else if plan.rail > 0.0 {
         row = row
             .child(
-                panel(palette, palette.rail)
+                hairline(panel(palette, palette.rail), palette, Hairline::Right)
                     .w(px(plan.rail))
                     .flex_shrink_0()
                     .child(rail),
@@ -4117,7 +4684,7 @@ fn discord_columns(
     } else if plan.channels > 0.0 {
         row = row
             .child(
-                panel(palette, palette.sidebar)
+                hairline(panel(palette, palette.sidebar), palette, Hairline::Right)
                     .w(px(plan.channels))
                     .flex_shrink_0()
                     .child(sidebar),
@@ -4160,7 +4727,7 @@ fn discord_columns(
                 view.clone(),
             ))
             .child(
-                panel(palette, palette.members)
+                hairline(panel(palette, palette.members), palette, Hairline::Left)
                     .w(px(plan.members))
                     .flex_shrink_0()
                     .child(people),
@@ -4282,18 +4849,42 @@ fn discord_columns(
     shell.into_any_element()
 }
 
+enum Hairline {
+    Right,
+    Left,
+}
+
+fn hairline(panel: gpui_kit::Div, palette: Palette, side: Hairline) -> gpui_kit::Div {
+    if palette.shell_gap > 0.5 || palette.radius_panel > 0.5 {
+        return panel;
+    }
+    match side {
+        Hairline::Right => panel.border_r_1().border_color(rgb(palette.line)),
+        Hairline::Left => panel.border_l_1().border_color(rgb(palette.line)),
+    }
+}
+
 fn panel(palette: Palette, fill: u32) -> gpui_kit::Div {
-    div()
-        .h_full()
-        .rounded(px(if matches!(palette.mode, ThemeMode::Onyx) {
-            8.
-        } else {
-            12.
-        }))
-        .overflow_hidden()
-        .bg(rgb(fill))
-        .border_1()
-        .border_color(rgb(palette.line))
+    let floating =
+        palette.shell_gap > 0.5 || palette.radius_panel > 0.5 || palette.shadow_blur > 0.5;
+    let mut panel = div().h_full().overflow_hidden().bg(rgb(fill));
+    if floating {
+        panel = panel
+            .rounded(px(palette.radius_panel))
+            .border_1()
+            .border_color(rgb(palette.line));
+    }
+    if palette.shadow_blur > 0.5 {
+        panel.shadow(vec![BoxShadow::new(
+            px(0.),
+            px(palette.shadow_y),
+            rgba(palette.shadow).into(),
+        )
+        .blur_radius(px(palette.shadow_blur))
+        .spread_radius(px(palette.shadow_spread))])
+    } else {
+        panel
+    }
 }
 
 fn new_messages_banner(palette: Palette) -> impl IntoElement {
@@ -4339,11 +4930,7 @@ fn meta(text: impl Into<String>, color: u32, size: f32, palette: Palette) -> imp
         .text_size(px(size))
         .text_color(rgb(color))
         .line_height(px(size + 3.))
-        .font_family(if matches!(palette.mode, ThemeMode::Onyx) {
-            "JetBrains Mono"
-        } else {
-            "Figtree"
-        })
+        .font_family(palette.font_meta)
         .child(text.into())
 }
 
@@ -4396,7 +4983,7 @@ fn rich_inlines(inlines: &[Inline], palette: Palette, font_px: f32) -> impl Into
                 return;
             }
             text.push_str(chunk);
-            let mut face = font("Inter");
+            let mut face = font(palette.font_ui);
             face.weight = weight;
             runs.push(TextRun {
                 len: chunk.len(),
@@ -4410,7 +4997,7 @@ fn rich_inlines(inlines: &[Inline], palette: Palette, font_px: f32) -> impl Into
     );
     if text.is_empty() {
         text.push(' ');
-        let mut face = font("Inter");
+        let mut face = font(palette.font_ui);
         face.weight = FontWeight::NORMAL;
         runs.push(TextRun {
             len: 1,
@@ -4421,7 +5008,7 @@ fn rich_inlines(inlines: &[Inline], palette: Palette, font_px: f32) -> impl Into
             strikethrough: None,
         });
     }
-    let onyx = matches!(palette.mode, ThemeMode::Onyx);
+    let onyx = palette.ink_chrome;
     div()
         .w_full()
         .min_w(px(0.))
@@ -4448,13 +5035,7 @@ fn walk_inlines(
             Inline::Link { text, .. } => push(text, palette.link, weight, None),
             Inline::Mention { id } => {
                 let label = mention_label(id);
-                let (foreground, wash) = if matches!(palette.mode, ThemeMode::Onyx) {
-                    (palette.link, 0x101533)
-                } else if matches!(palette.mode, ThemeMode::Light) {
-                    (0x1d4ed8, palette.ping)
-                } else {
-                    (0xffffff, palette.ping)
-                };
+                let (foreground, wash) = (palette.mention_fg, palette.mention_bg);
                 push(&label, foreground, FontWeight::SEMIBOLD, Some(wash));
             }
         }

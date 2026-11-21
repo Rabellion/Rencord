@@ -1,0 +1,97 @@
+version = 1
+name = "Harbor"
+id = "harbor"
+mode = "dark"
+chrome = "classic"
+derive = true
+base = "#10243A"
+accent = "#7EB6FF"
+
+[colors]
+accent = "#7EB6FF"
+"accent.fg" = "#000000"
+"bg.add" = "#0B1F35"
+"bg.badge" = "#B91C1C"
+"bg.base" = "#0B1F35"
+"bg.chat" = "#10243A"
+"bg.elevated" = "#1C3147"
+"bg.hangup" = "#F23F4329"
+"bg.home" = "#2A2E38"
+"bg.home.active" = "#7EB6FF"
+"bg.hover" = "#1A2E45"
+"bg.input" = "#1F334A"
+"bg.members" = "#162A41"
+"bg.mention" = "#254161"
+"bg.overlay" = "#00000099"
+"bg.rail" = "#0B1F35"
+"bg.reaction" = "#1C3147"
+"bg.reaction.mine" = "#254161"
+"bg.selected" = "#21364D"
+"bg.sidebar" = "#162A41"
+"bg.stage" = "#000000"
+"bg.sunken" = "#162A41"
+"bg.voice" = "#1C3147"
+"border.accent" = "#7EB6FF"
+"border.add" = "#23A559"
+"border.hairline" = "#334559"
+"border.home" = "#2A2E38"
+"border.home.active" = "#7EB6FF"
+"border.hover" = "#334559"
+"border.strong" = "#4D5D6F"
+"border.voice" = "#1C3147"
+danger = "#F23F43"
+pill = "#FFFFFF"
+positive = "#23A559"
+shadow = "#00000000"
+"status.dnd" = "#F23F43"
+"status.idle" = "#F0B232"
+"status.offline" = "#8B8F98"
+"status.online" = "#23A559"
+"syntax.keyword" = "#C2DCFF"
+"syntax.number" = "#F2F3F5"
+"text.add" = "#23A559"
+"text.badge" = "#FFFFFF"
+"text.danger" = "#F23F43"
+"text.faint" = "#8D9AA9"
+"text.hangup" = "#F23F43"
+"text.home" = "#F2F3F5"
+"text.home.active" = "#FFFFFF"
+"text.link" = "#C2DCFF"
+"text.mention" = "#FFFFFF"
+"text.muted" = "#949EAA"
+"text.positive" = "#23A559"
+"text.primary" = "#F2F3F5"
+"text.secondary" = "#B4BBC4"
+"text.voice" = "#949EAA"
+
+[metrics]
+font_ui = "Figtree"
+font_mono = "JetBrains Mono"
+font_meta = "Figtree"
+font_scale = 1.0
+radius_scale = 1.0
+message_spacing = 1.0
+saturation = 1.0
+gap = 12.0
+rail_width = 72.0
+tile_size = 48.0
+radius_tile = 12.0
+radius_panel = 12.0
+radius_control = 6.0
+message_py = 8.0
+message_gap = 16.0
+shadow_blur = 0.0
+shadow_y = 0.0
+
+[background]
+kind = "gradient"
+angle = 148.0
+stops = [
+    "#10243A",
+    "#1A1048",
+    "#12324A",
+]
+grain = 0.019999999552965164
+image = ""
+blur = 0.0
+dim = 0.0

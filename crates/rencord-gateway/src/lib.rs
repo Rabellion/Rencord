@@ -42,6 +42,8 @@ pub enum GatewayEvent {
         session_id: String,
         user: User,
         guild_ids: Vec<Snowflake>,
+        discord_theme: Option<String>,
+        discord_client_theme: Option<String>,
     },
     MessageCreate(Message),
     MessageUpdate(Message),
@@ -234,6 +236,14 @@ fn decode_dispatch(name: &str, data: Value) -> Result<Option<GatewayEvent>, Gate
                 session_id: ready.session_id,
                 user: ready.user,
                 guild_ids: ready.guilds.into_iter().map(|guild| guild.id).collect(),
+                discord_theme: ready
+                    .user_settings
+                    .as_ref()
+                    .and_then(|settings| settings.theme.clone()),
+                discord_client_theme: ready
+                    .user_settings
+                    .as_ref()
+                    .and_then(|settings| settings.client_theme.clone()),
             })
         }
         "MESSAGE_DELETE" => {
@@ -387,7 +397,11 @@ mod tests {
                 session_id,
                 user,
                 guild_ids,
+                discord_theme,
+                discord_client_theme,
             } => {
+                assert!(discord_theme.is_none());
+                assert!(discord_client_theme.is_none());
                 assert_eq!(session_id, "sess");
                 assert_eq!(user.username, "ada");
                 assert_eq!(guild_ids[0].get(), 100);

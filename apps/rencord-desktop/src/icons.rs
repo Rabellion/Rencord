@@ -33,7 +33,7 @@ pub fn rail_home_glyph_px(tile: f32) -> f32 {
 
 /// 32×32 RGBA of the rail Hexwave. GPUI paints SVG as a one-color mask, so
 /// the blurple bar has to be real pixels. Bars are integer rectangles: a 3 px
-/// stem, a 2 px bar, a 3×8 `#4F6BFF` third bar, and a 2 px bar, each separated
+/// stem, a 2 px bar, a 3×8 accent third bar, and a 2 px bar, each separated
 /// by a 1 px gap.
 pub fn rail_hexwave_rgba(ink: u32) -> Vec<u8> {
     const PX: usize = 32;
@@ -144,7 +144,7 @@ mod tests {
     fn home_glyph_uses_the_four_bar_mark_and_the_small_cut_under_24() {
         assert_eq!(rail_home_glyph_px(44.0), 32.0);
         let mark = hexwave_svg_for_px(72.0);
-        assert!(mark.contains("#4F6BFF"));
+        assert!(mark.contains("#4F6BFF")); // hex-lint-allow: brand asset, not a painted UI color
         assert!(mark.contains("currentColor"));
         let rgba = rail_hexwave_rgba(0x00_ED_EE_F7);
         assert_eq!(rgba.len(), 32 * 32 * 4);
@@ -171,7 +171,7 @@ mod tests {
         assert_eq!(blue_hole, 3 * 8);
         let small = hexwave_svg_for_px(24.0);
         assert!(small.contains("Rencord tray icon"));
-        assert!(!small.contains("#4F6BFF"));
+        assert!(!small.contains("#4F6BFF")); // hex-lint-allow: brand asset, not a painted UI color
         assert!(hexwave_svg_for_px(16.0).contains("Rencord tray icon"));
     }
 }
