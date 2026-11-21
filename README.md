@@ -94,7 +94,7 @@ Honest status for this repository. "Implemented" means the code path and tests e
 | Markdown | Implemented | Headings, quotes, fenced code, bold, italic, inline code, links, mentions, spoilers. A fenced block keeps its lines, a monospace face, a background, and a Copy button. |
 | Sending messages | Implemented locally; REST client tested against a mock | `POST /channels/{id}/messages` exists. The demo composer appends locally. A live send was not verified. |
 | Gateway live updates | Implemented against a local socket | Identify, heartbeat, `READY`, `MESSAGE_CREATE`. After the socket drops, the client reconnects and sends Resume with the saved session id and sequence. Not verified against Discord's gateway. |
-| Voice join, audio in and out | Partial | `LiveCall` speaks the voice gateway and UDP against a local stub: identify or resume, IP discovery, select protocol, `aead_xchacha20_poly1305_rtpsize`, speaking, and a DAVE prepare / transition-ready exchange. Encrypted Opus is echoed through the adaptive jitter buffer. Mute, deafen, and per-SSRC gain are in that path. **Join voice** still runs the loopback, then opens the default cpal devices. Settings lists device names and remembers the choice; that name is not yet passed into cpal. A live Discord voice server was not used. |
+| Voice join, audio in and out | Partial | `LiveCall` speaks the voice gateway and UDP against a local stub: identify or resume, IP discovery, select protocol, `aead_xchacha20_poly1305_rtpsize`, speaking, and a DAVE prepare / transition-ready exchange. Encrypted Opus is echoed through the adaptive jitter buffer. Mute, deafen, and per-SSRC gain are in that path. **Join voice** still runs the loopback, then opens cpal. Settings lists device names, remembers the choice, and passes that name into cpal. A missing device falls back to the default. A live Discord voice server was not used. |
 | DAVE (E2EE) | Implemented | `davey` 0.2. Two-member MLS encrypt/decrypt test. Opcode routing keeps the transport up when a welcome fails. |
 | Adaptive jitter buffer | Implemented | See [Voice](#voice). |
 | Screen share / camera / Go Live | In progress | Worker, OpenH264 encode and decode, RTP, DAVE wrap, A/V drift math, and `--golive` screens. The Linux path calls ScreenCast and PipeWire, including a monitor-audio stream. This machine has no session bus and no PipeWire daemon, so no pixels or samples are copied. Hardware encoders are probed and return `NotLinked`. |
@@ -284,6 +284,123 @@ The UI does not embed egui. Protocol crates do not depend on GPUI.
 | 6. Go Live | In progress | OpenH264 emits and decodes H.264. A loopback test captures a synthetic frame, encodes it, packetizes RTP, wraps DAVE, and presents the decoded picture. `VideoEncoder` in `rencord-media` is the stable 8/10-bit trait (`EncodeFrame.bit_depth`, `luma10`, `EncodeError::Unsupported10Bit` or `NotLinked`) documented in `crates/rencord-media/src/encoder.rs`. `rencord-hdr` keeps its own `HdrEncoder`. Linux calls xdg-desktop-portal ScreenCast and a PipeWire video plus monitor-audio stream. Windows enumerates DXGI under `cfg(windows)`. macOS `dlopen`s ScreenCaptureKit under `cfg(macos)`. None of those copied a frame on this Linux machine: no session bus, no PipeWire daemon, no `/dev/dri`. NVENC, AMF, oneVPL, VA-API, and VideoToolbox are probed and `HardwareEncoder::encode` returns `NotLinked`. 120 fps is offered only when the display reports that refresh and the encoder sustains the budget. |
 | 7. HDR between Rencord users (Milestone 5) | GPU shader linked; hardware codec not | wgpu runs the BT.2390 compute shader on Vulkan, Metal, or D3D12 and falls back to the CPU. The shader submit leaves the storage buffer on the GPU. `SoftwareFrameSink` maps it once for the CPU luma encoder. A GPU encoder sink would keep the buffer. DXGI `R16G16B16A16_FLOAT` and `R10G10B10A2`, ScreenCaptureKit 10-bit, and PipeWire P010 are classified. Send-on attaches an RHDR sidecar with HDR10 SEI through `Hdr10Encoder`; the NVENC/AMF/QSV/VideoToolbox/VA-API implementations of that trait return not-linked. D3D11VA, VideoToolbox, and VA-API decode are not opened. The swapchain format is chosen (`Rgb10a2Unorm` or `Rgba16Float`) and no HDR surface is created. Lavapipe, no readback, measured 34.0 ms at 1080p and 182 ms at 4K, which misses the 2 ms / 4 ms mid-GPU budget. `cargo run --release -p rencord-hdr --example tonemap-bench` is the owner check. [docs/design/HDR.md](docs/design/HDR.md). |
 | 8. Files over the attachment cap | Implemented | Discord enforces the per-file cap on the server. This client cannot lift it. The composer sheet plans against the API reference default of 20 MiB with no Nitro (the older account-caps table still says 10 MB; Nitro Basic 50 MiB; Nitro 1 GiB; boost level 2 is 50 MiB and level 3 is 100 MiB, server-only, taking the maximum). `attachment_size_limit` wins when the API sends it. Over the cap: compress (ffmpeg two-pass when a hardware encoder is on PATH, WebP or JPEG in-process, Opus for 48 kHz WAV), upload to Litterbox, Catbox, a 0x0.st-compatible host, or a presigned PUT / S3-compatible endpoint and post the link, or split into zip or 7z volumes under the cap. A Rencord message with the split note has a Reassemble control. Screenshots: [docs/design/onyx/big-file.png](docs/design/onyx/big-file.png), [docs/design/onyx/big-file-progress.png](docs/design/onyx/big-file-progress.png). |
+
+### Milestone checklist
+
+Checked items are on `main`. A line that only holds up against a stub or a mock says so. An empty box is not wired.
+
+#### M1 Shell & jitter
+
+- [x] GPUI window with guild, channel, and DM lists
+- [x] Markdown history, a SQLite copy, and a variable-height message list
+- [x] Local send from the demo composer
+- [x] REST send client (stub/mock only)
+- [x] Gateway identify, heartbeat, `READY`, `MESSAGE_CREATE`, and resume against a local socket (stub/mock only)
+- [x] Adaptive jitter buffer, compared with a fixed 40 ms window in a loss simulation (stub/mock only)
+- [ ] Measured on a live Discord call
+
+#### M2 Live voice path
+
+- [x] Voice websocket, UDP discovery, transport cipher, and speaking against a local stub (stub/mock only)
+- [x] DAVE prepare and transition-ready against that stub (stub/mock only)
+- [x] Two-member MLS encrypt and decrypt through davey
+- [x] Mute, deafen, and per-SSRC gain (stub/mock only)
+- [x] cpal devices: the stored name is passed in, and a missing device falls back to the default
+- [ ] Live Discord voice
+- [ ] **Join voice** calls `LiveCall`
+
+#### M3 UI/Onyx Ink
+
+- [x] Direction A is the default: grouped messages, hover actions, and a flush user panel
+- [x] Variable-height code blocks with Copy
+- [x] Reply, edit, delete, and reactions in the session; the REST client is tested against a mock (stub/mock only)
+- [x] Search across cached channels (`from:`, `in:`, `has:`, `before:`, `after:`), and a hit jumps to the message
+- [x] Window root is an AccessKit document with a label
+- [x] Ctrl/Cmd+K, density, and type size
+- [ ] Discord's search service
+- [ ] Screen-reader pass
+- [ ] Threads
+- [x] In-process notification sink (stub/mock only)
+- [ ] Desktop notifications
+- [ ] Tray and global hotkeys
+- [ ] Layouts B and C stay behind `--layout`
+
+#### M3b Responsive
+
+- [x] 16:9, 16:10, 21:9, 32:9, portrait, and small frames down to about 800×600
+- [x] Reading width is capped on wide and 4K frames
+- [x] Column edges drag, double-click resets, and widths are stored per aspect and scale
+- [x] Window restore is clamped to the visible monitors
+
+#### M3c Login (QR + Discord login page + fallbacks + keychain)
+
+- [x] QR remote auth, tested against scripted frames (stub/mock only)
+- [x] Discord login page in the system webview (WebView2, WKWebView, or WebKitGTK)
+- [x] Email, password, and MFA fallback (TOTP, SMS, and backup codes)
+- [x] A captcha hands off to the login window
+- [x] Token paste stays under Other options
+- [x] OS keychain: several accounts, switch, remove, and logout
+- [ ] A live phone confirm in CI
+
+#### Brand (Hexwave icon, README header, rail home button)
+
+- [x] Hexwave app icon for Windows, macOS, Linux, and the X11 window icon
+- [x] README header is the Waver tile
+- [x] Rail home button is the smooth Hexwave mark, including the tail and the `#4F6BFF` bar
+
+#### Themes (presets, custom, Appearance page)
+
+- [x] Presets, with Onyx Ink as the default
+- [x] Custom colors, gradients, and theme files
+- [x] Appearance page: preset cards, sync with the system, density, the custom editor, and the token list
+
+#### M4 Go Live
+
+- [x] OpenH264 encodes and decodes H.264
+- [x] Synthetic-frame loopback: RTP, DAVE wrap, and present (stub/mock only)
+- [x] `VideoEncoder` covers 8-bit and 10-bit and can return `Unsupported10Bit` or `NotLinked`
+- [x] Linux ScreenCast and the PipeWire video plus monitor-audio path are wired
+- [x] Windows enumerates DXGI outputs when built for Windows
+- [x] macOS opens ScreenCaptureKit with `dlopen` when built for macOS
+- [x] Onyx picker, viewer, and picture-in-picture use preview frames
+- [x] 120 fps is offered only when the display reports that refresh and the encoder sustains the budget
+- [ ] Real capture pixels
+- [ ] Hardware encoders (NVENC, AMF, oneVPL, VA-API, VideoToolbox) return `NotLinked`
+- [ ] Frames are sent to a Discord voice server
+
+#### M5 HDR
+
+- [x] BT.2390, Hable, and ACES on wgpu when an adapter exists, and on the CPU otherwise
+- [x] The shader result stays on the GPU; the software encoder maps it once
+- [x] DXGI float and 10-bit, ScreenCaptureKit 10-bit, and PipeWire P010 are classified
+- [x] Send-on builds an RHDR sidecar with HDR10 SEI
+- [ ] Main10 encode (NVENC, AMF, QSV, VideoToolbox, VA-API) returns not-linked
+- [ ] 10-bit decode (D3D11VA, VideoToolbox, VA-API)
+- [ ] An HDR swapchain surface
+- [ ] A mid-GPU time under 2 ms at 1080p and under 4 ms at 4K
+- [ ] A Discord SFU test, or proof that a 10-bit track was forwarded
+
+#### M6 Big files
+
+- [x] The sheet plans against the account cap, the boost tier, or `attachment_size_limit`
+- [x] Compress with ffmpeg when a hardware encoder is on `PATH`, or WebP, JPEG, and Opus in process
+- [x] Upload the link to Litterbox, Catbox, a 0x0.st-compatible host, or a presigned PUT
+- [x] Split into zip or 7z volumes, with Reassemble on the note
+
+#### M7 rest of app in Onyx Ink
+
+- [x] Rail, channel list, chat, members, dock, inputs, and code blocks
+- [x] Login, settings, the Go Live screens, and the big-file sheet
+- [ ] Layouts B and C as the product look
+
+#### Finish (perf, final README, single test checklist)
+
+- [x] Release measurements are recorded (first frame, idle RSS, channel switch, frame gap, binary size)
+- [ ] This machine did not report a refresh rate, and 120 Hz was not measured
+- [ ] Final README
+- [ ] Single test checklist
+- [ ] An installer, Flatpak, or Homebrew cask
+- [ ] macOS and Windows binaries from this environment
 
 The UI must not promise that Discord will accept a Go Live preset or a 10-bit stream. The capture worker publishes preview frames and tone-maps HDR to 8-bit. It does not send them to Discord. A 10-bit track stays off until a caller has proof the SFU forwarded HDR. There is no such proof in this repository.
 
