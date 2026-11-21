@@ -526,6 +526,17 @@ struct InkSpec {
     shadow: u32,
 }
 
+/// Label on a filled accent control. Discord uses white on blurple; Onyx Ink
+/// keeps black for `accent.fg` (banners and badges) and white here.
+pub(crate) fn on_accent(accent: Color, fallback: Color) -> Color {
+    let white = Color::rgb(0xffffff);
+    if contrast_ratio(white, accent) >= 3.0 {
+        white
+    } else {
+        fallback
+    }
+}
+
 fn colors(spec: InkSpec) -> Colors {
     let c = |hex| Color::rgb(hex);
     let accent = c(spec.accent);
@@ -620,6 +631,7 @@ fn colors(spec: InkSpec) -> Colors {
         border_hover: if onyx_ink { strong } else { line },
         accent,
         accent_fg: c(spec.accent_fg),
+        accent_on: on_accent(accent, c(spec.accent_fg)),
         danger,
         positive: online,
         status_online: online,
