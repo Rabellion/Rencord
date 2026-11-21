@@ -1,7 +1,7 @@
 //! The stream worker loop.
 //!
-//! `rencord-stream` runs this in its own process. The desktop process only
-//! sends [`ClientMessage`]s and reads frames from the shared map, so an
+//! The desktop process re-spawns its own executable with `--stream-worker`.
+//! It sends [`ClientMessage`]s and reads frames from the shared map, so an
 //! encoder stall cannot freeze the window or the voice thread.
 
 use crate::capture::{open_source, FrameSource};
@@ -204,11 +204,20 @@ pub struct WorkerClient {
 
 impl WorkerClient {
     pub fn spawn(bin: impl Into<PathBuf>) -> Result<Self, String> {
-        let mut child = std::process::Command::new(bin.into())
+        let mut command = std::process::Command::new(bin.into());
+        command
+            .arg(crate::STREAM_WORKER_ARG)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // CREATE_NO_WINDOW. The banner still arrives on the stdout pipe.
+            command.creation_flags(0x0800_0000);
+        }
+        let mut child = command
             .spawn()
-            .map_err(|err| format!("spawn rencord-stream: {err}"))?;
+            .map_err(|err| format!("spawn stream worker: {err}"))?;
         let stdout = child.stdout.take().ok_or("worker stdout missing")?;
         let mut reader = std::io::BufReader::new(stdout);
         let mut line = String::new();

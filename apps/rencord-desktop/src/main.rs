@@ -90,6 +90,17 @@ fn main() {
     if args.iter().any(|arg| arg == "--discord-login-window") {
         std::process::exit(rencord_auth::discord_login_window_main());
     }
+    if args.iter().any(|arg| arg == "--worker-check") {
+        println!("WORKER_CHECK {}", env!("CARGO_PKG_VERSION"));
+        println!("STREAM_WORKER {}", rencord_media::STREAM_WORKER_ARG);
+        return;
+    }
+    if args
+        .iter()
+        .any(|arg| arg == rencord_media::STREAM_WORKER_ARG)
+    {
+        std::process::exit(rencord_media::worker_main());
+    }
     let demo = args.iter().any(|arg| arg == "--demo");
     let bench = args.iter().any(|arg| arg == "--bench");
     let theme = args

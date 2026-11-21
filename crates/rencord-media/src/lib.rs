@@ -86,11 +86,14 @@ pub enum WorkerEvent {
     Failed { message: String },
 }
 
-/// Capture does not run inside the UI process. The stream worker is a
-/// separate binary.
+/// Capture does not run inside the UI process. The window re-spawns itself
+/// with [`STREAM_WORKER_ARG`] so a stall stays in the other process.
 pub fn stream_worker_running() -> bool {
     false
 }
+
+/// Hidden argument the shipping executable uses to enter [`worker_main`].
+pub const STREAM_WORKER_ARG: &str = "--stream-worker";
 
 /// Pull one preview frame. This does not open a portal or a GPU capturer.
 pub fn start_capture() -> Result<Frame, CaptureError> {
@@ -102,14 +105,5 @@ pub fn worker_executable() -> std::path::PathBuf {
     if let Ok(path) = std::env::var("RENCORD_STREAM_BIN") {
         return std::path::PathBuf::from(path);
     }
-    let mut path =
-        std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("rencord-stream"));
-    path.pop();
-    let name = if cfg!(windows) {
-        "rencord-stream.exe"
-    } else {
-        "rencord-stream"
-    };
-    path.push(name);
-    path
+    std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("rencord"))
 }
