@@ -65,45 +65,8 @@ pub use shm::FrameMap;
 pub use sync::{correction_samples, drift_us, is_system_monitor};
 pub use worker::{worker_main, WorkerClient};
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum WorkerCommand {
-    Start {
-        preset: StreamPreset,
-        pixel_path: PixelPath,
-        source_id: String,
-    },
-    Stop,
-    SetBitrate {
-        kbps: u32,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WorkerEvent {
-    Started,
-    Stopped,
-    FrameStats { fps: u32, bitrate_kbps: u32 },
-    Failed { message: String },
-}
-
-/// Capture does not run inside the UI process. The window re-spawns itself
-/// with [`STREAM_WORKER_ARG`] so a stall stays in the other process.
-pub fn stream_worker_running() -> bool {
-    false
-}
-
+/// Capture does not run inside the UI process. The window re-spawns itself with
+/// this argument so a stall stays in the other process.
+///
 /// Hidden argument the shipping executable uses to enter [`worker_main`].
 pub const STREAM_WORKER_ARG: &str = "--stream-worker";
-
-/// Pull one preview frame. This does not open a portal or a GPU capturer.
-pub fn start_capture() -> Result<Frame, CaptureError> {
-    let mut source = open_source("synthetic:desktop")?;
-    Ok(source.next_frame())
-}
-
-pub fn worker_executable() -> std::path::PathBuf {
-    if let Ok(path) = std::env::var("RENCORD_STREAM_BIN") {
-        return std::path::PathBuf::from(path);
-    }
-    std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("rencord"))
-}

@@ -15,7 +15,7 @@ use rencord_auth::{
 };
 use rencord_desktop::{stacks_login, Palette};
 use rencord_model::Token;
-use rencord_platform::{FileSecretStore, SecretStore};
+use rencord_platform::FileSecretStore;
 
 use super::net::{self, BootError, Bootstrap, GatewayLink};
 use super::RencordWindow;
