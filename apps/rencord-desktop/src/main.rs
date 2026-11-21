@@ -33,7 +33,7 @@ mod golive;
 mod hdr_ui;
 mod stub;
 use rencord_markdown::{parse, Block, Inline};
-use rencord_model::{Message, Snowflake};
+use rencord_model::{Attachment, Embed, Message, Reply, Snowflake, User};
 
 gpui_kit::actions!(
     rencord_ui,
@@ -80,6 +80,7 @@ fn big_file_outcome(output: &rencord_upload::JobOutput) -> String {
     }
 }
 
+mod images;
 mod login_view;
 mod net;
 mod voice_call;
@@ -474,6 +475,7 @@ struct RencordWindow {
     pinned_top: bool,
     following_tail: bool,
     followed_channel: Option<Snowflake>,
+    images: images::ImageCache,
     /// The channel the composer's placeholder was last written for.
     composer_for: Option<Snowflake>,
     reveal_hover: bool,
@@ -703,6 +705,15 @@ impl RencordWindow {
             pinned_top: false,
             following_tail: true,
             followed_channel: None,
+            images: {
+                let cache = images::ImageCache::default();
+                if demo {
+                    if let Some(picture) = bench_picture() {
+                        cache.seed("demo://bench", picture);
+                    }
+                }
+                cache
+            },
             composer_for: None,
             reveal_hover,
             golive,
@@ -1966,6 +1977,11 @@ impl RencordWindow {
         } else {
             palette.home_border
         };
+        let pictures = images::Pictures {
+            cache: self.images.clone(),
+            api: self.api.clone(),
+            owner: cx.entity().downgrade(),
+        };
         let mut rail = v_flex()
             .w(px(rail_w))
             .h_full()
@@ -2012,10 +2028,23 @@ impl RencordWindow {
             let mark = guild_mark(&guild.name);
             let active = selected_guild == Some(id);
             let view = this.clone();
+            // The server's own icon when it has one, otherwise its first letter.
+            let icon_picture =
+                rencord_desktop::guild_icon_url(id, guild.icon.as_deref(), (tile * 2.) as u32)
+                    .and_then(|url| pictures.picture(&url, 128, cx));
             let tile_colors = rencord_desktop::guild_tile(&guild.name, active, &theme);
             let fill = tile_colors.fill;
             let border = tile_colors.border;
             let letter = tile_colors.letter;
+            let icon_mark: AnyElement = match icon_picture {
+                Some(picture) => img(picture.image)
+                    .size(px(tile - 2.))
+                    .flex_shrink_0()
+                    .rounded(px(tile_radius))
+                    .object_fit(ObjectFit::Cover)
+                    .into_any_element(),
+                None => tile_initial(&mark, letter).into_any_element(),
+            };
             let guild_unread = self.shell.session.unread.iter().any(|channel_id| {
                 self.shell
                     .session
@@ -2040,7 +2069,7 @@ impl RencordWindow {
                 rail_w,
                 tile,
                 tile_radius,
-                tile_initial(&mark, letter),
+                icon_mark,
                 move |_, _, cx| {
                     view.update(cx, |this, cx| {
                         this.shell.session.select_guild(id);
@@ -2164,6 +2193,7 @@ impl RencordWindow {
                         false,
                         row_px,
                         false,
+                        None,
                     ));
                 }
             }
@@ -2204,6 +2234,7 @@ impl RencordWindow {
                     false,
                     row_px,
                     false,
+                    None,
                 ));
             }
         }
@@ -2226,6 +2257,7 @@ impl RencordWindow {
                     true,
                     row_px,
                     in_voice,
+                    None,
                 ));
             }
         }
@@ -2238,6 +2270,12 @@ impl RencordWindow {
         ));
         if dm_open {
             for channel in &dms {
+                // The demo keeps its illustrated people; a real DM shows the other
+                // person's avatar, or a letter until it loads.
+                let dm_avatar = (!self.shell.demo).then(|| match channel.recipients.first() {
+                    Some(user) => avatar(&pictures, user, palette.dm_avatar, false, palette, cx),
+                    None => letter_circle(&channel.name, palette.dm_avatar, palette),
+                });
                 nav = nav.child(channel_row(
                     this.clone(),
                     channel.id,
@@ -2248,6 +2286,7 @@ impl RencordWindow {
                     false,
                     row_px,
                     false,
+                    dm_avatar,
                 ));
             }
         }
@@ -2284,6 +2323,23 @@ impl RencordWindow {
         let list_theme = theme.clone();
         let list_entity = this.clone();
         let list_reactions = reactions.clone();
+        let list_env = RowEnv {
+            pictures: images::Pictures {
+                cache: self.images.clone(),
+                api: self.api.clone(),
+                owner: cx.entity().downgrade(),
+            },
+            me: self.shell.session.user.as_ref().map(|user| user.id),
+            demo: self.shell.demo,
+            channels: Arc::new(
+                self.shell
+                    .session
+                    .channels
+                    .iter()
+                    .map(|(id, channel)| (*id, channel.name.clone()))
+                    .collect(),
+            ),
+        };
         let reveal_hover = self.reveal_hover;
         let loading_older = self.loading_older == self.shell.session.selected_channel;
         let _density = density;
@@ -2302,7 +2358,7 @@ impl RencordWindow {
             });
         }
         let list_now = rencord_desktop::now_local();
-        let timeline = list(timeline_state, move |index, _window, _cx| {
+        let timeline = list(timeline_state, move |index, _window, cx| {
             let message_index = if loading_older {
                 if index == 0 {
                     return div()
@@ -2341,13 +2397,17 @@ impl RencordWindow {
                 list_reactions
                     .get(&message.id.get())
                     .cloned()
-                    .unwrap_or_default(),
+                    .unwrap_or_else(|| rencord_desktop::Reaction::from_message(&message)),
                 list_palette,
                 &list_theme,
                 font_px,
-                reveal_hover && message.content.contains("Mention"),
+                reveal_hover
+                    && list_env.demo
+                    && list_env.me.is_some_and(|me| message.mentions_user(me)),
                 &stamp,
                 reveal_hover,
+                &list_env,
+                cx,
             );
             if show_day {
                 v_flex()
@@ -2936,6 +2996,17 @@ impl RencordWindow {
         } else {
             palette.status_online
         };
+        let dock_avatar = match self.shell.session.user.clone() {
+            Some(user) if !self.shell.demo => {
+                let pictures = images::Pictures {
+                    cache: self.images.clone(),
+                    api: self.api.clone(),
+                    owner: cx.entity().downgrade(),
+                };
+                avatar(&pictures, &user, 32., false, palette, cx)
+            }
+            _ => portrait(user_name, 32.).into_any_element(),
+        };
         let mut column = v_flex().w_full().flex_shrink_0().bg(rgb(palette.sidebar));
         if let Some(report) = voice {
             let view = this.clone();
@@ -2984,7 +3055,7 @@ impl RencordWindow {
                 .border_t_1()
                 .border_color(rgb(if onyx { palette.line } else { palette.sidebar }))
                 .bg(rgb(palette.sidebar))
-                .child(portrait_status(user_name, 32., dot, palette.sidebar))
+                .child(status_badge(dock_avatar, 32., dot, palette.sidebar))
                 .child(
                     v_flex()
                         .flex_1()
@@ -3176,6 +3247,7 @@ fn channel_row(
     joins_voice: bool,
     row_px: f32,
     live_dot: bool,
+    avatar: Option<AnyElement>,
 ) -> impl IntoElement {
     let hover = palette.hover;
     let bg = if active {
@@ -3242,8 +3314,10 @@ fn channel_row(
                         .gap(px(6.))
                         .items_center()
                         .child(if kind == "dm" {
-                            portrait_status(
-                                &title,
+                            status_badge(
+                                avatar.unwrap_or_else(|| {
+                                    portrait(&title, palette.dm_avatar).into_any_element()
+                                }),
                                 palette.dm_avatar,
                                 palette.status_online,
                                 palette.sidebar,
@@ -3681,6 +3755,464 @@ fn timestamp_label(
     label
 }
 
+/// What a row needs besides the message: pictures, who "you" are, and channel
+/// names for `<#channel>` mentions.
+#[derive(Clone)]
+struct RowEnv {
+    pictures: images::Pictures,
+    me: Option<Snowflake>,
+    demo: bool,
+    channels: Arc<HashMap<Snowflake, String>>,
+}
+
+fn first_letter(name: &str) -> String {
+    name.chars()
+        .next()
+        .map(|letter| letter.to_uppercase().to_string())
+        .unwrap_or_default()
+}
+
+/// A user's avatar, or a letter in a circle while it loads or when it cannot load.
+fn avatar(
+    pictures: &images::Pictures,
+    user: &User,
+    size: f32,
+    demo: bool,
+    palette: Palette,
+    cx: &mut App,
+) -> AnyElement {
+    if demo {
+        return portrait(user.display_name(), size).into_any_element();
+    }
+    let url = rencord_desktop::avatar_url(user, (size * 2.) as u32);
+    match pictures.picture(&url, 128, cx) {
+        Some(picture) => img(picture.image)
+            .size(px(size))
+            .flex_shrink_0()
+            .rounded(px(size / 2.))
+            .object_fit(ObjectFit::Cover)
+            .into_any_element(),
+        None => letter_circle(user.display_name(), size, palette),
+    }
+}
+
+/// A letter in a circle, for a picture that has not loaded or cannot load.
+fn letter_circle(name: &str, size: f32, palette: Palette) -> AnyElement {
+    div()
+        .size(px(size))
+        .flex_shrink_0()
+        .rounded(px(size / 2.))
+        .bg(rgb(palette.elevated))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(size * 0.42))
+        .text_color(rgb(palette.muted))
+        .child(first_letter(name))
+        .into_any_element()
+}
+
+/// Opens a link from a message in the browser. Only web addresses are opened.
+fn open_link(url: &str, cx: &mut App) {
+    if url.starts_with("https://") || url.starts_with("http://") {
+        cx.open_url(url);
+    }
+}
+
+/// A line such as "Ada joined the server." for a message with no text of its own.
+fn system_row(
+    message: &Message,
+    stamp: &rencord_desktop::Presented,
+    palette: Palette,
+) -> AnyElement {
+    h_flex()
+        .w_full()
+        .px(px(16.))
+        .py(px(6.))
+        .gap(px(10.))
+        .items_center()
+        .child(
+            div()
+                .w(px(32.))
+                .flex()
+                .justify_end()
+                .text_size(px(16.))
+                .text_color(rgb(palette.status_online))
+                .child("\u{2192}"),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(14.))
+                .text_color(rgb(palette.text_secondary))
+                .child(rencord_desktop::system_text(message)),
+        )
+        .child(meta(stamp.short.clone(), palette.muted, 11., palette))
+        .into_any_element()
+}
+
+fn reply_header(reply: &Reply, env: &RowEnv, palette: Palette, cx: &mut App) -> AnyElement {
+    let preview = rencord_desktop::reply_preview(reply);
+    let mut line = h_flex()
+        .gap(px(6.))
+        .items_center()
+        .child(icon("reply", 14., palette.muted));
+    if let Some(author) = &reply.author {
+        line = line.child(avatar(&env.pictures, author, 16., env.demo, palette, cx));
+    }
+    if let Some(who) = preview.who {
+        line = line.child(
+            div()
+                .text_size(px(12.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(palette.text_secondary))
+                .child(format!("@{who}")),
+        );
+    }
+    line.child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_size(px(12.))
+            .text_color(rgb(palette.muted))
+            .child(preview.text),
+    )
+    .into_any_element()
+}
+
+/// A picture in a rounded frame that opens `link` when clicked. While the picture
+/// downloads, the frame keeps the size it will have and shows `label`.
+#[allow(clippy::too_many_arguments)]
+fn picture_frame(
+    key: SharedString,
+    picture: Option<images::Picture>,
+    known: (u32, u32),
+    label: &str,
+    link: &str,
+    max: (f32, f32),
+    palette: Palette,
+) -> AnyElement {
+    let (width, height) = match (&picture, known) {
+        (Some(picture), _) => {
+            rencord_desktop::fit_size(picture.width, picture.height, max.0, max.1)
+        }
+        (None, (width, height)) if width > 0 && height > 0 => {
+            rencord_desktop::fit_size(width, height, max.0, max.1)
+        }
+        _ => (max.0.min(320.), max.1.min(180.)),
+    };
+    let link = link.to_owned();
+    let frame = div()
+        .id(key)
+        .mt(px(4.))
+        .w(px(width))
+        .h(px(height))
+        .flex_shrink_0()
+        .rounded(px(8.))
+        .overflow_hidden()
+        .border_1()
+        .border_color(rgb(palette.line))
+        .bg(rgb(palette.elevated))
+        .cursor_pointer()
+        .on_click(move |_, _, cx| open_link(&link, cx));
+    match picture {
+        Some(picture) => frame
+            .child(
+                img(picture.image)
+                    .size_full()
+                    .rounded(px(8.))
+                    .object_fit(ObjectFit::Cover),
+            )
+            .into_any_element(),
+        None => frame
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(paint(label.to_owned(), palette.muted, 12.))
+            .into_any_element(),
+    }
+}
+
+/// A video is not played here: its preview frame, if there is one, and a link
+/// that opens it in the browser.
+fn video_card(
+    key: SharedString,
+    title: &str,
+    url: &str,
+    size: Option<u64>,
+    preview: Option<images::Picture>,
+    palette: Palette,
+) -> AnyElement {
+    let link = url.to_owned();
+    let surface = match preview {
+        Some(picture) => {
+            let (width, height) =
+                rencord_desktop::fit_size(picture.width, picture.height, 400., 300.);
+            div()
+                .w(px(width))
+                .h(px(height))
+                .rounded(px(8.))
+                .overflow_hidden()
+                .child(
+                    img(picture.image)
+                        .size_full()
+                        .rounded(px(8.))
+                        .object_fit(ObjectFit::Cover),
+                )
+                .into_any_element()
+        }
+        None => {
+            let label = match size {
+                Some(bytes) => {
+                    format!("{title}  \u{00B7}  {}", rencord_upload::format_bytes(bytes))
+                }
+                None => title.to_owned(),
+            };
+            div()
+                .w(px(400.))
+                .h(px(225.))
+                .rounded(px(8.))
+                .bg(rgb(palette.elevated))
+                .border_1()
+                .border_color(rgb(palette.line))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(paint(label, palette.muted, 12.))
+                .into_any_element()
+        }
+    };
+    v_flex()
+        .mt(px(4.))
+        .gap(px(4.))
+        .child(surface)
+        .child(paint(
+            "Video preview \u{00B7} playback opens in your browser",
+            palette.muted,
+            12.,
+        ))
+        .child(
+            div()
+                .id(key)
+                .cursor_pointer()
+                .text_size(px(13.))
+                .text_color(rgb(palette.link))
+                .child("Open video\u{2026}")
+                .on_click(move |_, _, cx| open_link(&link, cx)),
+        )
+        .into_any_element()
+}
+
+fn file_chip(key: SharedString, attachment: &Attachment, palette: Palette) -> AnyElement {
+    let link = attachment.url.clone();
+    h_flex()
+        .id(key)
+        .mt(px(4.))
+        .gap(px(10.))
+        .items_center()
+        .px(px(12.))
+        .py(px(8.))
+        .max_w(px(400.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(rgb(palette.line))
+        .bg(rgb(palette.elevated))
+        .cursor_pointer()
+        .child(icon("copy", 20., palette.muted))
+        .child(
+            v_flex()
+                .min_w_0()
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(14.))
+                        .text_color(rgb(palette.link))
+                        .child(attachment.filename.clone()),
+                )
+                .child(meta(
+                    rencord_upload::format_bytes(attachment.size),
+                    palette.muted,
+                    11.,
+                    palette,
+                )),
+        )
+        .on_click(move |_, _, cx| open_link(&link, cx))
+        .into_any_element()
+}
+
+fn attachment_view(
+    attachment: &Attachment,
+    message_id: Snowflake,
+    index: usize,
+    env: &RowEnv,
+    palette: Palette,
+    cx: &mut App,
+) -> AnyElement {
+    let key = SharedString::from(format!("att-{message_id}-{index}"));
+    let source = attachment
+        .proxy_url
+        .clone()
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| attachment.url.clone());
+    if attachment.is_image() {
+        let picture = env.pictures.picture(&source, 1024, cx);
+        return picture_frame(
+            key,
+            picture,
+            (
+                attachment.width.unwrap_or(0),
+                attachment.height.unwrap_or(0),
+            ),
+            &attachment.filename,
+            &attachment.url,
+            (400., 300.),
+            palette,
+        );
+    }
+    if attachment.is_video() {
+        return video_card(
+            key,
+            &attachment.filename,
+            &attachment.url,
+            Some(attachment.size),
+            None,
+            palette,
+        );
+    }
+    file_chip(key, attachment, palette)
+}
+
+/// A link preview. Returns `None` for an embed with nothing to show.
+fn embed_view(
+    embed: &Embed,
+    message_id: Snowflake,
+    index: usize,
+    env: &RowEnv,
+    palette: Palette,
+    cx: &mut App,
+) -> Option<AnyElement> {
+    let image = embed
+        .image
+        .as_ref()
+        .or(embed.thumbnail.as_ref())
+        .filter(|image| !image.best_url().is_empty());
+    let has_text = embed.title.is_some() || embed.description.is_some();
+    if !has_text && image.is_none() {
+        return None;
+    }
+    let key = SharedString::from(format!("embed-{message_id}-{index}"));
+    let link = embed.url.clone();
+    let picture = image.and_then(|image| env.pictures.picture(image.best_url(), 1024, cx));
+    let video = embed.video.is_some() || matches!(embed.kind.as_deref(), Some("video" | "gifv"));
+    // A direct link to a picture is shown as the picture alone.
+    if !has_text && !video {
+        let image = image?;
+        return Some(picture_frame(
+            key,
+            picture,
+            (image.width.unwrap_or(0), image.height.unwrap_or(0)),
+            "image",
+            link.as_deref().unwrap_or(&image.url),
+            (400., 300.),
+            palette,
+        ));
+    }
+    let bar = embed
+        .color
+        .map_or(palette.accent, |color| color & 0x00FF_FFFF);
+    let mut card = v_flex().gap(px(4.));
+    if let Some(name) = embed
+        .provider
+        .as_ref()
+        .and_then(|provider| provider.name.as_deref())
+        .filter(|name| !name.is_empty())
+    {
+        card = card.child(paint(name.to_owned(), palette.muted, 11.));
+    }
+    if let Some(title) = embed.title.as_deref().filter(|title| !title.is_empty()) {
+        let title = div()
+            .id(key.clone())
+            .text_size(px(14.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(rgb(palette.link))
+            .child(title.to_owned());
+        card = card.child(match link.clone() {
+            Some(url) => title
+                .cursor_pointer()
+                .on_click(move |_, _, cx| open_link(&url, cx))
+                .into_any_element(),
+            None => title.into_any_element(),
+        });
+    }
+    if let Some(text) = embed.description.as_deref().filter(|text| !text.is_empty()) {
+        card = card.child(
+            div()
+                .text_size(px(13.))
+                .line_height(px(18.))
+                .line_clamp(4)
+                .text_color(rgb(palette.text_secondary))
+                .child(text.to_owned()),
+        );
+    }
+    if let Some(picture) = picture {
+        let (width, height) = rencord_desktop::fit_size(picture.width, picture.height, 360., 240.);
+        card = card.child(
+            div()
+                .mt(px(4.))
+                .w(px(width))
+                .h(px(height))
+                .rounded(px(6.))
+                .overflow_hidden()
+                .child(
+                    img(picture.image)
+                        .size_full()
+                        .rounded(px(6.))
+                        .object_fit(ObjectFit::Cover),
+                ),
+        );
+    }
+    if video {
+        card = card.child(paint(
+            "Video preview \u{00B7} playback opens in your browser",
+            palette.muted,
+            12.,
+        ));
+        if let Some(url) = link {
+            card = card.child(
+                div()
+                    .id(SharedString::from(format!(
+                        "embed-open-{message_id}-{index}"
+                    )))
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .text_color(rgb(palette.link))
+                    .child("Open video\u{2026}")
+                    .on_click(move |_, _, cx| open_link(&url, cx)),
+            );
+        }
+    }
+    Some(
+        div()
+            .mt(px(4.))
+            .max_w(px(432.))
+            .rounded(px(6.))
+            .bg(rgb(palette.elevated))
+            .border_1()
+            .border_color(rgb(palette.line))
+            .child(
+                div()
+                    .border_l_4()
+                    .border_color(rgb(bar))
+                    .px(px(14.))
+                    .py(px(10.))
+                    .child(card),
+            )
+            .into_any_element(),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn message_row(
     view: Entity<RencordWindow>,
@@ -3693,29 +4225,25 @@ fn message_row(
     pin_actions: bool,
     stamp: &rencord_desktop::Presented,
     reveal_time: bool,
-) -> impl IntoElement {
+    env: &RowEnv,
+    cx: &mut App,
+) -> AnyElement {
+    if message.is_system() {
+        return system_row(message, stamp, palette);
+    }
     let id = message.id;
     let onyx = palette.ink_chrome;
     let name = message.author.display_name().to_string();
     let role = role_color(&name, theme);
-    let body_source = message.content.clone();
-    let (reply_note, body_source) = if let Some(rest) = body_source.strip_prefix("replying to ") {
-        let (target, text) = rest.split_once(':').unwrap_or(("a message", rest));
-        let who = match target.trim() {
-            "1000" | "1" => "Ada",
-            "2" => "Charles",
-            "3" => "Lovelace",
-            _ => "a message",
-        };
-        (Some(format!("Replying to {who}")), text.trim().to_owned())
-    } else {
-        (None, body_source)
-    };
-    let body_source = body_source
-        .lines()
-        .filter(|line| !line.contains("attachment:"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mentioned = env.me.is_some_and(|me| message.mentions_user(me));
+    let text = rencord_desktop::clean_content(&message.content, |channel| {
+        env.channels.get(&channel).cloned()
+    });
+    let names: HashMap<String, String> = message
+        .mentions
+        .iter()
+        .map(|user| (user.id.to_string(), user.display_name().to_owned()))
+        .collect();
     let group = SharedString::from(format!("row-{id}"));
     let hover = palette.hover;
     let mut body = v_flex().flex_1().min_w(px(0.)).gap_1();
@@ -3739,19 +4267,31 @@ fn message_row(
                 )),
         );
     }
-    if let Some(note) = reply_note {
-        body = body.child(
-            h_flex()
-                .gap(px(6.))
-                .items_center()
-                .child(icon("reply", 14., palette.muted))
-                .child(paint(note, palette.muted, 12.)),
-        );
+    if let Some(reply) = &message.reply_to {
+        body = body.child(reply_header(reply, env, palette, cx));
     }
-    body = body.child(message_blocks(&body_source, id, palette, font_px));
+    if !text.trim().is_empty() {
+        body = body.child(message_blocks(&text, id, palette, font_px, &names));
+        if message.edited_timestamp.is_some() {
+            body = body.child(paint("(edited)", palette.faint, 11.));
+        }
+    }
+    for (index, attachment) in message.attachments.iter().enumerate() {
+        body = body.child(attachment_view(attachment, id, index, env, palette, cx));
+    }
+    for (index, embed) in message.embeds.iter().enumerate() {
+        if let Some(card) = embed_view(embed, id, index, env, palette, cx) {
+            body = body.child(card);
+        }
+    }
     if !reactions.is_empty() {
-        let mut pills = h_flex().gap_1().mt(px(2.));
+        let mut pills = h_flex().flex_wrap().gap_1().mt(px(2.));
         for reaction in &reactions {
+            let label = if reaction.emoji == "wave" {
+                "\u{1F44B}".to_owned()
+            } else {
+                rencord_desktop::emoji_label(&reaction.emoji)
+            };
             pills = pills.child(
                 div()
                     .px(px(6.))
@@ -3771,63 +4311,10 @@ fn message_row(
                     }))
                     .text_size(px(13.))
                     .text_color(rgb(palette.text))
-                    .child(format!(
-                        "{} {}",
-                        if reaction.emoji == "wave" {
-                            "👋"
-                        } else {
-                            reaction.emoji.as_str()
-                        },
-                        reaction.count
-                    )),
+                    .child(format!("{label} {}", reaction.count)),
             );
         }
         body = body.child(pills);
-    }
-    if message.content.contains("](") {
-        let embed = v_flex()
-            .gap(px(2.))
-            .child(paint("example.com", palette.muted, 11.))
-            .child(paint("Jitter notes", palette.link, 14.))
-            .child(paint(
-                "How the adaptive buffer stays under the idle budget.",
-                if onyx {
-                    palette.text_secondary
-                } else {
-                    palette.text
-                },
-                13.,
-            ));
-        body = body.child(if onyx {
-            div()
-                .mt(px(7.))
-                .max_w(px(380.))
-                .rounded(px(6.))
-                .bg(rgb(palette.chat))
-                .border_1()
-                .border_color(rgb(palette.line))
-                .child(
-                    div()
-                        .border_l_3()
-                        .border_color(rgb(palette.accent))
-                        .px(px(14.))
-                        .py(px(8.))
-                        .child(embed),
-                )
-                .into_any_element()
-        } else {
-            v_flex()
-                .mt(px(4.))
-                .max_w(px(432.))
-                .px(px(16.))
-                .py(px(8.))
-                .rounded(px(12.))
-                .bg(rgb(palette.elevated))
-                .border_l_4()
-                .border_color(rgb(palette.link))
-                .child(embed)
-                .into_any_element()
-        });
     }
     if message.content.contains("rencord-split v1") {
         body = body.child(big_file_view::reassemble_chip(
@@ -3836,29 +4323,7 @@ fn message_row(
             palette,
         ));
     }
-    if message.content.contains("attachment:bench.png") {
-        body = body.child(
-            v_flex()
-                .mt(px(7.))
-                .gap_1()
-                .child(
-                    div()
-                        .w(px(320.))
-                        .h(px(76.))
-                        .rounded(px(if onyx { 6. } else { 12. }))
-                        .overflow_hidden()
-                        .border_1()
-                        .border_color(rgb(palette.line))
-                        .child(bench_photo()),
-                )
-                .child(if onyx {
-                    meta("voice-bench.jpg", palette.muted, 11., palette).into_any_element()
-                } else {
-                    paint("voice-bench.jpg", palette.muted, 12.).into_any_element()
-                }),
-        );
-    }
-    let avatar = if onyx { 32. } else { 40. };
+    let avatar_px = if onyx { 32. } else { 40. };
     h_flex()
         .id(group.clone())
         .group(group.clone())
@@ -3873,12 +4338,12 @@ fn message_row(
             8.
         }))
         .border_l_3()
-        .border_color(rgb(if message.content.contains("Mention") {
+        .border_color(rgb(if mentioned {
             palette.accent
         } else {
             palette.chat
         }))
-        .bg(rgb(if message.content.contains("Mention") {
+        .bg(rgb(if mentioned {
             palette.ping
         } else {
             palette.chat
@@ -3887,9 +4352,16 @@ fn message_row(
         .items_start()
         .hover(move |style| style.bg(rgb(hover)))
         .child(if grouped {
-            div().w(px(avatar)).h(px(8.)).into_any_element()
+            div().w(px(avatar_px)).h(px(8.)).into_any_element()
         } else {
-            portrait(&name, avatar).into_any_element()
+            avatar(
+                &env.pictures,
+                &message.author,
+                avatar_px,
+                env.demo,
+                palette,
+                cx,
+            )
         })
         .child(body)
         .child(
@@ -3920,8 +4392,8 @@ fn message_row(
                 .child(div().w(px(1.)).h(px(16.)).bg(rgb(palette.hover_divider)))
                 .child(delete_action(view, id, palette)),
         )
+        .into_any_element()
 }
-
 fn react_action(view: Entity<RencordWindow>, id: Snowflake, palette: Palette) -> impl IntoElement {
     let hover = palette.hover;
     div()
@@ -4028,13 +4500,44 @@ fn delete_action(view: Entity<RencordWindow>, id: Snowflake, palette: Palette) -
         })
 }
 
+/// Shows a mention as the person's name. The parser keeps only the id, so the
+/// `id` field is replaced with the label to draw.
+fn resolve_mentions(blocks: &mut [Block], names: &HashMap<String, String>) {
+    fn walk(items: &mut [Inline], names: &HashMap<String, String>) {
+        for item in items {
+            match item {
+                Inline::Mention { id } => {
+                    *id = names
+                        .get(id.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".into());
+                }
+                Inline::Bold(inner) | Inline::Italic(inner) | Inline::Spoiler(inner) => {
+                    walk(inner, names)
+                }
+                _ => {}
+            }
+        }
+    }
+    for block in blocks {
+        match block {
+            Block::Paragraph { inlines }
+            | Block::Heading { inlines, .. }
+            | Block::Quote { inlines } => walk(inlines, names),
+            Block::Code { .. } => {}
+        }
+    }
+}
+
 fn message_blocks(
     content: &str,
     id: Snowflake,
     palette: Palette,
     font_px: f32,
+    names: &HashMap<String, String>,
 ) -> impl IntoElement {
-    let blocks = parse(content);
+    let mut blocks = parse(content);
+    resolve_mentions(&mut blocks, names);
     let mut column = v_flex().gap_1();
     if blocks.is_empty() {
         return column.child(markdown_line(content, palette, font_px));
@@ -4451,11 +4954,16 @@ fn portrait(name: &str, size: f32) -> impl IntoElement {
 }
 
 fn portrait_status(name: &str, size: f32, dot: u32, ring: u32) -> impl IntoElement {
+    status_badge(portrait(name, size), size, dot, ring)
+}
+
+/// Any avatar with the presence dot at its corner.
+fn status_badge(inner: impl IntoElement, size: f32, dot: u32, ring: u32) -> impl IntoElement {
     div()
         .relative()
         .size(px(size))
         .flex_shrink_0()
-        .child(portrait(name, size))
+        .child(inner)
         .child(
             div()
                 .absolute()
@@ -5017,12 +5525,13 @@ fn walk_inlines(
     }
 }
 
-fn bench_photo() -> impl IntoElement {
-    let image = Image::from_bytes(
-        ImageFormat::Png,
-        include_bytes!("../../../docs/design/fixtures/bench.png").to_vec(),
-    );
-    img(std::sync::Arc::new(image)).size_full()
+/// The demo's one picture. It is drawn through the same path as a downloaded one.
+fn bench_picture() -> Option<images::Picture> {
+    images::prepare(
+        include_bytes!("../../../docs/design/fixtures/bench.png"),
+        1024,
+    )
+    .ok()
 }
 
 fn fetch_failure_text(kind: &str, err: &rencord_api::ApiError) -> String {
