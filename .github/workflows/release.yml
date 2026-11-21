@@ -71,36 +71,20 @@ jobs:
             Write-Host "No signing secret was set. Generated a self-signed CN=Rabellion certificate."
           }
 
-          $script:TimestampServer = "http://timestamp.digicert.com"
+          $env:RENCORD_PFX = $pfx
+          $env:RENCORD_PFX_PASSWORD = $password
+          $env:RENCORD_SIGNTOOL = $signtool
+          $stampFile = Join-Path $dist "timestamp-server.txt"
+          $env:RENCORD_TIMESTAMP_FILE = $stampFile
+          $signScript = Join-Path $root "packaging\windows\sign.ps1"
           function Sign-Binary([string]$Path) {
-            $servers = @(
-              "http://timestamp.digicert.com",
-              "http://timestamp.sectigo.com",
-              "http://timestamp.acs.microsoft.com"
-            )
-            foreach ($server in $servers) {
-              Write-Host "signing $Path via $server"
-              $proc = New-Object System.Diagnostics.Process
-              $proc.StartInfo.FileName = $signtool
-              $proc.StartInfo.Arguments = "sign /fd SHA256 /tr $server /td SHA256 /f `"$pfx`" /p `"$password`" `"$Path`""
-              $proc.StartInfo.UseShellExecute = $false
-              $proc.Start() | Out-Null
-              if (-not $proc.WaitForExit(120000)) {
-                try { $proc.Kill() } catch {}
-                Write-Host "timestamp server timed out: $server"
-                continue
-              }
-              if ($proc.ExitCode -eq 0) {
-                $script:TimestampServer = $server
-                return
-              }
-              Write-Host "signtool exit $($proc.ExitCode) via $server"
-            }
-            throw "could not sign $Path"
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $signScript $Path
+            if ($LASTEXITCODE -ne 0) { throw "could not sign $Path" }
           }
 
           Sign-Binary $exe
-          $signCmd = "`$q$signtool`$q sign /fd SHA256 /tr $($script:TimestampServer) /td SHA256 /f `$q$pfx`$q /p `$q$password`$q `$f"
+          $script:TimestampServer = (Get-Content $stampFile -Raw).Trim()
+          $signCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `$q$signScript`$q `$f"
           & $iscc "/Srencord=$signCmd" "/DExeSource=$exe" "/O$dist" (Join-Path $root "packaging\windows\rencord.iss")
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
           $setup = Join-Path $dist "Rencord-v0.6.0-setup-x64.exe"
