@@ -86,7 +86,45 @@ mod voice_call;
 
 use login_view::{LoginModel, LoginPreview};
 
+/// This is a console program, so a panic used to print to a window that closed
+/// with the process and left no trace. Keep the message in a file as well.
+fn install_crash_log() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let entry = crash_entry(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs()),
+            thread.name().unwrap_or("unnamed"),
+            &info.to_string(),
+            &std::backtrace::Backtrace::force_capture().to_string(),
+        );
+        let path = rencord_platform::data_dir().join("crash.log");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = std::io::Write::write_all(&mut file, entry.as_bytes());
+        }
+        previous(info);
+    }));
+}
+
+/// One crash.log entry. Tokens are removed first (RULES section 4.1).
+fn crash_entry(unix: u64, thread: &str, message: &str, backtrace: &str) -> String {
+    rencord_auth::redact(&format!(
+        "[{unix}] rencord {} thread {thread}\n{message}\n{backtrace}\n\n",
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
 fn main() {
+    install_crash_log();
     PROCESS_START.get_or_init(Instant::now);
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--discord-login-window") {
@@ -5021,5 +5059,27 @@ mod fetch_failure {
         assert!(fetch_is_blocked(&requested, &failed, id));
         failed.remove(&id);
         assert!(!fetch_is_blocked(&requested, &failed, id));
+    }
+}
+
+#[cfg(test)]
+mod crash_log_tests {
+    use super::crash_entry;
+
+    #[test]
+    fn an_entry_names_the_thread_and_the_panic_but_never_a_token() {
+        let entry = crash_entry(
+            1_700_000_000,
+            "tokio-runtime-worker",
+            "panicked at src/net.rs:10:5:\ncalled unwrap on None while handling ODUyODky.GX5Xdp.22jsdSqEiHLUYEJSsjeq_vJKLp",
+            "   0: rencord::net::run",
+        );
+        assert!(entry.starts_with("[1700000000] rencord "), "{entry}");
+        assert!(entry.contains("thread tokio-runtime-worker"), "{entry}");
+        assert!(entry.contains("src/net.rs:10:5"), "{entry}");
+        assert!(entry.contains("rencord::net::run"), "{entry}");
+        assert!(!entry.contains("GX5Xdp"), "{entry}");
+        assert!(!entry.contains("22jsdSqEiHLU"), "{entry}");
+        assert!(entry.ends_with("\n\n"));
     }
 }
