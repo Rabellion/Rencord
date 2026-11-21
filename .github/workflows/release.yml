@@ -34,8 +34,9 @@ jobs:
           }
           Copy-Item LICENSE-MIT (Join-Path $stage "LICENSE-MIT")
           Copy-Item LICENSE-APACHE (Join-Path $stage "LICENSE-APACHE")
+          $tag = $env:GITHUB_REF_NAME
           @"
-          Rencord 0.5.0, a Windows x64 test build for the owner.
+          Rencord $tag, a Windows x64 test build for the owner.
 
           Unofficial client. Discord's terms can end the account.
           This build is unsigned, so SmartScreen will warn.
@@ -54,19 +55,20 @@ jobs:
             "{0}  {1}" -f $hash, $_.Name
           }
           $sums | Set-Content -Encoding ascii (Join-Path $stage "SHA256SUMS.txt")
-          $zip = Join-Path $env:GITHUB_WORKSPACE "dist\Rencord-v0.5.0-windows-x64.zip"
+          $zipName = "Rencord-$tag-windows-x64.zip"
+          $zip = Join-Path $env:GITHUB_WORKSPACE "dist\$zipName"
           Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip
           $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
-          "{0}  Rencord-v0.5.0-windows-x64.zip" -f $zipHash | Set-Content -Encoding ascii (Join-Path $env:GITHUB_WORKSPACE "dist\SHA256SUMS.txt")
+          "{0}  {1}" -f $zipHash, $zipName | Set-Content -Encoding ascii (Join-Path $env:GITHUB_WORKSPACE "dist\SHA256SUMS.txt")
       - name: Publish pre-release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.5.0
-          name: Rencord v0.5.0 (test build)
+          tag_name: ${{ github.ref_name }}
+          name: Rencord ${{ github.ref_name }} (test build)
           prerelease: true
           make_latest: false
           files: |
-            dist/Rencord-v0.5.0-windows-x64.zip
+            dist/Rencord-${{ github.ref_name }}-windows-x64.zip
             dist/SHA256SUMS.txt
           body: |
             Test build for the owner. Windows x64 only. Unsigned, so SmartScreen will warn. Unofficial client: Discord's terms can end the account.

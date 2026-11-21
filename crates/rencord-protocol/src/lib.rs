@@ -120,6 +120,33 @@ pub fn discord_locale() -> String {
     }
 }
 
+/// IANA zone for `X-Discord-Timezone`. `TZ` wins, then the OS zone database.
+/// The result is a zone name, never an offset string we invented.
+pub fn discord_timezone() -> String {
+    if let Ok(value) = std::env::var("TZ") {
+        if let Some(name) = sanitize_timezone(&value) {
+            return name;
+        }
+    }
+    iana_time_zone::get_timezone()
+        .ok()
+        .and_then(|name| sanitize_timezone(&name))
+        .unwrap_or_else(|| "UTC".into())
+}
+
+fn sanitize_timezone(value: &str) -> Option<String> {
+    let value = value.trim().trim_start_matches(':');
+    if (2..64).contains(&value.len())
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '+'))
+    {
+        Some(value.to_owned())
+    } else {
+        None
+    }
+}
+
 /// Properties on gateway Identify and, base64-encoded, on `X-Super-Properties`.
 /// The browser and device stay `Rencord`. This does not impersonate the official client.
 pub fn client_properties() -> Value {

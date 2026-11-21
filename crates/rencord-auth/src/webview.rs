@@ -169,9 +169,9 @@ pub fn webview_backend() -> Option<&'static str> {
 pub fn open_discord_login_window() -> Result<Token, AuthError> {
     #[cfg(not(feature = "webview"))]
     {
-        return Err(AuthError::WebviewUnavailable(
+        Err(AuthError::WebviewUnavailable(
             "This build has no system webview. Use email and password, or a token.".into(),
-        ));
+        ))
     }
     #[cfg(feature = "webview")]
     {
@@ -202,7 +202,7 @@ pub fn discord_login_window_main() -> i32 {
             eprintln!("rencord: {err}");
             return 1;
         }
-        return 0;
+        0
     }
     #[cfg(feature = "webview")]
     {
