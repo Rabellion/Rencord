@@ -7,9 +7,9 @@ use std::time::Duration;
 
 use rencord_api::{ApiError, DiscordApi};
 use rencord_desktop::Mutation;
-use rencord_gateway::{GatewayCommand, GatewayConfig, GatewayEvent};
+use rencord_gateway::{GatewayCommand, GatewayConfig, GatewayError, GatewayEvent};
 use rencord_model::{Message, Snowflake, Token};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -23,10 +23,16 @@ pub(crate) fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-/// The live gateway. Dropping `commands` shuts it down.
+/// The live gateway. Dropping `commands` shuts it down. `ended` carries why it stopped.
 pub(crate) struct GatewayLink {
     pub events: mpsc::Receiver<GatewayEvent>,
     pub commands: mpsc::Sender<GatewayCommand>,
+    pub ended: oneshot::Receiver<Result<(), GatewayError>>,
+}
+
+/// Discord closed the socket with 4004: the token is no longer valid.
+pub(crate) fn session_invalid(outcome: &Result<(), GatewayError>) -> bool {
+    matches!(outcome, Err(GatewayError::Fatal(4004)))
 }
 
 pub(crate) struct Bootstrap {
@@ -80,6 +86,7 @@ pub(crate) async fn fetch_bootstrap(token: String) -> Result<Bootstrap, BootErro
 async fn spawn_gateway(token: String) -> (GatewayLink, String, Option<String>, Option<String>) {
     let (events_tx, mut events) = mpsc::channel(256);
     let (commands, cmd_rx) = mpsc::channel(8);
+    let (ended_tx, ended) = oneshot::channel();
     tokio::spawn(async move {
         let outcome = rencord_gateway::run(
             GatewayConfig {
@@ -90,12 +97,13 @@ async fn spawn_gateway(token: String) -> (GatewayLink, String, Option<String>, O
             cmd_rx,
         )
         .await;
-        if let Err(err) = outcome {
+        if let Err(err) = &outcome {
             tracing::warn!(
                 "gateway stopped: {}",
                 rencord_auth::redact(&err.to_string())
             );
         }
+        let _ = ended_tx.send(outcome);
     });
     let first = tokio::time::timeout(Duration::from_secs(8), events.recv()).await;
     let (note, theme, client_theme) = match first {
@@ -120,7 +128,16 @@ async fn spawn_gateway(token: String) -> (GatewayLink, String, Option<String>, O
         Ok(None) => ("gateway closed".into(), None, None),
         Err(_) => ("still waiting for the gateway".into(), None, None),
     };
-    (GatewayLink { events, commands }, note, theme, client_theme)
+    (
+        GatewayLink {
+            events,
+            commands,
+            ended,
+        },
+        note,
+        theme,
+        client_theme,
+    )
 }
 
 /// Sends one optimistic change. A created message comes back so the caller
@@ -173,4 +190,17 @@ pub(crate) async fn push_mutation(
         }
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_4004_close_invalidates_the_session() {
+        assert!(session_invalid(&Err(GatewayError::Fatal(4004))));
+        assert!(!session_invalid(&Err(GatewayError::Fatal(4011))));
+        assert!(!session_invalid(&Err(GatewayError::Closed)));
+        assert!(!session_invalid(&Ok(())));
+    }
 }

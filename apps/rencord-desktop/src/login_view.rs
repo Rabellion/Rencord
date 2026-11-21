@@ -774,6 +774,7 @@ impl RencordWindow {
         let GatewayLink {
             mut events,
             commands,
+            ended,
         } = snapshot.gateway;
         // Replacing the sender stops the previous account's gateway.
         self.gateway = Some(commands);
@@ -794,6 +795,21 @@ impl RencordWindow {
                 if !matches!(applied, Ok(true)) {
                     break;
                 }
+            }
+            // The gateway stopped; a bad token means the session is over.
+            if ended
+                .await
+                .is_ok_and(|outcome| net::session_invalid(&outcome))
+            {
+                let _ = this.update(cx, |view, cx| {
+                    if view
+                        .api
+                        .as_ref()
+                        .is_some_and(|live| Arc::ptr_eq(live, &api))
+                    {
+                        view.note_unauthorized(cx);
+                    }
+                });
             }
         })
         .detach();
