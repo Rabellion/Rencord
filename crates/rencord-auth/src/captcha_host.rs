@@ -60,7 +60,33 @@ pub fn dismiss_embedded_captcha() {
     #[cfg(all(windows, feature = "webview"))]
     HOST.with(|slot| {
         if let Some(panel) = slot.borrow_mut().take() {
-            let _ = std::fs::remove_dir_all(panel.dir);
+            let Panel {
+                webview,
+                context,
+                dir,
+                profile,
+            } = panel;
+            // Close the browser before deleting the folders it was using.
+            drop(webview);
+            drop(context);
+            let _ = std::fs::remove_dir_all(dir);
+            remove_when_released(profile);
+        }
+    });
+}
+
+/// The browser keeps its profile files open for a moment after the panel closes,
+/// so retry for a few seconds off the UI thread.
+// shortcut: best effort. A crash or a very slow exit leaves the folder in the
+// temp directory, which is the OS's to clean; upgrade if that ever adds up.
+#[cfg(all(windows, feature = "webview"))]
+fn remove_when_released(dir: std::path::PathBuf) {
+    std::thread::spawn(move || {
+        for _ in 0..20 {
+            if std::fs::remove_dir_all(&dir).is_ok() || !dir.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
         }
     });
 }
@@ -68,7 +94,12 @@ pub fn dismiss_embedded_captcha() {
 #[cfg(all(windows, feature = "webview"))]
 struct Panel {
     webview: wry::WebView,
+    // Owns the WebView2 profile folder choice for as long as the panel lives.
+    context: wry::WebContext,
+    /// The widget document served under the discord.com mapping.
     dir: std::path::PathBuf,
+    /// WebView2's profile. Kept apart from `dir` so the page cannot reach it.
+    profile: std::path::PathBuf,
 }
 
 #[cfg(all(windows, feature = "webview"))]
@@ -86,14 +117,48 @@ fn present_windows<W: HasWindowHandle>(
     challenge: &CaptchaChallenge,
     on_event: impl Fn(WidgetEvent) + Send + 'static,
 ) -> Result<(), String> {
-    use crate::captcha_page::{parse_widget_message, widget_html};
-
     if wry::webview_version().is_err() {
         return Err("WebView2 is not installed. Continue on Discord's page.".into());
     }
     dismiss_embedded_captcha();
-    let dir = std::env::temp_dir().join(format!("rencord-captcha-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    let pid = std::process::id();
+    let dir = std::env::temp_dir().join(format!("rencord-captcha-{pid}"));
+    // Without this WebView2 puts its profile next to Rencord.exe, which fails with
+    // "Access is denied" when that folder is not writable (an all-users install).
+    let profile = std::env::temp_dir().join(format!("rencord-captcha-profile-{pid}"));
+    let built = build_panel(
+        parent, origin_x, origin_y, width, height, challenge, &dir, &profile, on_event,
+    );
+    match built {
+        Ok(panel) => {
+            HOST.with(|slot| *slot.borrow_mut() = Some(panel));
+            Ok(())
+        }
+        Err(err) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            remove_when_released(profile);
+            Err(err)
+        }
+    }
+}
+
+#[cfg(all(windows, feature = "webview"))]
+#[allow(clippy::too_many_arguments)]
+fn build_panel<W: HasWindowHandle>(
+    parent: &W,
+    origin_x: f32,
+    origin_y: f32,
+    width: f32,
+    height: f32,
+    challenge: &CaptchaChallenge,
+    dir: &std::path::Path,
+    profile: &std::path::Path,
+    on_event: impl Fn(WidgetEvent) + Send + 'static,
+) -> Result<Panel, String> {
+    use crate::captcha_page::{parse_widget_message, widget_html};
+
+    std::fs::create_dir_all(dir).map_err(|err| err.to_string())?;
+    std::fs::create_dir_all(profile).map_err(|err| err.to_string())?;
     std::fs::write(dir.join("rencord-captcha.html"), widget_html(challenge))
         .map_err(|err| err.to_string())?;
 
@@ -101,7 +166,8 @@ fn present_windows<W: HasWindowHandle>(
         position: wry::dpi::LogicalPosition::new(origin_x as f64, origin_y as f64).into(),
         size: wry::dpi::LogicalSize::new(width as f64, height as f64).into(),
     };
-    let webview = wry::WebViewBuilder::new()
+    let mut context = wry::WebContext::new(Some(profile.to_path_buf()));
+    let webview = wry::WebViewBuilder::new_with_web_context(&mut context)
         .with_bounds(bounds)
         .with_ipc_handler(move |request| {
             if let Some(event) = parse_widget_message(request.body()) {
@@ -110,14 +176,16 @@ fn present_windows<W: HasWindowHandle>(
         })
         .build_as_child(parent)
         .map_err(|err| err.to_string())?;
-    map_discord_host(&webview, &dir)?;
+    map_discord_host(&webview, dir)?;
     webview
         .load_url(CAPTCHA_DOCUMENT)
         .map_err(|err| err.to_string())?;
-    HOST.with(|slot| {
-        *slot.borrow_mut() = Some(Panel { webview, dir });
-    });
-    Ok(())
+    Ok(Panel {
+        webview,
+        context,
+        dir: dir.to_path_buf(),
+        profile: profile.to_path_buf(),
+    })
 }
 
 #[cfg(all(windows, feature = "webview"))]
