@@ -65,7 +65,7 @@ pub fn viewer(palette: Palette) -> impl IntoElement {
                 .rounded(px(8.))
                 .border_1()
                 .border_color(rgb(palette.line))
-                .bg(rgb(0x000000))
+                .bg(rgb(palette.stage))
                 .relative()
                 .child(preview_image(0., 0.))
                 .child(stats_overlay(&stats, palette)),
@@ -92,7 +92,7 @@ pub fn pip(palette: Palette) -> impl IntoElement {
                 .rounded(px(8.))
                 .border_1()
                 .border_color(rgb(palette.line))
-                .bg(rgb(0x000000))
+                .bg(rgb(palette.stage))
                 .overflow_hidden()
                 .child(preview_image(360., 202.))
                 .child(
@@ -129,7 +129,7 @@ fn source_card(source: CaptureSource, palette: Palette) -> impl IntoElement {
         }))
         .bg(rgb(palette.app_bg))
         .overflow_hidden()
-        .child(thumbnail(&source.thumbnail_png))
+        .child(thumbnail(&source.thumbnail_png, palette.stage))
         .child(
             v_flex()
                 .p(px(10.))
@@ -143,12 +143,12 @@ fn source_card(source: CaptureSource, palette: Palette) -> impl IntoElement {
         )
 }
 
-fn thumbnail(png: &[u8]) -> impl IntoElement {
+fn thumbnail(png: &[u8], stage: u32) -> impl IntoElement {
     let image = Image::from_bytes(ImageFormat::Png, png.to_vec());
     div()
         .h(px(158.))
         .w_full()
-        .bg(rgb(0x000000))
+        .bg(rgb(stage))
         .child(img(std::sync::Arc::new(image)).size_full())
 }
 
@@ -221,7 +221,7 @@ fn paint(text: String, color: u32, size: f32) -> impl IntoElement {
 
 fn meta_line(text: String, palette: Palette) -> impl IntoElement {
     div()
-        .font_family("JetBrains Mono")
+        .font_family(palette.font_mono)
         .text_size(px(11.))
         .text_color(rgb(palette.muted))
         .child(text)

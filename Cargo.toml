@@ -12,6 +12,7 @@ members = [
     "crates/rencord-hdr",
     "crates/rencord-platform",
     "crates/rencord-upload",
+    "crates/rencord-theme",
     "apps/rencord-desktop",
 ]
 
@@ -50,3 +51,4 @@ rencord-media = { path = "crates/rencord-media" }
 rencord-hdr = { path = "crates/rencord-hdr" }
 rencord-platform = { path = "crates/rencord-platform" }
 rencord-upload = { path = "crates/rencord-upload" }
+rencord-theme = { path = "crates/rencord-theme" }

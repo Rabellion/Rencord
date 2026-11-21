@@ -204,7 +204,7 @@ pub enum SplitEdge {
     Right,
 }
 
-/// Theme-facing column defaults. Onyx uses a 68 px rail and an 8 px gap.
+/// Theme-facing column defaults. The rail is 68 px. A gap above zero is the floating-panel option.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ColumnMetrics {
     pub rail: f32,
@@ -219,7 +219,7 @@ impl ColumnMetrics {
             rail: 68.0,
             channels: 216.0,
             members: 176.0,
-            gap: 8.0,
+            gap: 0.0,
         }
     }
 
@@ -228,7 +228,7 @@ impl ColumnMetrics {
             rail: 72.0,
             channels: 240.0,
             members: 240.0,
-            gap: 12.0,
+            gap: 0.0,
         }
     }
 }

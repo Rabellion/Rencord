@@ -16,7 +16,8 @@ the Cargo registry; this file records the ones that matter for attribution.
 | [RustCrypto](https://github.com/RustCrypto) `chacha20poly1305` | Voice transport mode `aead_xchacha20_poly1305_rtpsize` | MIT OR Apache-2.0 |
 | [cpal](https://github.com/RustAudio/cpal) | Optional microphone and speaker devices | Apache-2.0 |
 | [rusqlite](https://github.com/rusqlite/rusqlite) / SQLite | Bounded local message and draft cache | MIT (rusqlite); SQLite public domain |
-| [image](https://github.com/image-rs/image) | Resize and JPEG encode for the big-file sheet | MIT OR Apache-2.0 |
+| [image](https://github.com/image-rs/image) | Theme images, and resize plus JPEG encode for the big-file sheet | MIT OR Apache-2.0 |
+| [toml](https://github.com/toml-rs/toml) | Theme documents | MIT OR Apache-2.0 |
 | [libwebp](https://chromium.googlesource.com/webm/libwebp) via the `webp` crate | Lossy WebP encode | BSD-3-Clause |
 | [zip](https://github.com/zip-rs/zip2) | Zip volumes under the upload cap | MIT |
 | [sevenz-rust2](https://github.com/hasenbanck/sevenz-rust2) | 7z volumes under the upload cap | Apache-2.0 |

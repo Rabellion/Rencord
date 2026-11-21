@@ -32,6 +32,8 @@ pub struct Session {
     pub composer: String,
     pub voice_channel: Option<Snowflake>,
     pub status_line: String,
+    pub discord_theme: Option<String>,
+    pub discord_client_theme: Option<String>,
 }
 
 impl Default for Session {
@@ -47,6 +49,8 @@ impl Default for Session {
             composer: String::new(),
             voice_channel: None,
             status_line: "Not connected".to_owned(),
+            discord_theme: None,
+            discord_client_theme: None,
         }
     }
 }
@@ -58,7 +62,11 @@ impl Session {
                 session_id,
                 user,
                 guild_ids,
+                discord_theme,
+                discord_client_theme,
             } => {
+                self.discord_theme = discord_theme;
+                self.discord_client_theme = discord_client_theme;
                 self.session_id = Some(session_id);
                 self.user = Some(user);
                 for id in guild_ids {

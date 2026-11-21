@@ -19,8 +19,8 @@ pub use icons::{
 };
 pub use search::{guild_search_path, local_search, parse_message_query, MessageQuery, SearchHit};
 pub use theme::{
-    token_summary, Density, HdrCurveChoice, LayoutKind, Palette, Preferences, ThemeMode,
-    MOTION_OVERLAY_MS,
+    guild_tile, role_color, theme_file_from_path, token_summary, Density, HdrCurveChoice,
+    LayoutKind, Palette, Preferences, Theme, ThemeMode, MOTION_OVERLAY_MS,
 };
 
 #[derive(Clone, Debug)]
@@ -416,6 +416,7 @@ impl Shell {
     }
 
     pub fn cycle_theme(&mut self) {
+        self.prefs.custom = None;
         self.prefs.theme = self.prefs.theme.cycle();
     }
 
@@ -463,7 +464,48 @@ impl Shell {
     }
 
     pub fn set_theme(&mut self, mode: ThemeMode) {
+        self.prefs.custom = None;
         self.prefs.theme = mode;
+    }
+
+    pub fn appearance_account(&self) -> String {
+        self.session
+            .user
+            .as_ref()
+            .map(|user| user.id.get().to_string())
+            .unwrap_or_else(|| "local".into())
+    }
+
+    pub fn load_appearance(&mut self) -> bool {
+        let path = rencord_platform::appearance_path(&self.appearance_account());
+        if let Some(file) = rencord_theme::read_appearance(&path) {
+            self.prefs.apply_file(file);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn save_appearance(&self) {
+        let path = rencord_platform::appearance_path(&self.appearance_account());
+        let _ = rencord_theme::write_appearance(&path, &self.prefs.to_file());
+    }
+
+    /// Use Discord's synced light/dark/client theme as a starting point.
+    /// Nothing here writes appearance back to Discord. A later launch keeps
+    /// the local file unless the user opted in to follow Discord.
+    pub fn consider_discord_appearance(&mut self, theme: Option<&str>, client: Option<&str>) {
+        let path = rencord_platform::appearance_path(&self.appearance_account());
+        let saved = path.is_file();
+        if !(self.prefs.sync_discord || (!saved && !self.prefs.seeded_from_discord)) {
+            return;
+        }
+        if let Some(preset) = rencord_theme::map_discord_appearance(theme, client) {
+            self.prefs.theme = preset;
+            self.prefs.custom = None;
+            self.prefs.seeded_from_discord = true;
+            self.save_appearance();
+        }
     }
 
     pub fn toggle_density(&mut self) {
@@ -800,7 +842,7 @@ impl Shell {
         ));
         lines.push(format!(
             "theme={} density={} font={}",
-            self.prefs.theme.label(),
+            self.prefs.theme_label(),
             self.prefs.density.label(),
             self.prefs.font_px
         ));
@@ -819,6 +861,70 @@ impl Shell {
         ));
         lines.join("\n")
     }
+}
+
+#[cfg(test)]
+fn visit_rs(dir: &std::path::Path, offenders: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            visit_rs(&path, offenders);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for (index, line) in text.lines().enumerate() {
+            if line.contains("hex-lint-allow") {
+                continue;
+            }
+            if line_has_hex_color(line) {
+                offenders.push(format!("{}:{}", path.display(), index + 1));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn line_has_hex_color(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'#' && exact_hex(&bytes[index + 1..]) {
+            return true;
+        }
+        if index + 1 < bytes.len()
+            && bytes[index] == b'0'
+            && (bytes[index + 1] == b'x' || bytes[index + 1] == b'X')
+            && exact_hex(&bytes[index + 2..])
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+#[cfg(test)]
+fn exact_hex(bytes: &[u8]) -> bool {
+    for length in [6, 8] {
+        if bytes.len() >= length
+            && bytes[..length].iter().all(|byte| byte.is_ascii_hexdigit())
+            && bytes
+                .get(length)
+                .map(|byte| !byte.is_ascii_hexdigit())
+                .unwrap_or(true)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -905,5 +1011,17 @@ mod tests {
         shell.begin_reply(Snowflake::new(1000));
         shell.send_local("noted");
         assert!(shell.outline().contains("replying to 1000"));
+    }
+
+    #[test]
+    fn ui_sources_do_not_embed_hex_colors() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        super::visit_rs(&root, &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "raw hex colors belong in rencord-theme:\n{}",
+            offenders.join("\n")
+        );
     }
 }

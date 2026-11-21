@@ -1,8 +1,11 @@
-//! Design tokens for the desktop shell.
+//! Desktop view of a [`rencord_theme::Theme`].
 //!
-//! Colors are sRGB hex. The GPUI view maps them with `rgb`. Durations and
-//! easing names are the motion contract; the window uses the durations for
-//! overlay fades.
+//! Hex lives in `rencord-theme`. This module only copies tokens into the
+//! fields the GPUI shell reads.
+
+use rencord_theme::{AppearanceFile, Chrome, ColorMode, ThemeFile};
+
+pub use rencord_theme::{guild_tile, role_color, PresetId as ThemeMode, Theme};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayoutKind {
@@ -42,44 +45,6 @@ impl LayoutKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ThemeMode {
-    Onyx,
-    Dark,
-    Ash,
-    Light,
-}
-
-impl ThemeMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Onyx => "Onyx Ink",
-            Self::Dark => "Crisp",
-            Self::Ash => "Ash",
-            Self::Light => "Light",
-        }
-    }
-
-    pub fn cycle(self) -> Self {
-        match self {
-            Self::Onyx => Self::Dark,
-            Self::Dark => Self::Ash,
-            Self::Ash => Self::Light,
-            Self::Light => Self::Onyx,
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "onyx" | "amoled" => Some(Self::Onyx),
-            "dark" | "crisp" | "c" => Some(Self::Dark),
-            "ash" => Some(Self::Ash),
-            "light" => Some(Self::Light),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Density {
     Compact,
     Cozy,
@@ -92,6 +57,23 @@ impl Density {
             Self::Compact => "Compact",
             Self::Cozy => "Cozy",
             Self::Spacious => "Spacious",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "compact" => Some(Self::Compact),
+            "cozy" => Some(Self::Cozy),
+            "spacious" => Some(Self::Spacious),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Compact => "compact",
+            Self::Cozy => "cozy",
+            Self::Spacious => "spacious",
         }
     }
 
@@ -118,103 +100,12 @@ impl Density {
             Self::Spacious => 54.0,
         }
     }
-}
 
-#[derive(Clone, Copy, Debug)]
-pub struct Palette {
-    pub mode: ThemeMode,
-    pub app_bg: u32,
-    pub rail: u32,
-    pub sidebar: u32,
-    pub chat: u32,
-    pub members: u32,
-    pub elevated: u32,
-    /// Composer and search fill. Lighter than the chat on Ash, dark on Onyx.
-    pub input: u32,
-    pub hover: u32,
-    pub selected: u32,
-    pub text: u32,
-    pub muted: u32,
-    pub faint: u32,
-    pub accent: u32,
-    pub accent_text: u32,
-    pub danger: u32,
-    pub line: u32,
-    pub code_bg: u32,
-    pub link: u32,
-    /// Soft mention wash. Not the harsh yellow Discord uses.
-    pub ping: u32,
-}
-
-impl Palette {
-    pub fn for_mode(mode: ThemeMode) -> Self {
-        match mode {
-            ThemeMode::Onyx => Self {
-                mode,
-                app_bg: 0x000000,
-                rail: 0x000000,
-                sidebar: 0x000000,
-                chat: 0x000000,
-                members: 0x000000,
-                elevated: 0x0a0a14,
-                input: 0x000000,
-                hover: 0x0c1024,
-                selected: 0x080b1a,
-                text: 0xedeef7,
-                muted: 0x9aa0c0,
-                faint: 0x7a80a0,
-                accent: 0x4f6bff,
-                accent_text: 0x000000,
-                danger: 0xe05550,
-                line: 0x15152a,
-                code_bg: 0x000000,
-                link: 0xa8b8ff,
-                ping: 0x101428,
-            },
-            ThemeMode::Ash | ThemeMode::Dark => Self {
-                mode,
-                app_bg: 0x16181d,
-                rail: 0x1c1f26,
-                sidebar: 0x1c1f26,
-                chat: 0x1c1f26,
-                members: 0x1c1f26,
-                elevated: 0x23272f,
-                input: 0x23272f,
-                hover: 0x22262e,
-                selected: 0x2a2f38,
-                text: 0xedf0f8,
-                muted: 0x8592ad,
-                faint: 0x576175,
-                accent: 0x5865f2,
-                accent_text: 0xffffff,
-                danger: 0xf23f43,
-                line: 0x2e3440,
-                code_bg: 0x16181d,
-                link: 0x00a8fc,
-                ping: 0x22263a,
-            },
-            ThemeMode::Light => Self {
-                mode,
-                app_bg: 0xe6e9f0,
-                rail: 0xf7f8fb,
-                sidebar: 0xf7f8fb,
-                chat: 0xf7f8fb,
-                members: 0xf7f8fb,
-                elevated: 0xffffff,
-                input: 0xffffff,
-                hover: 0xe8ebf2,
-                selected: 0xdfe3ec,
-                text: 0x1a1d26,
-                muted: 0x4e5870,
-                faint: 0x6b7388,
-                accent: 0x5865f2,
-                accent_text: 0xffffff,
-                danger: 0xda373c,
-                line: 0xd5dae6,
-                code_bg: 0xeef1f6,
-                link: 0x0068e0,
-                ping: 0xe4e7ff,
-            },
+    fn message_scale(self) -> f32 {
+        match self {
+            Self::Compact => 0.8,
+            Self::Cozy => 1.0,
+            Self::Spacious => 1.25,
         }
     }
 }
@@ -228,7 +119,7 @@ pub const RADII: [f32; 4] = [0.0, 6.0, 12.0, 999.0];
 /// Type scale in pixels at the default font size of 15.
 pub const TYPE_SCALE: [f32; 5] = [11.0, 13.0, 15.0, 18.0, 24.0];
 
-pub const FONT_STEPS: [f32; 3] = [13.0, 15.0, 17.0];
+pub const FONT_STEPS: [f32; 5] = [13.0, 14.0, 15.0, 16.0, 17.0];
 
 /// Settings choice for the HDR-to-SDR curve. Defaults to the BT.2390 EETF.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -276,11 +167,256 @@ pub fn token_summary() -> String {
     )
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Palette {
+    pub light: bool,
+    pub ink_chrome: bool,
+    pub show_top_rule: bool,
+    pub font_ui: &'static str,
+    pub font_mono: &'static str,
+    pub font_meta: &'static str,
+    pub app_bg: u32,
+    pub rail: u32,
+    pub sidebar: u32,
+    pub chat: u32,
+    pub members: u32,
+    pub elevated: u32,
+    pub input: u32,
+    pub hover: u32,
+    pub selected: u32,
+    pub text: u32,
+    pub muted: u32,
+    pub faint: u32,
+    pub accent: u32,
+    pub accent_text: u32,
+    pub danger: u32,
+    pub line: u32,
+    pub code_bg: u32,
+    pub link: u32,
+    pub ping: u32,
+    pub text_secondary: u32,
+    pub text_danger: u32,
+    pub border_strong: u32,
+    pub status_online: u32,
+    pub status_idle: u32,
+    pub status_dnd: u32,
+    pub status_offline: u32,
+    pub home_bg: u32,
+    pub home_bg_active: u32,
+    pub home_glyph: u32,
+    pub home_glyph_active: u32,
+    pub home_border: u32,
+    pub home_border_active: u32,
+    pub add_bg: u32,
+    pub add_border: u32,
+    pub add_glyph: u32,
+    pub badge_bg: u32,
+    pub badge_fg: u32,
+    pub voice_bg: u32,
+    pub voice_border: u32,
+    pub voice_label: u32,
+    pub voice_meta: u32,
+    pub mention_fg: u32,
+    pub mention_bg: u32,
+    pub syntax_number: u32,
+    pub syntax_keyword: u32,
+    pub hover_border: u32,
+    pub hover_divider: u32,
+    pub overlay: u32,
+    pub pill: u32,
+    pub positive: u32,
+    pub shadow: u32,
+    pub hangup_bg: u32,
+    pub hangup_fg: u32,
+    pub stage: u32,
+    pub rail_w: f32,
+    pub tile: f32,
+    pub tile_radius: f32,
+    pub side_w: f32,
+    pub member_w: f32,
+    pub shell_gap: f32,
+    pub rail_pad: f32,
+    pub header_h: f32,
+    pub header_px: f32,
+    pub title_px: f32,
+    pub hash_icon: f32,
+    pub composer_h: f32,
+    pub member_row: f32,
+    pub category_pad: f32,
+    pub category_px: f32,
+    pub channel_label: f32,
+    pub channel_icon: f32,
+    pub dm_avatar: f32,
+    pub voice_mx: f32,
+    pub voice_mt: f32,
+    pub voice_px: f32,
+    pub voice_radius: f32,
+    pub dock_pl: f32,
+    pub dock_pr: f32,
+    pub dock_name: f32,
+    pub avatar: f32,
+    pub message_py: f32,
+    pub message_gap: f32,
+    pub radius_panel: f32,
+    pub radius_code: f32,
+    pub radius_media: f32,
+    pub radius_control: f32,
+    pub code_size: f32,
+    pub code_line: f32,
+    pub narrow_at: f32,
+    pub body_size: f32,
+    pub body_line: f32,
+    pub border_width: f32,
+    pub shadow_y: f32,
+    pub shadow_blur: f32,
+    pub shadow_spread: f32,
+}
+
+impl Palette {
+    pub fn from_theme(theme: &Theme, font_px: f32, density: Density) -> Self {
+        let c = &theme.colors;
+        let m = &theme.metrics;
+        let scale = m.font_scale.max(0.5);
+        let radius = m.radius_scale.max(0.0);
+        let spacing = m.message_spacing * density.message_scale();
+        let u = |color: rencord_theme::Color| color.to_u32();
+        let ink = m.ink_chrome;
+        let body = if ink {
+            m.body_size * scale
+        } else {
+            font_px * scale
+        };
+        Self {
+            light: theme.mode == ColorMode::Light,
+            ink_chrome: ink,
+            show_top_rule: m.show_top_rule,
+            font_ui: m.font_ui.family(),
+            font_mono: m.font_mono.family(),
+            font_meta: m.font_meta.family(),
+            app_bg: u(c.bg_base),
+            rail: u(c.bg_rail),
+            sidebar: u(c.bg_sidebar),
+            chat: u(c.bg_chat),
+            members: u(c.bg_members),
+            elevated: u(c.bg_elevated),
+            input: u(c.bg_input),
+            hover: u(c.bg_hover),
+            selected: u(c.bg_selected),
+            text: u(c.text_primary),
+            muted: u(c.text_muted),
+            faint: u(c.text_faint),
+            accent: u(c.accent),
+            accent_text: u(c.accent_fg),
+            danger: u(c.danger),
+            line: u(c.border_hairline),
+            code_bg: u(c.bg_sunken),
+            link: u(c.text_link),
+            ping: u(c.bg_mention),
+            text_secondary: u(c.text_secondary),
+            text_danger: u(c.text_danger),
+            border_strong: u(c.border_strong),
+            status_online: u(c.status_online),
+            status_idle: u(c.status_idle),
+            status_dnd: u(c.status_dnd),
+            status_offline: u(c.status_offline),
+            home_bg: u(c.bg_home),
+            home_bg_active: u(c.bg_home_active),
+            home_glyph: u(c.text_home),
+            home_glyph_active: u(c.text_home_active),
+            home_border: u(c.border_home),
+            home_border_active: u(c.border_home_active),
+            add_bg: u(c.bg_add),
+            add_border: u(c.border_add),
+            add_glyph: u(c.text_add),
+            badge_bg: u(c.bg_badge),
+            badge_fg: u(c.text_badge),
+            voice_bg: u(c.bg_voice),
+            voice_border: u(c.border_voice),
+            voice_label: if ink {
+                u(c.text_link)
+            } else {
+                u(c.status_online)
+            },
+            voice_meta: u(c.text_voice),
+            mention_fg: u(c.text_mention),
+            mention_bg: u(c.bg_mention),
+            syntax_number: u(c.syntax_number),
+            syntax_keyword: u(c.syntax_keyword),
+            hover_border: u(c.border_hover),
+            hover_divider: u(c.border_strong),
+            overlay: c.bg_overlay.to_rgba_u32(),
+            pill: u(c.pill),
+            positive: u(c.positive),
+            shadow: c.shadow.to_rgba_u32(),
+            hangup_bg: c.bg_hangup.to_rgba_u32(),
+            hangup_fg: u(c.text_hangup),
+            stage: u(c.bg_stage),
+            rail_w: m.rail_width,
+            tile: m.tile_size,
+            tile_radius: m.radius_tile * radius,
+            side_w: m.sidebar_width,
+            member_w: m.member_width,
+            shell_gap: m.gap,
+            rail_pad: m.rail_pad,
+            header_h: m.header_h,
+            header_px: m.header_px,
+            title_px: m.title_px * scale,
+            hash_icon: m.hash_icon,
+            composer_h: m.composer_h,
+            member_row: m.member_row,
+            category_pad: m.category_pad,
+            category_px: m.category_px * scale,
+            channel_label: m.channel_label * scale,
+            channel_icon: m.channel_icon,
+            dm_avatar: m.dm_avatar,
+            voice_mx: m.voice_mx,
+            voice_mt: m.voice_mt,
+            voice_px: m.voice_px,
+            voice_radius: m.voice_radius * radius,
+            dock_pl: m.dock_pl,
+            dock_pr: m.dock_pr,
+            dock_name: m.dock_name * scale,
+            avatar: m.avatar,
+            message_py: m.message_py * spacing,
+            message_gap: m.message_gap * spacing,
+            radius_panel: m.radius_panel * radius,
+            radius_code: m.radius_code * radius,
+            radius_media: m.radius_media * radius,
+            radius_control: m.radius_control * radius,
+            code_size: if ink {
+                m.code_size * scale
+            } else {
+                (font_px * scale - 1.0).max(12.0)
+            },
+            code_line: m.code_line,
+            narrow_at: m.narrow_at,
+            body_size: body,
+            body_line: if ink { m.body_line } else { body + 4.0 },
+            border_width: m.border_width,
+            shadow_y: m.shadow_y,
+            shadow_blur: m.shadow_blur,
+            shadow_spread: m.shadow_spread,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Preferences {
     pub theme: ThemeMode,
+    pub custom: Option<Theme>,
+    pub sync_system: bool,
+    pub light_preset: ThemeMode,
+    pub dark_preset: ThemeMode,
+    pub sync_discord: bool,
+    pub seeded_from_discord: bool,
+    pub high_contrast: bool,
+    pub reduced_motion: bool,
+    pub colorblind_status: bool,
     pub density: Density,
     pub font_px: f32,
+    pub font_scale: f32,
+    pub message_spacing: f32,
+    pub radius_scale: f32,
     pub layout: LayoutKind,
     pub ui_scale: f32,
     pub icon_px: f32,
@@ -303,9 +439,21 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            theme: ThemeMode::Onyx,
+            theme: ThemeMode::OnyxInk,
+            custom: None,
+            sync_system: false,
+            light_preset: ThemeMode::Light,
+            dark_preset: ThemeMode::OnyxInk,
+            sync_discord: false,
+            seeded_from_discord: false,
+            high_contrast: false,
+            reduced_motion: false,
+            colorblind_status: false,
             density: Density::Cozy,
             font_px: 15.0,
+            font_scale: 1.0,
+            message_spacing: 1.0,
+            radius_scale: 1.0,
             layout: LayoutKind::Discord,
             ui_scale: 1.0,
             icon_px: 48.0,
@@ -326,12 +474,56 @@ impl Default for Preferences {
 }
 
 impl Preferences {
-    pub fn palette(&self) -> Palette {
-        let mut palette = Palette::for_mode(self.theme);
-        if self.saturation < 0.99 {
-            palette = desaturate(palette, self.saturation.clamp(0.5, 1.0));
+    pub fn base_theme(&self) -> Theme {
+        if let Some(custom) = &self.custom {
+            custom.clone()
+        } else {
+            Theme::preset(self.theme)
         }
-        palette
+    }
+
+    pub fn resolved(&self, system_dark: Option<bool>) -> Theme {
+        let mut theme = if self.sync_system {
+            match system_dark {
+                Some(true) => Theme::preset(self.dark_preset),
+                Some(false) => Theme::preset(self.light_preset),
+                None => self.base_theme(),
+            }
+        } else {
+            self.base_theme()
+        };
+        theme.metrics.font_scale = self.font_scale;
+        theme.metrics.message_spacing = self.message_spacing;
+        theme.metrics.radius_scale = self.radius_scale;
+        if (self.saturation - 1.0).abs() > 0.01 {
+            theme = theme.desaturate(self.saturation);
+        }
+        if self.high_contrast {
+            theme = theme.high_contrast();
+        }
+        if self.colorblind_status {
+            theme = theme.colorblind_status();
+        }
+        theme
+    }
+
+    pub fn palette_for(&self, system_dark: Option<bool>) -> Palette {
+        Palette::from_theme(&self.resolved(system_dark), self.font_px, self.density)
+    }
+
+    pub fn palette(&self) -> Palette {
+        self.palette_for(None)
+    }
+
+    pub fn theme_label(&self) -> String {
+        if self.custom.is_some() {
+            self.custom
+                .as_ref()
+                .map(|theme| theme.name.clone())
+                .unwrap_or_else(|| "Custom".into())
+        } else {
+            self.theme.label().into()
+        }
     }
 
     pub fn server_icon_px(&self) -> f32 {
@@ -362,114 +554,114 @@ impl Preferences {
         let index = FONT_STEPS
             .iter()
             .position(|step| (*step - self.font_px).abs() < 0.1)
-            .unwrap_or(1);
+            .unwrap_or(2);
         let next = index as i32 + direction;
         let next = next.clamp(0, FONT_STEPS.len() as i32 - 1) as usize;
         self.font_px = FONT_STEPS[next];
     }
-}
 
-fn desaturate(palette: Palette, saturation: f32) -> Palette {
-    let mut palette = palette;
-    let fields = [
-        &mut palette.app_bg,
-        &mut palette.rail,
-        &mut palette.sidebar,
-        &mut palette.chat,
-        &mut palette.members,
-        &mut palette.elevated,
-        &mut palette.input,
-        &mut palette.hover,
-        &mut palette.selected,
-        &mut palette.text,
-        &mut palette.muted,
-        &mut palette.faint,
-        &mut palette.accent,
-        &mut palette.link,
-        &mut palette.ping,
-        &mut palette.code_bg,
-        &mut palette.line,
-    ];
-    for field in fields {
-        *field = mix_gray(*field, saturation);
+    pub fn bump_spacing(&mut self, direction: i32) {
+        let steps = [0.75_f32, 1.0, 1.25, 1.5];
+        self.message_spacing = step_f32(&steps, self.message_spacing, direction);
     }
-    palette
-}
 
-fn mix_gray(hex: u32, saturation: f32) -> u32 {
-    let r = (hex >> 16) & 0xff;
-    let g = (hex >> 8) & 0xff;
-    let b = hex & 0xff;
-    let gray = (r + g + b) / 3;
-    let mix = |channel: u32| -> u32 {
-        (gray as f32 + (channel as f32 - gray as f32) * saturation).round() as u32
-    };
-    (mix(r) << 16) | (mix(g) << 8) | mix(b)
-}
+    pub fn bump_radius(&mut self, direction: i32) {
+        let steps = [0.0_f32, 0.75, 1.0, 1.25, 1.5];
+        self.radius_scale = step_f32(&steps, self.radius_scale, direction);
+    }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+    pub fn bump_saturation(&mut self, direction: i32) {
+        let steps = [0.4_f32, 0.7, 0.85, 1.0];
+        self.saturation = step_f32(&steps, self.saturation, direction);
+    }
 
-    fn channel(hex: u32, index: u8) -> f32 {
-        let value = ((hex >> (index * 8)) & 0xff) as f32 / 255.0;
-        if value <= 0.04045 {
-            value / 12.92
-        } else {
-            ((value + 0.055) / 1.055).powf(2.4)
+    pub fn bump_grain(&mut self, direction: i32) {
+        let Some(custom) = self.custom.as_mut() else {
+            return;
+        };
+        let steps = [0.0_f32, 0.01, 0.02, 0.03];
+        custom.background.grain = step_f32(&steps, custom.background.grain, direction);
+    }
+
+    pub fn to_file(&self) -> AppearanceFile {
+        AppearanceFile {
+            version: 1,
+            preset: self.theme.id().into(),
+            custom: self.custom.as_ref().map(Theme::to_file),
+            sync_system: self.sync_system,
+            light_preset: self.light_preset.id().into(),
+            dark_preset: self.dark_preset.id().into(),
+            sync_discord: self.sync_discord,
+            seeded_from_discord: self.seeded_from_discord,
+            high_contrast: self.high_contrast,
+            reduced_motion: self.reduced_motion,
+            colorblind_status: self.colorblind_status,
+            density: self.density.as_str().into(),
+            font_px: self.font_px,
+            font_scale: self.font_scale,
+            message_spacing: self.message_spacing,
+            radius_scale: self.radius_scale,
+            saturation: self.saturation,
         }
     }
 
-    fn luminance(hex: u32) -> f32 {
-        // Stored as 0xRRGGBB.
-        let r = channel(hex, 2);
-        let g = channel(hex, 1);
-        let b = channel(hex, 0);
-        0.2126 * r + 0.7152 * g + 0.0722 * b
-    }
-
-    pub fn contrast_ratio(foreground: u32, background: u32) -> f32 {
-        let lighter = luminance(foreground).max(luminance(background));
-        let darker = luminance(foreground).min(luminance(background));
-        (lighter + 0.05) / (darker + 0.05)
-    }
-
-    #[test]
-    fn amoled_is_true_black_and_themes_cycle() {
-        let onyx = Palette::for_mode(ThemeMode::Onyx);
-        assert_eq!(onyx.app_bg, 0x000000);
-        assert_eq!(onyx.chat, 0x000000);
-        assert_eq!(onyx.accent, 0x4f6bff);
-        assert_eq!(onyx.accent_text, 0x000000);
-        assert_eq!(onyx.link, 0xa8b8ff);
-        assert_eq!(Palette::for_mode(ThemeMode::Dark).app_bg, 0x16181d);
-        assert_eq!(Palette::for_mode(ThemeMode::Ash).chat, 0x1c1f26);
-        assert_ne!(Palette::for_mode(ThemeMode::Light).text, onyx.text);
-        assert_eq!(
-            ThemeMode::Onyx.cycle().cycle().cycle().cycle(),
-            ThemeMode::Onyx
-        );
-    }
-
-    #[test]
-    fn body_text_meets_wcag_aa_on_every_theme() {
-        for mode in [
-            ThemeMode::Onyx,
-            ThemeMode::Dark,
-            ThemeMode::Ash,
-            ThemeMode::Light,
-        ] {
-            let palette = Palette::for_mode(mode);
-            let text = contrast_ratio(palette.text, palette.chat);
-            let muted = contrast_ratio(palette.muted, palette.chat);
-            let field = contrast_ratio(palette.text, palette.input);
-            let placeholder = contrast_ratio(palette.muted, palette.input);
-            let accent = contrast_ratio(palette.accent_text, palette.accent);
-            assert!(text >= 4.5, "{mode:?} text {text}");
-            assert!(muted >= 4.5, "{mode:?} muted {muted}");
-            assert!(field >= 4.5, "{mode:?} field {field}");
-            assert!(placeholder >= 4.5, "{mode:?} placeholder {placeholder}");
-            assert!(accent >= 4.5, "{mode:?} accent {accent}");
+    pub fn apply_file(&mut self, file: AppearanceFile) {
+        self.theme = file.preset_id();
+        self.custom = file.custom_theme().ok().flatten();
+        self.sync_system = file.sync_system;
+        self.light_preset = file.light_id();
+        self.dark_preset = file.dark_id();
+        self.sync_discord = file.sync_discord;
+        self.seeded_from_discord = file.seeded_from_discord;
+        self.high_contrast = file.high_contrast;
+        self.reduced_motion = file.reduced_motion;
+        self.colorblind_status = file.colorblind_status;
+        if let Some(density) = Density::parse(&file.density) {
+            self.density = density;
         }
+        self.font_px = file.font_px;
+        self.font_scale = file.font_scale;
+        self.message_spacing = file.message_spacing;
+        self.radius_scale = file.radius_scale;
+        self.saturation = file.saturation;
     }
+
+    pub fn ensure_custom(&mut self) -> &mut Theme {
+        if self.custom.is_none() {
+            let mut theme = Theme::preset(self.theme);
+            theme.preset = None;
+            theme.id = "custom".into();
+            theme.name = "Custom".into();
+            theme.chrome = if theme.metrics.ink_chrome {
+                Chrome::Ink
+            } else {
+                Chrome::Classic
+            };
+            self.custom = Some(theme);
+        }
+        self.custom.as_mut().expect("custom theme")
+    }
+}
+
+fn step_f32(steps: &[f32], current: f32, direction: i32) -> f32 {
+    let index = steps
+        .iter()
+        .position(|step| (*step - current).abs() < 0.02)
+        .unwrap_or(0);
+    let next = (index as i32 + direction).clamp(0, steps.len() as i32 - 1) as usize;
+    steps[next]
+}
+
+#[allow(dead_code)]
+pub fn theme_file_from_path(path: &std::path::Path) -> Option<Theme> {
+    let text = std::fs::read_to_string(path).ok()?;
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("json") => rencord_theme::theme_from_json(&text).ok(),
+        _ => rencord_theme::theme_from_toml(&text).ok(),
+    }
+}
+
+#[allow(dead_code)]
+pub fn appearance_template() -> ThemeFile {
+    Theme::preset(ThemeMode::OnyxInk).to_file()
 }

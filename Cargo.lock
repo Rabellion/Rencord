@@ -6557,6 +6557,7 @@ dependencies = [
  "rencord-model",
  "rencord-platform",
  "rencord-store",
+ "rencord-theme",
  "rencord-upload",
  "rencord-voice",
  "serde_json",
@@ -6640,6 +6641,18 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "rencord-theme"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "image",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "toml 0.8.23",
 ]
 
 [[package]]

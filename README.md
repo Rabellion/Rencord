@@ -46,7 +46,7 @@ Several native Rust clients already exist. Rencord is aimed at the gaps that sho
 | | What you get today | What is still ahead |
 | --- | --- | --- |
 | **Voice cut-outs** | Adaptive jitter target from 40&nbsp;ms to 120&nbsp;ms, Opus PLC and in-band FEC, and a one-frame time-stretch instead of a hard skip. A loss simulation beats a fixed 40&nbsp;ms / 8-slot window at 1.5% and 5% loss. | Not measured on a live Discord call. Acoustic echo cancellation and noise suppression are not included. |
-| **Interface** | GPUI Kit 0.10. Direction A layout. The default theme is Onyx Ink: a true-black canvas, `#15152A` hairlines, 8 px gaps, a `#4F6BFF` accent with black ink on the banner, Inter for the UI, and JetBrains Mono for timestamps and status. Dark (Crisp Minimal), Ash, and Light stay selectable. Ctrl/Cmd+K, density, and type size are in settings. The same four columns reflow for 16:9, 16:10, 21:9, 32:9, portrait, and small windows. No Nitro surface. | Not a screen-reader pass. Plugins are still out. Layouts B and C remain behind `--layout`. |
+| **Interface** | GPUI Kit 0.10. Direction A layout. The default theme is Onyx Ink: a true-black canvas, `#15152A` hairlines, a `#4F6BFF` accent with black ink on the banner, Inter for the UI, and JetBrains Mono for timestamps and status. Themes and custom themes are free. The same four columns sit edge to edge and reflow for 16:9, 16:10, 21:9, 32:9, portrait, and small windows. Ctrl/Cmd+K, density, and type size are in settings. No Nitro surface. | Not a screen-reader pass. Plugins are still out. Layouts B and C remain behind `--layout`. |
 | **Streaming** | In progress. Preview capture, the out-of-process worker, software encode, RTP, DAVE video wrap, and the Onyx picker/viewer/PiP are in the tree. VA-API and oneVPL are opened with `dlopen` when a device exists. A wide window shows the viewer only while a stream is open. | No GPU session on the CI machine, so hardware encode does not emit frames. The portal consent dialog, Windows Graphics Capture, and ScreenCaptureKit are not producing frames here. x264 is GPL and is not loaded. Discord may still reject a preset. |
 | **HDR** | `rencord-hdr` tone-maps with BT.2390, Hable, or ACES, writes HDR10 SEI/OBU metadata, and classifies DXGI, ScreenCaptureKit, Wayland, PipeWire, and EDID descriptors. Settings can opt in. The Go Live worker still tone-maps before encode. A 10-bit Discord track needs every viewer to advertise Rencord HDR and a caller to set the SFU flag. That flag is not set. | No NVENC/AMF/QSV/VideoToolbox/VA-API encode session that emits frames, no HEVC/AV1 decoder, no test against Discord's servers. |
 
@@ -54,7 +54,7 @@ Serein, Concord, and Yapfast are further along as daily drivers. Milestone 1 is 
 
 ## Screenshots
 
-Captured from `rencord --demo --voice` on Linux (X11, software GL). The default theme is Onyx Ink. Every surface is `#000000`, separated by 8 px gaps and a 1 px `#15152A` hairline. The accent is `#4F6BFF`, and the new-messages banner uses black text on that blue. Links and mentions use `#A8B8FF`. The UI face is Inter. Timestamps, the date pill, member and dock status, and the voice readout are JetBrains Mono. Avatars in the demo are illustrated. The window uses client-side decorations, so the desktop app-menu button is not part of the chrome. Settings stays in the user dock. `--theme dark` is Crisp Minimal, `--theme ash` and `--theme light` are the other palettes, and `--theme amoled` is Onyx Ink. `--density compact` tightens the channel rows. **Join voice** runs the in-memory loopback and then tries to open the default cpal devices. It does not open a Discord UDP session. The millisecond figure in the voice card is the loopback target, not a fixed mock value.
+Captured from `rencord --demo --voice` on Linux (X11, software GL). The default theme is Onyx Ink. Every surface is `#000000`, meeting at a 1 px `#15152A` hairline. The accent is `#4F6BFF`, and the new-messages banner uses black text on that blue. Links and mentions use `#A8B8FF`. The UI face is Inter. Timestamps, the date pill, member and dock status, and the voice readout are JetBrains Mono. Avatars in the demo are illustrated. The window uses server decorations, so the theme fills the client area with no transparent margin. Settings stays in the user dock. `--theme dark` is the Discord-style dark palette, `--theme crisp` is the earlier dark palette, and `--theme amoled` is pure black. Preset captures are in [docs/design/themes/](docs/design/themes/). `--density compact` tightens the channel rows. **Join voice** runs the in-memory loopback and then tries to open the default cpal devices. It does not open a Discord UDP session. The millisecond figure in the voice card is the loopback target, not a fixed mock value.
 
 | Onyx Ink | Voice |
 | :---: | :---: |
@@ -97,7 +97,7 @@ Honest status for this repository. "Implemented" means the code path and tests e
 | Screen share / camera / Go Live | In progress | Worker, software encode, RTP, DAVE wrap, and `--golive` screens. VA-API and oneVPL are initialized when a device exists. This machine has no GPU session, so those encoders do not emit frames. PipeWire, Windows Graphics Capture, and ScreenCaptureKit do not produce frames yet. |
 | HDR | Software path | Tone-map, 10-bit metadata, probes, and signalling. See [HDR](docs/design/HDR.md). The worker still tone-maps. Hardware encode and Discord passthrough are not linked. |
 | Notifications, keyring, tray, hotkeys | Stub | In-process notification sink. OS keyring is the intended next store; Milestone 1 uses the private file. |
-| Themes, density, quick switcher | Implemented | Onyx Ink is the default. Dark, Ash, and Light remain. Compact, Cozy, and Spacious. Direction A is the default; B and C stay behind `--layout`. Ctrl/Cmd+K. Alt+arrows move channels. |
+| Themes & custom themes, free | Implemented | Onyx Ink is the default. Light, Ash, Dark, Onyx, AMOLED, Midnight Blurple, Nord, Soft Contrast, and Crisp ship with the app. Custom colors, gradients, and theme files are not gated. The choice is stored per account and is not written back to Discord unless Follow Discord is on. See [docs/themes.md](docs/themes.md). |
 | Responsive layout | Implemented | Breakpoints use width, height, and aspect ratio. 16:9 and 16:10 keep the four columns, including 1440×900, 1366×768, 1280×800, and 1280×720. 21:9 and 32:9 cap the message measure and leave the spare width as a gutter unless a stream, thread, or profile panel is open. Portrait keeps a narrow rail, a channel button, and drawers for channels and members. Column edges drag, double-click resets, and widths are stored per aspect and scale. `--window WxH` and `--scale` open a sized window. |
 | Search | Implemented locally | `from:`, `in:`, `has:`, `before:`, and `after:` across cached channels, plus the guild search URL. A hit jumps to that message. Not verified against Discord's search service. |
 | Reactions, reply, edit | Implemented locally; REST client tested against a mock | Optimistic update with rollback. Demo mode does not call Discord. |
@@ -119,7 +119,7 @@ cargo test --workspace
 cargo run -p rencord-desktop -- --demo
 ```
 
-`--demo` opens the GPUI window on local fixture data. It does not contact Discord. The starting palette is Onyx Ink. `--theme dark`, `--theme ash`, `--theme light`, or `--theme amoled` (an alias of Onyx) picks another palette. `--layout a` is the default; `b` and `c` are the other presets. `--density compact` tightens the channel list. `--voice` starts the loopback call. `--golive picker`, `--golive viewer`, or `--golive pip` opens the Go Live screens. `--window 1440x900` sets the frame (logical pixels); `--scale 1.5` (or `150%`) sets `GPUI_X11_SCALE_FACTOR` before the window opens. `--screenshot path.png` grabs that frame and quits. `--bench` prints startup, RSS, frame gaps, and a resize sweep, then quits. `--bench stream` prints capture-to-encode time for the software encoder and quits. Omit `--demo` to paste a token.
+`--demo` opens the GPUI window on local fixture data. It does not contact Discord. The starting palette is Onyx Ink. `--theme` selects a preset (`onyx-ink`, `dark`, `ash`, `onyx`, `amoled`, `light`, `midnight-blurple`, `nord`, `soft-contrast`, `crisp`). `--theme-file` loads a TOML or JSON theme. `--open-settings` opens Appearance. `--layout a` is the default; `b` and `c` are the other presets. `--density compact` tightens the channel list. `--voice` starts the loopback call. `--golive picker`, `--golive viewer`, or `--golive pip` opens the Go Live screens. `--window 1440x900` sets the frame (logical pixels); `--scale 1.5` (or `150%`) sets `GPUI_X11_SCALE_FACTOR` before the window opens. `--screenshot path.png` grabs that frame and quits. `--bench` prints startup, RSS, frame gaps, and a resize sweep, then quits. `--bench stream` prints capture-to-encode time for the software encoder and quits. Omit `--demo` to paste a token.
 
 ```sh
 cargo run -p rencord-desktop --bin rencord-measure -- --offline
@@ -134,7 +134,7 @@ cargo run -p rencord-desktop --bin rencord-measure -- --offline
 | Next / previous server | Ctrl+Alt+Down / Ctrl+Alt+Up |
 | Settings | Ctrl+, or Cmd+, or the Settings button |
 
-Settings switches theme (Onyx Ink, dark, ash, light), density (compact 28 px rows, cozy 32 px, spacious 36 px), and type size (13, 15, or 17 px). It lists cpal input and output names, shows the last loopback jitter line, and states that Go Live defaults to 720p30. The HDR row (Send, Receive, curve) is off by default. It configures the tone-map and the Rencord-to-Rencord plan. It does not start a capture. There is no Nitro row.
+Settings > Appearance switches presets, syncs light and dark with the system, and edits a free custom theme. Density is compact 28 px rows, cozy 32 px, or spacious 36 px. Type size steps through 13–17 px. It lists cpal input and output names, shows the last loopback jitter line, and states that Go Live defaults to 720p30. The HDR row (Send, Receive, curve) is off by default. It configures the tone-map and the Rencord-to-Rencord plan. It does not start a capture. There is no Nitro row. Appearance stays on this machine unless Follow Discord is on, and even then Rencord only reads Discord's theme.
 
 ## Measured on this machine
 
@@ -241,7 +241,8 @@ rencord/
     ├── rencord-voice/        RTP, transport AEAD, DAVE, Opus, jitter
     ├── rencord-media/        Stream presets, HDR policy, worker messages
     ├── rencord-hdr/          HDR probes, tone-map, 10-bit metadata, signalling
-    ├── rencord-platform/     Data dir, token file, login requirements
+    ├── rencord-platform/     Data dir, token file, system appearance, login requirements
+    ├── rencord-theme/        Semantic tokens, presets, custom theme files
     └── rencord-upload/       Cap check, compress, external hosts, split volumes
 ```
 
@@ -286,6 +287,7 @@ Issues and pull requests are welcome. Please:
 - Do not copy Yapfast or Oxidecord source. Read them if you want; write new code.
 - Keep GPUI as the only UI toolkit.
 - Add a test for protocol or voice changes. `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` should pass.
+- UI colors come from `rencord-theme` tokens. Do not put raw hex in `apps/rencord-desktop`. The hex lint test fails the build.
 - Do not add captcha solving, mass DMs, invite raids, or other automation.
 
 ## Acknowledgements

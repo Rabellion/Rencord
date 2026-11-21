@@ -182,6 +182,18 @@ pub struct ReadyData {
     pub user: User,
     #[serde(default)]
     pub guilds: Vec<ReadyGuild>,
+    /// Legacy JSON settings. Newer clients send a protobuf instead. When this
+    /// object is present, Rencord may use it once as a local starting theme.
+    #[serde(default)]
+    pub user_settings: Option<ReadyUserSettings>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct ReadyUserSettings {
+    #[serde(default)]
+    pub theme: Option<String>,
+    #[serde(default)]
+    pub client_theme: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]

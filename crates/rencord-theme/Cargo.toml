@@ -1,0 +1,20 @@
+[package]
+name = "rencord-theme"
+version = "0.1.0"
+description = "Semantic appearance tokens, presets, and custom themes for Rencord"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+flate2.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml = "0.8"
+
+[dev-dependencies]
+serde_json.workspace = true

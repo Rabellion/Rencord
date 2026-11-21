@@ -8,13 +8,13 @@ The window should feel quieter than Discord and cheaper to run. This document is
 2. **No upsells.** There is no Nitro shop, gift button, quest, boost banner, or "upgrade" row. Go Live defaults to 720p30. Higher presets stay in the list, and the settings screen says Discord may still reject them. The HDR chips set a plan. They do not start a stream and they do not claim Discord will carry 10-bit.
 3. **Keyboard first.** Ctrl/Cmd+K opens the quick switcher. Alt+Up/Down moves channels. Ctrl/Cmd+Alt+Up/Down moves servers. Esc closes the switcher and settings. Ctrl/Cmd+, opens settings.
 4. **The list does not draw what is off screen.** Messages use GPUI's virtual list. A row can grow for a code block, an embed, or an attachment.
-5. **Themes are data.** Onyx Ink, dark, ash, and light are token sets. Switching them does not rebuild the session.
+5. **Themes are data.** Every color, radius, font, and gap the shell paints comes from `rencord-theme`. Switching presets does not rebuild the session, and the change eases over 180 ms unless reduced motion is on. Custom themes are free.
 
 ## Design system
 
 ### Color
 
-The default theme is Onyx Ink. The window canvas, rail, channel list, chat, members, dock, inputs, and code blocks are `#000000`. Columns are 8 px-gapped panels drawn with a 1 px `#15152A` hairline. The accent is `#4F6BFF`. The new-messages banner, the unread badge, and the server pill use that blue with `#000000` text. Links, mentions, and syntax keywords use `#A8B8FF`, which stays above WCAG AA on black. Dark (Crisp Minimal) keeps a `#16181D` canvas and `#1C1F26` panels with a 12 px gap. Light uses `#E6E9F0` behind `#F7F8FB` panels.
+The default theme is Onyx Ink. The window canvas, rail, channel list, chat, members, dock, inputs, and code blocks are `#000000`. Columns are 8 px-gapped panels drawn with a 1 px `#15152A` hairline. The accent is `#4F6BFF`. The new-messages banner, the unread badge, and the server pill use that blue with `#000000` text. Links, mentions, and syntax keywords use `#A8B8FF`, which stays above WCAG AA on black. Other presets are Light, Ash, Dark, Onyx (Discord-style, not the ink theme), AMOLED, Midnight Blurple, Nord, Soft Contrast, and Crisp (the earlier dark palette). Light mode uses a cool gray canvas, white elevated surfaces, a soft shadow, and muted text that stays above AA. The token list and the file format are in [../themes.md](../themes.md).
 
 | Token | Onyx Ink | Crisp | Light |
 | --- | --- | --- | --- |
@@ -130,6 +130,6 @@ Layout presets A, B, and C are compared in [DIRECTIONS.md](DIRECTIONS.md). A is 
 - Reactions are local counts (`wave`, `plus`), not custom emoji.
 - The device row records a name. Capture and playback still open cpal's default devices.
 - Search does not cross channels, and it does not query Discord.
-- Light, Dark, and Ash switch live. The captures in the README are Onyx Ink.
+- Presets and custom themes switch live. The captures in the README are Onyx Ink. Every preset, the editor, and a gradient example are in [themes/](themes/).
 - Go Live's picker, viewer, and picture-in-picture use preview frames. The safe preset is 720p30. A 10-bit or PQ source is tone-mapped to 8-bit before that encode. The HDR chips do not open a capture. Send and Receive start off.
 - Keyboard bindings need the window focused. They are not a screen-reader pass.

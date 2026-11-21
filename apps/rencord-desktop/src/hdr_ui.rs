@@ -1,5 +1,5 @@
-//! HDR rows in Settings. Onyx Ink uses a black field, a `#15152A` hairline,
-//! the `#4F6BFF` accent, and JetBrains Mono at 11 px.
+//! HDR rows in Settings. Onyx Ink uses the theme field, hairline, and accent,
+//! and JetBrains Mono at 11 px.
 
 use std::sync::OnceLock;
 

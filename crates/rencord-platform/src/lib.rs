@@ -6,6 +6,14 @@
 //! can run without a secret service. Official login is described, not opened:
 //! Milestone 1 accepts a pasted user token.
 
+mod appearance;
+
+pub use appearance::{
+    appearance_path, parse_gnome_animations, parse_gnome_color_scheme, parse_macos_interface_style,
+    parse_macos_reduce_motion, parse_portal_color_scheme, parse_windows_apps_use_light,
+    sanitize_account, system_reduced_motion, system_scheme, themes_dir, SystemScheme,
+};
+
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
