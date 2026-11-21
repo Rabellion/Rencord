@@ -5,6 +5,7 @@
 
 use crate::capture::{FrameSource, SyntheticSource};
 use crate::encode::{active_encoder, encode_software};
+use crate::encoder::{EncodeFrame, OpenH264Encoder, VideoEncoder};
 use std::time::Instant;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,18 +66,35 @@ pub fn bench_preset_matrix() -> Vec<PresetBench> {
         (3840, 2160, 120),
     ];
     let encoder = crate::usable_encoder();
-    let gpu = if encoder == crate::encode::EncoderKind::Software {
+    let gpu = if encoder == crate::encode::EncoderKind::Software
+        || encoder == crate::encode::EncoderKind::OpenH264
+    {
         "no GPU session"
     } else {
         encoder.label()
     };
+    let mut openh264 = OpenH264Encoder::new().ok();
     targets
         .into_iter()
         .map(|(width, height, fps)| {
             let mut source = SyntheticSource::new("preset", width, height);
             let frame = source.next_frame();
+            let encode_once = |encoder: &mut Option<OpenH264Encoder>| {
+                if let Some(encoder) = encoder.as_mut() {
+                    let _ = encoder.encode(&EncodeFrame {
+                        width,
+                        height,
+                        bit_depth: 8,
+                        bgra: &frame.bgra,
+                        luma10: None,
+                    });
+                } else {
+                    let _unit = encode_software(&frame, 6_000);
+                }
+            };
+            encode_once(&mut openh264);
             let started = Instant::now();
-            let _unit = encode_software(&frame, 6_000);
+            encode_once(&mut openh264);
             let encode_us = started.elapsed().as_micros() as u64;
             let budget_us = 1_000_000 / u64::from(fps);
             PresetBench {
@@ -86,7 +104,7 @@ pub fn bench_preset_matrix() -> Vec<PresetBench> {
                 encode_us,
                 budget_us,
                 sustains: encode_us <= budget_us,
-                encoder: "software",
+                encoder: "OpenH264",
                 gpu,
             }
         })
@@ -132,7 +150,7 @@ mod tests {
     #[test]
     fn the_software_bench_records_both_stages() {
         let bench = bench_software(4);
-        assert_eq!(bench.encoder, "software");
+        assert_eq!(bench.encoder, "OpenH264");
         assert!(bench.capture_us_avg < 50_000);
         assert!(bench.encode_us_avg < 50_000);
         assert!(format_bench(&bench).contains("encode_us="));

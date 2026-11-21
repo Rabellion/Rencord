@@ -123,10 +123,13 @@ pub fn open_source(id: &str) -> Result<SyntheticSource, CaptureError> {
         .find(|source| source.id == id)
         .ok_or_else(|| CaptureError::UnknownSource(id.to_owned()))?;
     if source.backend != CaptureBackend::Synthetic {
-        return Err(CaptureError::Unavailable {
-            backend: format!("{:?}", source.backend),
-            detail: crate::platform::backend_detail(source.backend),
-        });
+        return match crate::capture_os::open_platform_source(id) {
+            Err(err) => Err(err),
+            Ok(()) => Err(CaptureError::Unavailable {
+                backend: format!("{:?}", source.backend),
+                detail: "the platform capturer enumerated a source but did not copy a frame".into(),
+            }),
+        };
     }
     Ok(SyntheticSource::new(
         id,

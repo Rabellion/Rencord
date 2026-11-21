@@ -16,6 +16,7 @@ pub enum EncoderKind {
     Qsv,
     VideoToolbox,
     Vaapi,
+    OpenH264,
     Software,
 }
 
@@ -27,6 +28,7 @@ impl EncoderKind {
             Self::Qsv => "QSV",
             Self::VideoToolbox => "VideoToolbox",
             Self::Vaapi => "VA-API",
+            Self::OpenH264 => "OpenH264",
             Self::Software => "software",
         }
     }
@@ -54,7 +56,7 @@ pub fn probe_encoders() -> Vec<EncoderKind> {
 
 /// The encoder this process will actually call.
 pub fn active_encoder() -> EncoderKind {
-    EncoderKind::Software
+    EncoderKind::OpenH264
 }
 
 fn library_present(names: &[&str]) -> bool {
@@ -158,7 +160,7 @@ mod tests {
         assert_eq!(decoded.bgra[4], decoded.bgra[5]);
         assert!(decoded.bgra[4] > 200);
         assert!(annex_b(&unit).starts_with(&[0, 0, 0, 1]));
-        assert_eq!(active_encoder(), EncoderKind::Software);
+        assert_eq!(active_encoder(), EncoderKind::OpenH264);
         assert!(probe_encoders().contains(&EncoderKind::Software));
     }
 }

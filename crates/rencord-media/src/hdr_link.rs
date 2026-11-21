@@ -14,6 +14,7 @@ use rencord_hdr::{
 };
 
 use crate::encode::EncoderKind;
+use crate::encoder::VideoEncoder;
 use crate::frame::{Frame, HdrFlags};
 
 pub trait Hdr10Encoder {
@@ -82,16 +83,32 @@ impl Hdr10Encoder for UnlinkedHdr10Encoder {
 
     fn encode_main10(
         &mut self,
-        _width: u32,
-        _height: u32,
+        width: u32,
+        height: u32,
         _nits: &[[f32; 3]],
         metadata: &Hdr10StaticMetadata,
     ) -> Result<Vec<u8>, String> {
         let _ = metadata.mastering_payload();
-        Err(format!(
-            "{} Main10 is not linked. HDR10 SEI bytes were built and not submitted.",
-            self.kind.label()
-        ))
+        let pixels = (width as usize).saturating_mul(height as usize);
+        let luma10 = vec![0u16; pixels];
+        let mut encoder = crate::encoder::HardwareEncoder::new(self.kind);
+        match encoder.encode(&crate::encoder::EncodeFrame {
+            width,
+            height,
+            bit_depth: 10,
+            bgra: &[],
+            luma10: Some(&luma10),
+        }) {
+            Err(crate::encoder::EncodeError::NotLinked { detail, .. }) => Err(format!(
+                "{} Main10 is not linked. {detail}",
+                self.kind.label()
+            )),
+            Err(err) => Err(err.to_string()),
+            Ok(_) => Err(format!(
+                "{} Main10 returned bytes this build does not submit",
+                self.kind.label()
+            )),
+        }
     }
 }
 

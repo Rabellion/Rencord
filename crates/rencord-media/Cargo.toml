@@ -13,7 +13,10 @@ name = "rencord-stream"
 path = "src/bin/rencord-stream.rs"
 
 [dependencies]
+ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
 memmap2 = "0.9"
+openh264 = "0.8"
+pipewire = "0.8"
 rencord-hdr.workspace = true
 rencord-model.workspace = true
 rencord-protocol.workspace = true
@@ -21,3 +24,14 @@ rencord-voice.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Foundation",
+    "Graphics_Capture",
+    "Foundation",
+] }
