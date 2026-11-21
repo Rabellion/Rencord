@@ -76,7 +76,7 @@ Upload in progress: [docs/design/onyx/big-file-upload.png](docs/design/onyx/big-
 
 | QR sign-in | Confirm on your phone |
 | :---: | :---: |
-| <img src="docs/design/onyx/login/qr.png" alt="Onyx Ink welcome screen with a login QR code and a Log in with Discord button" width="480" /> | <img src="docs/design/onyx/login/confirm.png" alt="Onyx Ink login waiting for a phone confirmation, with a round avatar" width="480" /> |
+| <img src="docs/design/onyx/login-qr.png" alt="Onyx Ink welcome screen with a login QR code and a Log in with Discord button" width="480" /> | <img src="docs/design/onyx/login-confirm.png" alt="Onyx Ink login waiting for a phone confirmation, with a round avatar" width="480" /> |
 
 ## Feature status
 

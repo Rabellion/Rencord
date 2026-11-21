@@ -133,7 +133,7 @@ Below 900 px, or whenever the window is taller than it is wide, the column stack
 
 Other options holds email and password (TOTP, SMS, backup codes) and, separately, a token field. A captcha does not get solved here. The app opens Discord's login page instead. Passkeys are completed in that same page. The webview is a separate process so it can own the platform toolkit: WebView2, WKWebView, or WebKitGTK. Its profile directory is removed when the window closes.
 
-Screenshots, captured from the GPUI window on Linux: [qr.png](onyx/login/qr.png), [confirm.png](onyx/login/confirm.png), [error.png](onyx/login/error.png), and the stacked portrait [portrait.png](onyx/login/portrait.png).
+Screenshots, captured from the GPUI window on Linux: [login-qr.png](onyx/login-qr.png), [login-confirm.png](onyx/login-confirm.png), [login-error.png](onyx/login-error.png), and the stacked portrait [login-portrait.png](onyx/login-portrait.png).
 
 ## What is still rough
 
