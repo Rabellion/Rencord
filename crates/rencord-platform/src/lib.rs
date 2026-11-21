@@ -35,27 +35,6 @@ pub fn data_dir() -> PathBuf {
     base.join("rencord")
 }
 
-/// What a later milestone needs in order to replace token paste.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OfficialLoginRequirements {
-    pub hosted_url: &'static str,
-    pub windows_macos: &'static str,
-    pub linux: &'static str,
-}
-
-pub fn official_login_requirements() -> OfficialLoginRequirements {
-    OfficialLoginRequirements {
-        hosted_url: "https://discord.com/login",
-        windows_macos: "A separate login window uses WebView2 or WKWebView through wry. It loads the hosted login page. The session is read from Discord's own response, stored in the OS keychain, and the webview is destroyed. Rencord does not attempt to solve a captcha.",
-        linux: "The login window is a separate process using WebKitGTK through wry. It loads the hosted page, reads the session Discord returns, stores it in the keychain, and exits. Email and password are the fallback when WebKitGTK cannot start.",
-    }
-}
-
-pub trait SecretStore {
-    fn load_token(&self) -> Result<Option<String>, PlatformError>;
-    fn clear_token(&self) -> Result<(), PlatformError>;
-}
-
 #[derive(Clone, Debug)]
 pub struct FileSecretStore {
     path: PathBuf,
@@ -73,10 +52,8 @@ impl FileSecretStore {
     pub fn path(&self) -> &Path {
         &self.path
     }
-}
 
-impl SecretStore for FileSecretStore {
-    fn load_token(&self) -> Result<Option<String>, PlatformError> {
+    pub fn load_token(&self) -> Result<Option<String>, PlatformError> {
         match fs::read_to_string(&self.path) {
             Ok(value) => {
                 let trimmed = value.trim();
@@ -91,7 +68,7 @@ impl SecretStore for FileSecretStore {
         }
     }
 
-    fn clear_token(&self) -> Result<(), PlatformError> {
+    pub fn clear_token(&self) -> Result<(), PlatformError> {
         match fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -100,35 +77,11 @@ impl SecretStore for FileSecretStore {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Notification {
-    pub title: String,
-    pub body: String,
-}
-
 /// Freedesktop application id. Matches `rencord.desktop` and `StartupWMClass`.
 pub const APP_ID: &str = "rencord";
 
-/// 3-bar Hexwave for a system tray. No tray is created in this build.
-pub const TRAY_ICON_SVG: &str = include_str!("../../../assets/brand/hexwave-tray.svg");
-
 /// Symbolic icon installed under hicolor as `rencord-symbolic.svg`.
 pub const SYMBOLIC_ICON_SVG: &str = include_str!("../../../assets/brand/hexwave-symbolic.svg");
-
-/// In-process notification sink. Desktop toasts are a later milestone.
-#[derive(Default)]
-pub struct RecordingNotifier {
-    pub items: std::sync::Mutex<Vec<Notification>>,
-}
-
-impl RecordingNotifier {
-    pub fn push(&self, title: impl Into<String>, body: impl Into<String>) {
-        self.items.lock().expect("notifier").push(Notification {
-            title: title.into(),
-            body: body.into(),
-        });
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -150,8 +103,6 @@ mod tests {
     #[test]
     fn brand_icons_match_the_desktop_entry() {
         assert_eq!(APP_ID, "rencord");
-        assert!(TRAY_ICON_SVG.contains("currentColor"));
-        assert!(TRAY_ICON_SVG.contains("Rencord tray icon"));
         assert!(SYMBOLIC_ICON_SVG.contains("currentColor"));
         let desktop = include_str!("../../../assets/brand/linux/rencord.desktop");
         assert!(desktop.contains("Icon=rencord"));
@@ -180,13 +131,5 @@ mod tests {
                 }
             })
             .collect()
-    }
-
-    #[test]
-    fn official_login_is_documented_not_implemented_as_a_solver() {
-        let plan = official_login_requirements();
-        assert_eq!(plan.hosted_url, "https://discord.com/login");
-        assert!(plan.linux.contains("WebKitGTK"));
-        assert!(!plan.windows_macos.to_lowercase().contains("captcha solver"));
     }
 }
