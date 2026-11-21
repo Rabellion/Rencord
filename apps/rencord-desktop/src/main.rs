@@ -474,6 +474,8 @@ struct RencordWindow {
     pinned_top: bool,
     following_tail: bool,
     followed_channel: Option<Snowflake>,
+    /// The channel the composer's placeholder was last written for.
+    composer_for: Option<Snowflake>,
     reveal_hover: bool,
     golive: golive::GoLiveMode,
     columns: SavedColumns,
@@ -701,6 +703,7 @@ impl RencordWindow {
             pinned_top: false,
             following_tail: true,
             followed_channel: None,
+            composer_for: None,
             reveal_hover,
             golive,
             columns: SavedColumns::default(),
@@ -2135,7 +2138,12 @@ impl RencordWindow {
         let dm_open = !self.collapsed.contains("dms");
         let favorite_ids = self.shell.favorites.clone();
         let in_voice = voice.is_some();
-        let mut nav = v_flex().flex_1().overflow_hidden();
+        // Scrolls, and rows keep their height. Without this a long server squeezed every row.
+        let mut nav = v_flex()
+            .id("sidebar-nav")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll();
         nav = nav.child(category_header(
             this.clone(),
             "favorites",
@@ -2353,7 +2361,19 @@ impl RencordWindow {
         .size_full();
 
         let channel_name = channel_title(selected, &channels, &dms);
-        let topic = !plan.hide_topic;
+        if self.composer_for != selected {
+            self.composer_for = selected;
+            let is_dm = dms.iter().any(|channel| Some(channel.id) == selected);
+            let hint = if is_dm {
+                format!("Message @{channel_name}")
+            } else {
+                format!("Message #{channel_name}")
+            };
+            self.composer
+                .update(cx, |state, cx| state.set_placeholder(hint, window, cx));
+        }
+        // There is no channel topic data yet, so only the demo shows one.
+        let topic = !plan.hide_topic && self.shell.demo;
         let mut chat = v_flex()
             .flex_1()
             .min_w(px(0.))
@@ -2610,7 +2630,17 @@ impl RencordWindow {
             .w_full()
             .h_full()
             .bg(rgb(palette.members))
-            .child(section_label("ONLINE — 3", palette.muted));
+            .child(section_label(
+                &format!("ONLINE — {}", members.len()),
+                palette.muted,
+            ));
+        if members.is_empty() {
+            people = people.child(div().px(px(14.)).py(px(6.)).child(paint(
+                "The member list is not available yet.",
+                palette.muted,
+                12.,
+            )));
+        }
         for member in members {
             let (name, activity) = member
                 .split_once(" · ")
@@ -2958,9 +2988,11 @@ impl RencordWindow {
                 .child(
                     v_flex()
                         .flex_1()
+                        .min_w_0()
                         .overflow_hidden()
                         .child(
                             div()
+                                .truncate()
                                 .text_size(px(palette.dock_name))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(palette.text))
@@ -3102,6 +3134,7 @@ fn category_header(
     let onyx = palette.ink_chrome;
     div()
         .id(SharedString::from(format!("cat-{key}")))
+        .flex_none()
         .px(px(8.))
         .pt(px(if onyx { 8. } else { 14. }))
         .pb(px(2.))
@@ -3184,6 +3217,7 @@ fn channel_row(
     let (badge_bg, badge_fg) = (palette.badge_bg, palette.badge_fg);
     div()
         .id(SharedString::from(format!("channel-{id}")))
+        .flex_none()
         .mx(px(8.))
         .px(px(8.))
         .h(px(height))

@@ -107,7 +107,12 @@ impl Shell {
             reply_to: None,
             editing: None,
             reactions: HashMap::new(),
-            members: vec!["Ada".into(), "Charles".into(), "Lovelace".into()],
+            // Only the demo has people to show; a real session has no member data yet.
+            members: if demo {
+                vec!["Ada".into(), "Charles".into(), "Lovelace".into()]
+            } else {
+                Vec::new()
+            },
             last_switch_us: 0,
             jump_index: None,
             favorites: vec![Snowflake::new(100)],
@@ -956,6 +961,12 @@ fn exact_hex(bytes: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_real_session_has_no_made_up_members_but_the_demo_does() {
+        // The member list used to show Ada, Charles and Lovelace after a real login.
+        assert!(Shell::login().members.is_empty());
+        assert_eq!(Shell::demo().members.len(), 3);
+    }
     #[test]
     fn login_shell_leads_with_the_code_not_a_pasted_token() {
         let shell = Shell::login();
