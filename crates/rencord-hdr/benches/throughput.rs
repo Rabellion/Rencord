@@ -4,7 +4,8 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use rencord_hdr::{
-    av1_hdr_metadata_obus, dispatch, hevc_hdr10_sei, CpuToneMapper, Hdr10StaticMetadata, ToneCurve,
+    av1_hdr_metadata_obus, dispatch_resident, hevc_hdr10_sei, CpuToneMapper, Hdr10StaticMetadata,
+    ToneCurve,
     ToneMapParams, ToneMapper,
 };
 
@@ -51,11 +52,12 @@ fn main() {
     let params = ToneMapParams::hdr10_to_sdr100(ToneCurve::Bt2390);
     for (label, count) in [("1080p", 1920 * 1080), ("4K", 3840 * 2160)] {
         let frame = vec![[220.0f32, 80.0, 30.0]; count];
-        match dispatch(&params, &frame) {
+        match dispatch_resident(&params, count as u32, 1, &frame) {
             Ok(first) => {
-                let second = dispatch(&params, &frame).expect("second gpu frame");
+                let second =
+                    dispatch_resident(&params, count as u32, 1, &frame).expect("second gpu frame");
                 println!(
-                    "gpu BT.2390 {label} {} {} software={}: {:.2} ms (submit+readback)",
+                    "gpu BT.2390 {label} {} {} software={}: {:.2} ms (no readback)",
                     first.report.backend,
                     first.report.name,
                     first.report.software,

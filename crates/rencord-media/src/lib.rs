@@ -40,8 +40,8 @@ pub use hdr::{
     hdr_wire_enabled, hdr_wire_format, output_path, planned_pixel_path, tone_map_pq_to_sdr,
 };
 pub use hdr_link::{
-    hdr10_encoder, prepare_frame, Hdr10Encoder, PreparedFrame, ReferenceHdr10Encoder,
-    UnlinkedHdr10Encoder,
+    hdr10_encoder, prepare_frame, GpuFrameSink, Hdr10Encoder, PreparedFrame, ReferenceHdr10Encoder,
+    SoftwareFrameSink, UnlinkedHdr10Encoder,
 };
 pub use hw::{probe_all, usable_encoder, EncoderProbe};
 pub use ipc::{ClientMessage, WorkerMessage};

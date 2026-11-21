@@ -39,7 +39,10 @@ pub use encode::{
     HardwareContractEncoder, HdrCodec, HdrEncodeConfig, HdrEncoder, HdrPicture,
     ReferenceContainerEncoder,
 };
-pub use gpu::{adapter_report, dispatch, map_shader_formula, AdapterReport, GpuDispatch, GpuError};
+pub use gpu::{
+    adapter_report, dispatch, dispatch_resident, map_shader_formula, AdapterReport, GpuDispatch,
+    GpuError, GpuResidentFrame,
+};
 pub use metadata::{
     av1_hdr_metadata_obus, hevc_hdr10_sei, hevc_prefix_sei, metadata_from_sei, parse_annex_b_sei,
     Hdr10StaticMetadata, SeiMessage,

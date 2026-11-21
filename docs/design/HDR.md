@@ -35,14 +35,24 @@ The default master for the settings preview is BT.2020 PQ at 1 000 cd/m² into B
 
 The shader in `shader.rs` is submitted with wgpu on Vulkan, Metal, or D3D12. `GpuToneMapper` uses that dispatch and falls back to the CPU mapper when `request_adapter` fails. A unit test compares the GPU pixels with the same f32 formulas on the CPU and requires a max error under 0.002. If no adapter exists the test prints a skip line and passes, which is what CI does.
 
-On this machine the only adapter is lavapipe (software Vulkan, LLVM 20.1.2). Release, one submit plus readback, pipeline already built:
+On this machine the only adapter is lavapipe (software Vulkan, LLVM 20.1.2). Release, one submit and a device wait, pipeline already built, buffer left on the device:
 
 | Frame | Time |
 | --- | ---: |
-| 1920×1080 | 50.4 ms |
-| 3840×2160 | 241 ms |
+| 1920×1080 | 34.0 ms |
+| 3840×2160 | 182 ms |
 
-The error against the CPU formula on 34 pixels was 0.000024. A mid-range GPU budget of under 2 ms at 1080p and under 4 ms at 4K was not measured, because no such GPU is attached. Lavapipe is faster than the CPU BT.2390 path (91.8 ms at 1080p) and still too slow for a live frame.
+Mapping that 1080p buffer back to the CPU took another 26.6 ms. Go Live does not map it. `SoftwareFrameSink` owns the buffer and the software H.264 access unit keeps the 8-bit preview.
+
+The error against the CPU formula on 34 pixels was 0.000024. A mid-range GPU budget of under 2 ms at 1080p and under 4 ms at 4K was not measured, because no such GPU is attached. Lavapipe is faster than the CPU BT.2390 path and still too slow for a live frame.
+
+Owner check on a real GPU:
+
+```sh
+cargo run --release -p rencord-hdr --example tonemap-bench
+```
+
+The line names the adapter and prints 1080p and 4K BT.2390 GPU time against the CPU time. Here it printed `llvmpipe (LLVM 20.1.2, 256 bits)`, software=true, 34.01 ms GPU / 86.35 ms CPU at 1080p and 181.85 ms GPU / 354.09 ms CPU at 4K.
 
 The picture path does not call the f64 reference per pixel. PQ encode and decode use a 4096-entry table (log-spaced for the forward curve, uniform in PQ for the inverse). The knee itself is still the EETF. A neutral 100 cd/m² pixel stays within 0.002 of the f64 display-linear value.
 

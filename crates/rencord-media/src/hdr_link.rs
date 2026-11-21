@@ -103,6 +103,8 @@ pub struct PreparedFrame {
     pub sdr: Frame,
     pub tone_map: &'static str,
     pub hdr10: Option<Vec<u8>>,
+    /// Set when the tone-map stayed in a device-local buffer.
+    pub gpu_resident_bytes: Option<u64>,
 }
 
 pub fn prepare_frame(
@@ -115,6 +117,7 @@ pub fn prepare_frame(
             sdr: frame.clone(),
             tone_map: "sdr",
             hdr10: None,
+            gpu_resident_bytes: None,
         });
     }
     let nits = nits_from_preview(frame);
@@ -122,35 +125,40 @@ pub fn prepare_frame(
         curve,
         ..ToneMapParams::hdr10_to_sdr100(curve)
     };
-    let mut linear = vec![[0.0f32; 3]; nits.len()];
-    let tone_map = match rencord_hdr::dispatch(&params, &nits) {
-        Ok(gpu) => {
-            linear = gpu.pixels;
-            if gpu.report.software {
-                "wgpu-software"
-            } else {
-                "wgpu"
-            }
+    let mut sdr = frame.clone();
+    sdr.hdr = HdrFlags::default();
+    // The GPU result stays in a device-local buffer. The software H.264 path
+    // cannot sample that texture, so it keeps the 8-bit preview. A hardware
+    // encoder implements [`GpuFrameSink`] and does not map the buffer.
+    let (tone_map, resident_bytes) = match rencord_hdr::dispatch_resident(
+        &params,
+        frame.width,
+        frame.height,
+        &nits,
+    ) {
+        Ok(resident) => {
+            let bytes = resident.byte_size();
+            let mut sink = SoftwareFrameSink;
+            sink.accept(resident)?;
+            ("wgpu-resident", Some(bytes))
         }
         Err(GpuError::NoAdapter) => {
+            let mut linear = vec![[0.0f32; 3]; nits.len()];
             CpuToneMapper::new(params).map_into(&nits, &mut linear);
-            "cpu"
+            for (index, pixel) in linear.iter().enumerate() {
+                let rgb = to_srgb8(*pixel);
+                let offset = index * 4;
+                if offset + 3 < sdr.bgra.len() {
+                    sdr.bgra[offset] = rgb[2];
+                    sdr.bgra[offset + 1] = rgb[1];
+                    sdr.bgra[offset + 2] = rgb[0];
+                    sdr.bgra[offset + 3] = 255;
+                }
+            }
+            ("cpu", None)
         }
         Err(err) => return Err(err.to_string()),
     };
-    let mut sdr = Frame::new(frame.width, frame.height, frame.sequence);
-    sdr.captured_at_us = frame.captured_at_us;
-    sdr.hdr = HdrFlags::default();
-    for (index, pixel) in linear.iter().enumerate() {
-        let rgb = to_srgb8(*pixel);
-        let offset = index * 4;
-        if offset + 3 < sdr.bgra.len() {
-            sdr.bgra[offset] = rgb[2];
-            sdr.bgra[offset + 1] = rgb[1];
-            sdr.bgra[offset + 2] = rgb[0];
-            sdr.bgra[offset + 3] = 255;
-        }
-    }
     let hdr10 = if hdr_send {
         Some(hdr10_encoder().encode_main10(
             frame.width,
@@ -165,7 +173,27 @@ pub fn prepare_frame(
         sdr,
         tone_map,
         hdr10,
+        gpu_resident_bytes: resident_bytes,
     })
+}
+
+/// Receives the tone-mapped texture without copying it back to the CPU.
+pub trait GpuFrameSink {
+    fn accept(&mut self, frame: rencord_hdr::GpuResidentFrame) -> Result<(), String>;
+}
+
+/// The software encoder has no GPU input. It records the handoff and leaves
+/// the buffer unmapped. The 8-bit access unit keeps the preview bytes.
+pub struct SoftwareFrameSink;
+
+impl GpuFrameSink for SoftwareFrameSink {
+    fn accept(&mut self, frame: rencord_hdr::GpuResidentFrame) -> Result<(), String> {
+        if frame.byte_size() == 0 {
+            return Err("empty GPU tone-map".into());
+        }
+        let _ = frame.format();
+        Ok(())
+    }
 }
 
 fn nits_from_preview(frame: &Frame) -> Vec<[f32; 3]> {
@@ -201,6 +229,11 @@ mod tests {
         let prepared = prepare_frame(&frame, true, ToneCurve::Bt2390).unwrap();
         assert!(!prepared.sdr.hdr.is_hdr());
         let hdr = prepared.hdr10.expect("10-bit sidecar");
+        assert!(
+            prepared.tone_map == "cpu" || prepared.gpu_resident_bytes.is_some(),
+            "{}",
+            prepared.tone_map
+        );
         assert!(hdr.starts_with(b"RHDR"));
         assert!(hdr.windows(4).any(|bytes| bytes == [0, 0, 0, 1]));
         let mut hardware = UnlinkedHdr10Encoder {
