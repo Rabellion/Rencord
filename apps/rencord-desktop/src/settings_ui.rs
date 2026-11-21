@@ -356,15 +356,15 @@ fn preset_card(
     let theme = rencord_theme::Theme::preset(mode);
     let colors = theme.colors;
     v_flex()
-        .w(px(104.))
+        .w(px(112.))
         .gap(px(6.))
         .items_center()
         .child(
             div()
                 .id(SharedString::from(format!("preset-{}", mode.id())))
-                .w(px(104.))
-                .h(px(58.))
-                .p(px(if selected { 2. } else { 1. }))
+                .w(px(112.))
+                .h(px(64.))
+                .p(px(if selected { 3. } else { 1. }))
                 .rounded(px(8.))
                 .bg(rgb(if selected {
                     palette.accent
@@ -378,33 +378,7 @@ fn preset_card(
                         cx.notify();
                     });
                 })
-                .child(
-                    h_flex()
-                        .size_full()
-                        .rounded(px(6.))
-                        .overflow_hidden()
-                        .child(div().w(px(16.)).h_full().bg(rgb(colors.bg_rail.to_u32())))
-                        .child(
-                            div()
-                                .w(px(28.))
-                                .h_full()
-                                .bg(rgb(colors.bg_sidebar.to_u32())),
-                        )
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .h_full()
-                                .bg(rgb(colors.bg_chat.to_u32()))
-                                .pt(px(8.))
-                                .px(px(6.))
-                                .child(
-                                    div()
-                                        .h(px(8.))
-                                        .rounded(px(2.))
-                                        .bg(rgb(colors.accent.to_u32())),
-                                ),
-                        ),
-                ),
+                .child(preset_mock(&colors, selected)),
         )
         .child(quiet(
             mode.label(),
@@ -415,6 +389,79 @@ fn preset_card(
             },
             12.,
         ))
+}
+
+fn preset_mock(colors: &rencord_theme::Colors, selected: bool) -> impl IntoElement {
+    let outline = if colors.bg_chat.relative_luminance() > 0.45 {
+        colors.text_primary
+    } else {
+        colors.border_strong
+    };
+    h_flex()
+        .size_full()
+        .rounded(px(5.))
+        .overflow_hidden()
+        .border_1()
+        .border_color(rgb(if selected {
+            outline.to_u32()
+        } else {
+            colors.border_hairline.to_u32()
+        }))
+        .child(
+            v_flex()
+                .w(px(12.))
+                .h_full()
+                .bg(rgb(colors.bg_rail.to_u32()))
+                .items_center()
+                .pt(px(4.))
+                .gap(px(3.))
+                .child(dot(colors.accent.to_u32(), 6.))
+                .child(dot(colors.bg_elevated.to_u32(), 6.)),
+        )
+        .child(
+            v_flex()
+                .w(px(26.))
+                .h_full()
+                .bg(rgb(colors.bg_sidebar.to_u32()))
+                .pt(px(5.))
+                .px(px(3.))
+                .gap(px(3.))
+                .child(bar(colors.text_primary.to_u32(), 8.))
+                .child(bar(colors.bg_selected.to_u32(), 14.))
+                .child(bar(colors.text_muted.to_u32(), 12.)),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .h_full()
+                .bg(rgb(colors.bg_chat.to_u32()))
+                .pt(px(5.))
+                .px(px(3.))
+                .gap(px(3.))
+                .child(bar(colors.accent.to_u32(), 18.))
+                .child(bar(colors.text_primary.to_u32(), 22.))
+                .child(bar(colors.text_muted.to_u32(), 16.)),
+        )
+        .child(
+            v_flex()
+                .w(px(14.))
+                .h_full()
+                .bg(rgb(colors.bg_members.to_u32()))
+                .items_center()
+                .pt(px(5.))
+                .gap(px(3.))
+                .child(dot(colors.status_online.to_u32(), 4.))
+                .child(dot(colors.status_idle.to_u32(), 4.))
+                .child(dot(colors.text_muted.to_u32(), 4.)),
+        )
+}
+
+fn dot(color: u32, size: f32) -> impl IntoElement {
+    div().size(px(size)).rounded(px(size)).bg(rgb(color))
+}
+
+fn bar(color: u32, width: f32) -> impl IntoElement {
+    div().w(px(width)).h(px(2.)).rounded(px(1.)).bg(rgb(color))
 }
 
 fn sync_row(
@@ -575,12 +622,22 @@ fn custom_body(
             PickerTarget::Accent,
             true,
         ))
+        .child(oklch_editor(
+            view.clone(),
+            palette,
+            window.picker.unwrap_or(PickerTarget::Accent),
+            base,
+            accent,
+            &stops,
+        ))
         .child(section("Background", palette))
         .child(gradient_editor(
             view.clone(),
             palette,
             angle,
             &stops,
+            base,
+            accent,
             window.picker,
         ))
         .child(section("Type and shape", palette))
@@ -652,57 +709,43 @@ fn color_editor(
     target: PickerTarget,
     accent: bool,
 ) -> impl IntoElement {
-    let hex = color.to_hex();
-    let ok = color.to_oklch();
-    let mut column = v_flex().gap(px(8.)).child(
-        h_flex()
-            .gap(px(10.))
-            .items_center()
-            .child(quiet(label, palette.muted, 13.))
-            .child(swatch_button(
-                view.clone(),
-                palette,
-                &format!("{id}-current"),
-                color.to_u32(),
-                28.,
-                target,
-            ))
-            .child(
-                div()
-                    .px(px(8.))
-                    .h(px(28.))
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(rgb(palette.line))
-                    .flex()
-                    .items_center()
-                    .child(mono(&hex, palette.text)),
-            )
-            .child(div().w(px(120.)).child(Input::new(hex_input)))
-            .child(ghost(
-                view.clone(),
-                &format!("{id}-apply"),
-                "Apply",
-                palette,
-                move |window, cx| {
-                    let field = if accent {
-                        window.accent_hex.clone()
-                    } else {
-                        window.base_hex.clone()
-                    };
-                    let text = field.read(cx).value().to_string();
-                    if let Some(parsed) = Color::parse(&text) {
-                        window.recolor(parsed.to_u32(), accent);
-                    }
-                    cx.notify();
-                },
-            )),
-    );
-    column = column.child(swatch_row(view.clone(), palette, id, accent));
-    if open {
-        column = column.child(picker_popover(view, palette, id, ok, target));
-    }
-    column
+    let _ = open;
+    v_flex()
+        .gap(px(6.))
+        .child(
+            h_flex()
+                .gap(px(8.))
+                .items_center()
+                .child(div().w(px(52.)).child(quiet(label, palette.muted, 13.)))
+                .child(swatch_button(
+                    view.clone(),
+                    palette,
+                    &format!("{id}-current"),
+                    color.to_u32(),
+                    22.,
+                    target,
+                ))
+                .child(div().w(px(108.)).child(Input::new(hex_input)))
+                .child(ghost(
+                    view.clone(),
+                    &format!("{id}-apply"),
+                    "Apply",
+                    palette,
+                    move |window, cx| {
+                        let field = if accent {
+                            window.accent_hex.clone()
+                        } else {
+                            window.base_hex.clone()
+                        };
+                        let text = field.read(cx).value().to_string();
+                        if let Some(parsed) = Color::parse(&text) {
+                            window.recolor(parsed.to_u32(), accent);
+                        }
+                        cx.notify();
+                    },
+                )),
+        )
+        .child(swatch_row(view, palette, id, accent))
 }
 
 fn swatch_row(
@@ -753,6 +796,9 @@ fn swatch_button(
         .cursor_pointer()
         .on_click(move |_, _, cx| {
             view.update(cx, |window, cx| {
+                if let PickerTarget::Stop(index) = target {
+                    ensure_gradient(window, index);
+                }
                 window.picker = if window.picker == Some(target) {
                     None
                 } else {
@@ -763,64 +809,92 @@ fn swatch_button(
         })
 }
 
-fn picker_popover(
+fn oklch_editor(
     view: Entity<RencordWindow>,
     palette: Palette,
-    id: &str,
+    target: PickerTarget,
+    base: Color,
+    accent: Color,
+    stops: &[Color],
+) -> impl IntoElement {
+    let current = match target {
+        PickerTarget::Base => base,
+        PickerTarget::Accent => accent,
+        PickerTarget::Stop(index) => stops.get(index as usize).copied().unwrap_or(accent),
+    };
+    let ok = current.to_oklch();
+    let label = match target {
+        PickerTarget::Base => "Editing base",
+        PickerTarget::Accent => "Editing accent",
+        PickerTarget::Stop(_) => "Editing stop",
+    };
+    v_flex()
+        .gap(px(6.))
+        .child(quiet(label, palette.faint, 11.))
+        .child(oklch_plane(view, palette, "color-plane", ok, target))
+}
+
+fn oklch_plane(
+    view: Entity<RencordWindow>,
+    palette: Palette,
+    id: &'static str,
     current: Oklch,
     target: PickerTarget,
 ) -> impl IntoElement {
-    let mut hues = h_flex().gap(px(4.));
-    for step in 0..12 {
-        let hue = step as f32 * 30.0;
+    let chromas = [0.02_f32, 0.05, 0.08, 0.12, 0.16, 0.2];
+    let lights = [0.86_f32, 0.72, 0.58, 0.44, 0.3, 0.18];
+    let mut plane = v_flex().gap(px(2.));
+    for (row, lightness) in lights.iter().copied().enumerate() {
+        let mut line = h_flex().gap(px(2.));
+        for (col, chroma) in chromas.iter().copied().enumerate() {
+            let color = Color::from_oklch(Oklch {
+                l: lightness,
+                c: chroma,
+                h: current.h,
+            });
+            let near = (current.l - lightness).abs() < 0.09 && (current.c - chroma).abs() < 0.025;
+            let button = view.clone();
+            line = line.child(
+                div()
+                    .id(SharedString::from(format!("{id}-{row}-{col}")))
+                    .size(px(16.))
+                    .rounded(px(2.))
+                    .bg(rgb(color.to_u32()))
+                    .border_1()
+                    .border_color(rgb(if near { palette.text } else { palette.line }))
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        button.update(cx, |window, cx| {
+                            apply_oklch(window, target, lightness, chroma, current.h);
+                            cx.notify();
+                        });
+                    }),
+            );
+        }
+        plane = plane.child(line);
+    }
+    let mut hues = h_flex().gap(px(2.));
+    for step in 0..16 {
+        let hue = step as f32 * 22.5;
         let color = Color::from_oklch(Oklch {
-            l: current.l.clamp(0.35, 0.8),
+            l: 0.62,
             c: 0.14,
             h: hue,
         });
+        let near = (current.h - hue).abs() < 12.0 || (current.h - hue).abs() > 348.0;
         let button = view.clone();
         hues = hues.child(
             div()
-                .id(SharedString::from(format!("{id}-hue-{step}")))
-                .size(px(16.))
-                .rounded(px(4.))
+                .id(SharedString::from(format!("{id}-h-{step}")))
+                .size(px(14.))
+                .rounded(px(2.))
                 .bg(rgb(color.to_u32()))
                 .border_1()
-                .border_color(rgb(if (current.h - hue).abs() < 15.0 {
-                    palette.accent
-                } else {
-                    palette.line
-                }))
+                .border_color(rgb(if near { palette.text } else { palette.line }))
                 .cursor_pointer()
                 .on_click(move |_, _, cx| {
                     button.update(cx, |window, cx| {
-                        apply_oklch(window, target, current.l, 0.14, hue);
-                        cx.notify();
-                    });
-                }),
-        );
-    }
-    let mut lights = h_flex().gap(px(4.));
-    for step in 0..6 {
-        let lightness = 0.2 + step as f32 * 0.12;
-        let color = Color::from_oklch(Oklch {
-            l: lightness,
-            c: current.c.max(0.04),
-            h: current.h,
-        });
-        let button = view.clone();
-        lights = lights.child(
-            div()
-                .id(SharedString::from(format!("{id}-l-{step}")))
-                .size(px(16.))
-                .rounded(px(4.))
-                .bg(rgb(color.to_u32()))
-                .border_1()
-                .border_color(rgb(palette.line))
-                .cursor_pointer()
-                .on_click(move |_, _, cx| {
-                    button.update(cx, |window, cx| {
-                        apply_oklch(window, target, lightness, current.c.max(0.04), current.h);
+                        apply_oklch(window, target, current.l, current.c.max(0.04), hue);
                         cx.notify();
                     });
                 }),
@@ -833,13 +907,11 @@ fn picker_popover(
         .border_1()
         .border_color(rgb(palette.line))
         .bg(rgb(palette.elevated))
-        .child(quiet("Hue", palette.faint, 11.))
+        .child(plane)
         .child(hues)
-        .child(quiet("Lightness", palette.faint, 11.))
-        .child(lights)
         .child(mono(
             &format!(
-                "OKLCH  L {:.2}  C {:.2}  H {:.0}",
+                "L {:.2}   C {:.2}   H {:.0}",
                 current.l, current.c, current.h
             ),
             palette.muted,
@@ -860,27 +932,27 @@ fn gradient_editor(
     palette: Palette,
     angle: f32,
     stops: &[Color],
+    base: Color,
+    accent: Color,
     picker: Option<PickerTarget>,
 ) -> impl IntoElement {
     let active = !stops.is_empty();
     let shown: Vec<Color> = if active {
         stops.to_vec()
     } else {
-        vec![Color::rgb(palette.app_bg)]
+        vec![base, accent]
     };
-    let mut column = v_flex().gap(px(8.)).child(gradient_bar(&shown)).child({
+    let column = v_flex().gap(px(8.)).child(gradient_bar(&shown)).child({
         let mut row = h_flex().gap(px(8.)).items_center();
-        if active {
-            for (index, stop) in stops.iter().enumerate() {
-                row = row.child(swatch_button(
-                    view.clone(),
-                    palette,
-                    &format!("stop-{index}"),
-                    stop.to_u32(),
-                    22.,
-                    PickerTarget::Stop(index as u8),
-                ));
-            }
+        for (index, stop) in shown.iter().enumerate() {
+            row = row.child(swatch_button(
+                view.clone(),
+                palette,
+                &format!("stop-{index}"),
+                stop.to_u32(),
+                22.,
+                PickerTarget::Stop(index as u8),
+            ));
         }
         row = row.child(ghost(
             view.clone(),
@@ -896,7 +968,7 @@ fn gradient_editor(
                 cx.notify();
             },
         ));
-        if active && stops.len() < 3 {
+        if shown.len() < 3 {
             row = row.child(ghost(
                 view.clone(),
                 "gradient-add",
@@ -910,31 +982,18 @@ fn gradient_editor(
         }
         row
     });
-    if let Some(PickerTarget::Stop(index)) = picker {
-        if let Some(stop) = stops.get(index as usize) {
-            column = column.child(picker_popover(
-                view.clone(),
-                palette,
-                "stop-picker",
-                stop.to_oklch(),
-                PickerTarget::Stop(index),
-            ));
-        }
-    }
-    if active {
-        let steps = [0.0_f32, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0];
-        column = column.child(slider_row(
-            view,
-            palette,
-            "angle",
-            "Angle",
-            &format!("{angle:.0}°"),
-            nearest(&steps, angle),
-            steps.len(),
-            move |window, index| set_angle(window, steps[index]),
-        ));
-    }
-    column
+    let _ = picker;
+    let steps = [0.0_f32, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0];
+    column.child(slider_row(
+        view,
+        palette,
+        "angle",
+        "Angle",
+        &format!("{angle:.0}°"),
+        nearest(&steps, angle),
+        steps.len(),
+        move |window, index| set_angle(window, steps[index]),
+    ))
 }
 
 fn gradient_bar(stops: &[Color]) -> impl IntoElement {
@@ -965,7 +1024,28 @@ fn sample_stops(stops: &[Color], t: f32) -> Color {
     stops[index].lerp(stops[index + 1], local)
 }
 
+fn ensure_gradient(window: &mut RencordWindow, index: u8) {
+    let theme = window.shell.prefs.ensure_custom();
+    let base = theme.base.unwrap_or(theme.colors.bg_base);
+    let accent = theme.accent_seed.unwrap_or(theme.colors.accent);
+    if !matches!(theme.background.kind, BackgroundKind::Gradient { .. }) {
+        theme.background.kind = BackgroundKind::Gradient {
+            angle: 160.0,
+            stops: vec![base, accent],
+        };
+    }
+    if let BackgroundKind::Gradient { stops, .. } = &mut theme.background.kind {
+        while stops.len() <= index as usize && stops.len() < 3 {
+            let next = stops.last().copied().unwrap_or(accent);
+            stops.push(next.shift_lightness(0.08));
+        }
+    }
+    theme.preset = None;
+    window.shell.save_appearance();
+}
+
 fn set_stop(window: &mut RencordWindow, index: usize, color: Color) {
+    ensure_gradient(window, index as u8);
     let theme = window.shell.prefs.ensure_custom();
     if let BackgroundKind::Gradient { stops, .. } = &mut theme.background.kind {
         if let Some(slot) = stops.get_mut(index) {
@@ -977,6 +1057,7 @@ fn set_stop(window: &mut RencordWindow, index: usize, color: Color) {
 }
 
 fn add_stop(window: &mut RencordWindow) {
+    ensure_gradient(window, 1);
     let theme = window.shell.prefs.ensure_custom();
     if let BackgroundKind::Gradient { stops, .. } = &mut theme.background.kind {
         if stops.len() < 3 {
@@ -989,6 +1070,7 @@ fn add_stop(window: &mut RencordWindow) {
 }
 
 fn set_angle(window: &mut RencordWindow, angle: f32) {
+    ensure_gradient(window, 1);
     let theme = window.shell.prefs.ensure_custom();
     if let BackgroundKind::Gradient { angle: slot, .. } = &mut theme.background.kind {
         *slot = angle;
@@ -1024,15 +1106,7 @@ fn advanced_page(
             &theme,
             &window.token_filter,
         ))
-        .child(quiet(
-            &rencord_theme::warnings_text(&theme),
-            if rencord_theme::contrast_warnings(&theme).is_empty() {
-                palette.muted
-            } else {
-                palette.danger
-            },
-            13.,
-        ))
+        .child(contrast_line(palette, &theme))
 }
 
 fn token_list(
@@ -1118,38 +1192,71 @@ fn token_row(
     if let Some(badge) = badge {
         row = row.child(contrast_pill(palette, badge));
     }
-    let mut column = v_flex().child(row);
-    if selected {
-        let ok = color.to_oklch();
-        column = column.child(div().pl(px(32.)).pb(px(6.)).child(slider_row(
-            view.clone(),
-            palette,
-            "token-l",
-            "Lightness",
-            &format!("{:.2}", ok.l),
-            ((ok.l / 0.1).round() as usize).min(9),
-            10,
-            move |window, step| {
-                let lightness = step as f32 * 0.1;
-                set_token_lightness(window, key, lightness);
-            },
-        )));
+    row.child(lightness_stepper(view, palette, key, color.to_oklch().l))
+}
+
+fn lightness_stepper(
+    view: Entity<RencordWindow>,
+    palette: Palette,
+    key: &'static str,
+    lightness: f32,
+) -> impl IntoElement {
+    let steps = [0.2_f32, 0.35, 0.5, 0.7, 0.85];
+    let current = nearest(&steps, lightness);
+    let mut row = h_flex().w(px(78.)).h(px(16.)).gap(px(2.));
+    for (index, step) in steps.iter().copied().enumerate() {
+        let on = index <= current;
+        let button = view.clone();
+        row = row.child(
+            div()
+                .id(SharedString::from(format!("{key}-step-{index}")))
+                .flex_1()
+                .h_full()
+                .rounded(px(2.))
+                .bg(rgb(if on { palette.accent } else { palette.line }))
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
+                    button.update(cx, |window, cx| {
+                        window.token_index = rencord_theme::Colors::keys()
+                            .iter()
+                            .position(|item| *item == key)
+                            .unwrap_or(0);
+                        set_token_lightness(window, key, step);
+                        cx.notify();
+                    });
+                }),
+        );
     }
-    column
+    row
+}
+
+fn contrast_line(palette: Palette, theme: &rencord_theme::Theme) -> impl IntoElement {
+    let failing = rencord_theme::Colors::keys()
+        .iter()
+        .any(|key| contrast_badge(theme, key).is_some_and(|badge| badge == "Fail"));
+    let warnings = rencord_theme::contrast_warnings(theme);
+    let text = if failing || !warnings.is_empty() {
+        if warnings.is_empty() {
+            "A text token is below WCAG AA on its own background.".to_string()
+        } else {
+            rencord_theme::warnings_text(theme)
+        }
+    } else {
+        "Contrast holds at WCAG AA.".into()
+    };
+    quiet(
+        &text,
+        if failing || !warnings.is_empty() {
+            palette.danger
+        } else {
+            palette.muted
+        },
+        13.,
+    )
 }
 
 pub fn contrast_badge(theme: &rencord_theme::Theme, key: &str) -> Option<&'static str> {
-    if !is_text_token(key) {
-        return None;
-    }
-    let fg = theme.colors.get(key)?;
-    let bg = if key == "accent.fg" {
-        theme.colors.accent
-    } else if key.contains("mention") {
-        theme.colors.bg_mention
-    } else {
-        theme.colors.bg_chat
-    };
+    let (fg, bg) = token_pair(theme, key)?;
     let ratio = contrast_ratio(fg, bg);
     Some(if ratio >= 7.0 {
         "AAA"
@@ -1158,6 +1265,26 @@ pub fn contrast_badge(theme: &rencord_theme::Theme, key: &str) -> Option<&'stati
     } else {
         "Fail"
     })
+}
+
+fn token_pair(theme: &rencord_theme::Theme, key: &str) -> Option<(Color, Color)> {
+    let colors = &theme.colors;
+    let fg = colors.get(key)?;
+    let bg = match key {
+        "accent.fg" => colors.accent,
+        "text.mention" => colors.bg_mention,
+        "text.badge" => colors.bg_badge,
+        "text.home" => colors.bg_home,
+        "text.home.active" => colors.bg_home_active,
+        "text.add" => colors.bg_add,
+        "text.voice" => colors.bg_voice,
+        "text.hangup" => colors.bg_chat,
+        "text.faint" => colors.bg_input,
+        "text.primary" | "text.muted" | "text.link" | "text.secondary" | "text.danger"
+        | "text.positive" => colors.bg_chat,
+        _ => return None,
+    };
+    Some((fg, bg))
 }
 
 fn contrast_pill(palette: Palette, label: &'static str) -> impl IntoElement {

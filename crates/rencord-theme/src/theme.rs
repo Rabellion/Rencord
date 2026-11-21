@@ -525,6 +525,7 @@ pub fn contrast_warnings(theme: &Theme) -> Vec<ContrastWarning> {
     check("faint on input", c.text_faint, c.bg_input, 4.5);
     check("link on chat", c.text_link, c.bg_chat, 4.5);
     check("accent text", c.accent_fg, c.accent, 4.5);
+    check("badge text", c.text_badge, c.bg_badge, 4.5);
     check("mention", c.text_mention, c.bg_mention, 4.5);
     check("secondary on chat", c.text_secondary, c.bg_chat, 4.5);
     check("online", c.status_online, c.bg_chat, 3.0);
