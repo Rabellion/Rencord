@@ -417,6 +417,8 @@ struct RencordWindow {
     resize_us: Vec<u128>,
     collapsed: HashSet<&'static str>,
     pinned_top: bool,
+    following_tail: bool,
+    followed_channel: Option<Snowflake>,
     reveal_hover: bool,
     golive: golive::GoLiveMode,
     columns: SavedColumns,
@@ -629,6 +631,8 @@ impl RencordWindow {
             resize_us: Vec::new(),
             collapsed: HashSet::new(),
             pinned_top: false,
+            following_tail: true,
+            followed_channel: None,
             reveal_hover,
             golive,
             columns: SavedColumns::default(),
@@ -1752,12 +1756,19 @@ impl RencordWindow {
             let fill = tile_colors.fill;
             let border = tile_colors.border;
             let letter = tile_colors.letter;
+            let guild_unread = self.shell.session.unread.iter().any(|channel_id| {
+                self.shell
+                    .session
+                    .channels
+                    .get(channel_id)
+                    .is_some_and(|channel| channel.guild_id == Some(id))
+            });
             rail = rail.child(rail_slot(
                 format!("guild-{id}").into(),
                 active,
                 if active {
                     Pill::Selected
-                } else if guild.name != "Analytical Engines" {
+                } else if guild_unread {
                     Pill::Unread
                 } else {
                     Pill::None
@@ -1884,7 +1895,7 @@ impl RencordWindow {
                         format!("* {}", channel.name),
                         selected == Some(channel.id),
                         palette,
-                        None,
+                        self.shell.session.unread.contains(&channel.id).then_some(1),
                         false,
                         row_px,
                         false,
@@ -1916,11 +1927,7 @@ impl RencordWindow {
         }
         if text_open {
             for channel in channels.iter().filter(|channel| channel.kind.is_text()) {
-                let badge = if channel.name == "general" {
-                    Some(1)
-                } else {
-                    None
-                };
+                let badge = self.shell.session.unread.contains(&channel.id).then_some(1);
                 let shown_as_favorite = favorites_open && favorite_ids.contains(&channel.id);
                 nav = nav.child(channel_row(
                     this.clone(),
@@ -1972,7 +1979,7 @@ impl RencordWindow {
                     format!("dm {}", channel.name),
                     selected == Some(channel.id),
                     palette,
-                    None,
+                    self.shell.session.unread.contains(&channel.id).then_some(1),
                     false,
                     row_px,
                     false,
@@ -1981,6 +1988,10 @@ impl RencordWindow {
         }
         sidebar = sidebar.child(nav);
 
+        if self.followed_channel != selected {
+            self.followed_channel = selected;
+            self.following_tail = true;
+        }
         let count =
             messages.len() + usize::from(self.loading_older == self.shell.session.selected_channel);
         if self.timeline.item_count() != count {
@@ -2008,9 +2019,15 @@ impl RencordWindow {
         {
             let view = cx.entity();
             self.timeline.set_scroll_handler(move |event, _window, cx| {
-                if event.visible_range.start == 0 && event.is_scrolled {
-                    view.update(cx, |this, cx| this.scroll_back(cx));
-                }
+                view.update(cx, |this, cx| {
+                    if this.following_tail != event.is_following_tail {
+                        this.following_tail = event.is_following_tail;
+                        cx.notify();
+                    }
+                    if event.visible_range.start == 0 && event.is_scrolled {
+                        this.scroll_back(cx);
+                    }
+                });
             });
         }
         let timeline = list(timeline_state, move |index, _window, _cx| {
@@ -2174,8 +2191,11 @@ impl RencordWindow {
                                 },
                             )),
                     ),
-            )
-            .child(new_messages_banner(palette))
+            );
+        if !self.following_tail {
+            chat = chat.child(jump_to_present(this.clone(), palette));
+        }
+        chat = chat
             .child(date_pill("Today", palette))
             .child(message_column(
                 &plan,
@@ -4445,8 +4465,9 @@ fn panel(palette: Palette, fill: u32) -> gpui_kit::Div {
     }
 }
 
-fn new_messages_banner(palette: Palette) -> impl IntoElement {
+fn jump_to_present(view: Entity<RencordWindow>, palette: Palette) -> impl IntoElement {
     h_flex()
+        .id("jump-to-present")
         .mx(px(12.))
         .mt(px(6.))
         .h(px(28.))
@@ -4455,8 +4476,15 @@ fn new_messages_banner(palette: Palette) -> impl IntoElement {
         .items_center()
         .justify_between()
         .bg(rgb(palette.accent))
-        .child(banner_ink("4 new messages", palette.accent_text, 13.))
-        .child(banner_ink("Mark as read", palette.accent_text, 12.))
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            view.update(cx, |this, cx| {
+                this.timeline.scroll_to_end();
+                this.following_tail = true;
+                cx.notify();
+            });
+        })
+        .child(banner_ink("Jump to present", palette.accent_text, 13.))
 }
 
 fn banner_ink(text: &str, color: u32, size: f32) -> impl IntoElement {
