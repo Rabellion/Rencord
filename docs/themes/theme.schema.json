@@ -39,6 +39,7 @@
         "bg.reaction.mine": { "$ref": "#/$defs/hex" },
         "bg.hangup": { "$ref": "#/$defs/hex" },
         "bg.stage": { "$ref": "#/$defs/hex" },
+        "bg.qr": { "$ref": "#/$defs/hex" },
         "text.primary": { "$ref": "#/$defs/hex" },
         "text.muted": { "$ref": "#/$defs/hex" },
         "text.faint": { "$ref": "#/$defs/hex" },

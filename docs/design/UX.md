@@ -123,6 +123,18 @@ Settings on the sheet remember the default action (Ask, Compress, Link, Split), 
 
 Layout presets A, B, and C are compared in [DIRECTIONS.md](DIRECTIONS.md). A is the default. B and C stay behind `--layout`. The responsive rules above apply to A.
 
+## Sign in
+
+The welcome screen is Onyx Ink: a black canvas, a white QR card, and a column with the wordmark, **Log in with Discord**, and Other options. The accent button is `#4F6BFF` with black ink. Hints and the disclaimer are JetBrains Mono. Avatars stay round.
+
+The QR encodes `https://discord.com/ra/<fingerprint>` at error-correction level H, with the Hexwave mark in the center: a hex speech bubble, voice bars knocked out, and the middle bar in `#4F6BFF`. The same mark sits to the left of the Rencord wordmark. The left card stays 280 px square in the code, confirm, and expired states. After a scan the card shows the avatar and the name. The line under it says it is waiting for approval, and "Not you? Use a new code" starts again.
+
+Below 900 px, or whenever the window is taller than it is wide, the column stacks: copy, then the code. Those widths live in `breakpoints` next to the sidebar and member-list collapses.
+
+Other options holds email and password (TOTP, SMS, backup codes) and, separately, a token field. A captcha does not get solved here. The app opens Discord's login page instead. Passkeys are completed in that same page. The webview is a separate process so it can own the platform toolkit: WebView2, WKWebView, or WebKitGTK. Its profile directory is removed when the window closes.
+
+Screenshots, captured from the GPUI window on Linux: [login-qr.png](onyx/login-qr.png), [login-confirm.png](onyx/login-confirm.png), [login-error.png](onyx/login-error.png), and the stacked portrait [login-portrait.png](onyx/login-portrait.png).
+
 ## What is still rough
 
 - A fenced code block keeps its lines, a monospace face, and a Copy control that appears when the block is hovered.

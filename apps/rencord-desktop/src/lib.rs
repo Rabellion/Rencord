@@ -1,18 +1,19 @@
 //! Desktop session controller. The GPUI binary renders this; tests drive it
 //! without opening a window.
 
+mod breakpoints;
 mod icons;
 pub mod layout;
 mod search;
 mod theme;
 
 use rencord_model::{Message, Snowflake, User};
-use rencord_platform::{FileSecretStore, SecretStore};
 use rencord_store::Session;
 use rencord_voice::{backend_name, loopback_call, LoopbackReport};
 use std::collections::HashMap;
 use std::time::Instant;
 
+pub use breakpoints::{stacks_login, LOGIN_STACK, MEMBERS_HIDE, MEMBERS_HIDE_ONYX, SIDEBAR_HIDE};
 pub use icons::{
     discord_install_icon_dir, hexwave_svg_for_px, icon_pack_dir, rail_hexwave_rgba,
     rail_home_glyph_px,
@@ -145,6 +146,7 @@ impl Shell {
             global_name: Some("Charles".into()),
             discriminator: None,
             bot: false,
+            avatar: None,
         };
         let lovelace = User {
             id: Snowflake::new(3),
@@ -152,6 +154,7 @@ impl Shell {
             global_name: Some("Lovelace".into()),
             discriminator: None,
             bot: false,
+            avatar: None,
         };
         self.reactions.remove(&1000);
         self.session.messages.insert(
@@ -204,6 +207,7 @@ impl Shell {
             global_name: Some("Charles".into()),
             discriminator: None,
             bot: false,
+            avatar: None,
         };
         let channel = Snowflake::new(100);
         for index in 0..count {
@@ -241,19 +245,8 @@ impl Shell {
         Self::fresh(
             Session::default(),
             false,
-            vec!["Paste a user token. Official webview and QR login are not in this build.".into()],
+            vec!["Scan the code with the Discord app, or use Log in with Discord.".into()],
         )
-    }
-
-    pub fn remember_token(token: &str) -> Result<(), String> {
-        let store = FileSecretStore::in_data_dir();
-        store
-            .save_token(token.trim())
-            .map_err(|err| err.to_string())
-    }
-
-    pub fn load_token() -> Option<String> {
-        FileSecretStore::in_data_dir().load_token().ok().flatten()
     }
 
     pub fn note(&mut self, line: impl Into<String>) {
@@ -305,6 +298,7 @@ impl Shell {
             global_name: None,
             discriminator: None,
             bot: false,
+            avatar: None,
         });
         let id = Snowflake::new(
             self.session
@@ -930,6 +924,14 @@ fn exact_hex(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_shell_leads_with_the_code_not_a_pasted_token() {
+        let shell = Shell::login();
+        let text = shell.log.join(" ").to_lowercase();
+        assert!(text.contains("scan"));
+        assert!(!text.contains("paste a user token"));
+    }
 
     #[test]
     fn demo_outline_lists_guilds_channels_dms_and_markdown_source() {

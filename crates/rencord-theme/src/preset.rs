@@ -595,6 +595,7 @@ fn colors(spec: InkSpec) -> Colors {
         bg_reaction_mine: c(spec.mention_bg),
         bg_hangup: danger.with_alpha(0x29),
         bg_stage: Color::rgb(0x000000),
+        bg_qr: Color::rgb(0xffffff),
         text_primary: text,
         text_muted: c(spec.muted),
         text_faint: c(spec.faint),

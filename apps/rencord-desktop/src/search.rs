@@ -211,6 +211,7 @@ mod tests {
                 global_name: Some("Charles".into()),
                 discriminator: None,
                 bot: false,
+                avatar: None,
             },
             content: "notes mention https://example.com and `code`".into(),
             timestamp: "2026-11-19T00:00:00Z".into(),

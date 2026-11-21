@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-const USER_AGENT: &str = "Rencord (https://github.com/Rabellion/Rencord, 0.1.0)";
+const USER_AGENT: &str = rencord_protocol::USER_AGENT;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -29,6 +29,12 @@ pub enum ApiError {
         what: &'static str,
         source: serde_json::Error,
     },
+}
+
+impl ApiError {
+    pub fn is_unauthorized(&self) -> bool {
+        matches!(self, Self::Status { status: 401, .. })
+    }
 }
 
 #[derive(Debug)]
@@ -214,7 +220,9 @@ impl DiscordApi {
             .http
             .request(method.parse().expect("method"), url)
             .header("Authorization", self.token.expose())
-            .header("User-Agent", USER_AGENT);
+            .header("User-Agent", USER_AGENT)
+            .header("X-Super-Properties", rencord_protocol::super_properties())
+            .header("X-Discord-Locale", rencord_protocol::discord_locale());
         if let Some(body) = body {
             request = request.json(body);
         }
@@ -363,6 +371,39 @@ mod tests {
             .unwrap();
         assert_eq!(message.content, "hello **world**");
         assert_eq!(message.channel_id.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn requests_name_rencord_in_the_super_properties() {
+        let (base, rx) = serve_capture(r#"{"id":"1","username":"ada"}"#, "200 OK").await;
+        let api = DiscordApi::with_base(Token::new("test-token"), base);
+        api.current_user().await.unwrap();
+        let request = rx.await.unwrap();
+        let lower = request.to_ascii_lowercase();
+        assert!(lower.contains("user-agent: rencord"));
+        assert!(lower.contains("x-super-properties:"));
+        assert!(!request.contains("Chrome"));
+        let line = request
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with("x-super-properties:"))
+            .unwrap();
+        let encoded = line.split_once(':').unwrap().1.trim();
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+        assert_eq!(value["browser"], "Rencord");
+        assert!(lower.contains("authorization: test-token"));
+    }
+
+    #[tokio::test]
+    async fn unauthorized_is_a_distinct_status() {
+        let base = serve_once(r#"{"message":"401: Unauthorized"}"#, "401 Unauthorized").await;
+        let api = DiscordApi::with_base(Token::new("stale-token"), base);
+        let err = api.current_user().await.unwrap_err();
+        assert!(err.is_unauthorized());
+        assert!(!err.to_string().contains("stale-token"));
     }
 
     #[test]

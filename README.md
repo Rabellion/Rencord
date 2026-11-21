@@ -30,8 +30,8 @@
 ---
 
 > [!WARNING]
-> **Unofficial client. Use at your own risk.**
-> Rencord talks to Discord as your own user. Discord's Terms of Service forbid unauthorized clients and automating a normal user account outside the official OAuth2 and bot API. That can end the account. Nothing in this repository makes that safe or allowed. Read the [disclaimer](#disclaimer). Use an account you can afford to lose. This project does not solve captchas, scrape, or send bulk messages.
+> **Unofficial client. Discord can terminate the account.**
+> Rencord talks to Discord as your own user. Discord's Terms of Service forbid unauthorized clients and automating a normal user account outside the official OAuth2 and bot API. That can end the account. Nothing in this repository makes that safe or allowed. Read the [disclaimer](#disclaimer) before you sign in. Use an account you can afford to lose. This project does not solve captchas, scrape, or send bulk messages.
 
 ---
 
@@ -74,14 +74,21 @@ Picture in picture: [docs/design/onyx/golive-pip.png](docs/design/onyx/golive-pi
 
 Upload in progress: [docs/design/onyx/big-file-upload.png](docs/design/onyx/big-file-upload.png). A failed upload, with Retry: [docs/design/onyx/big-file-error.png](docs/design/onyx/big-file-error.png).
 
+| QR sign-in | Confirm on your phone |
+| :---: | :---: |
+| <img src="docs/design/onyx/login-qr.png" alt="Onyx Ink welcome screen with a login QR code and a Log in with Discord button" width="480" /> | <img src="docs/design/onyx/login-confirm.png" alt="Onyx Ink login waiting for a phone confirmation, with a round avatar" width="480" /> |
+
 ## Feature status
 
 Honest status for this repository. "Implemented" means the code path and tests exist. It does not mean a live Discord session was signed in from CI.
 
 | Capability | Status | Notes |
 | --- | --- | --- |
-| Token login | Implemented | Paste a user token. Stored in a `0600` file under the data directory. |
-| Official / QR / MFA login | Not in this build | Needs an ephemeral `https://discord.com/login` webview: WebView2 or WKWebView on Windows and macOS (`gpui-wry`, which does not cover Linux) and a separate GTK4 / WebKitGTK 6 window on Linux. No captcha solver. |
+| QR login | Implemented | Discord remote auth, gateway v2. RSA-OAEP SHA-256, a QR of `https://discord.com/ra/<fingerprint>`, phone confirm, then the encrypted token. Tested against scripted frames, not a live phone in CI. |
+| Discord login page | Implemented | A separate window loads `https://discord.com/login` in the system webview (WebView2, WKWebView, or WebKitGTK). The password, captcha, passkey, and SSO stay on Discord's page. Rencord reads the session Discord returns and closes the window. |
+| Email, password, MFA | Implemented as fallback | Used when the webview cannot start. TOTP, SMS, and backup codes go to Discord's login endpoints. A captcha hands off to the login window. Rencord does not solve captchas. Passkeys are completed in that window. |
+| Token paste | Advanced only | Hidden under Other options. Same session handling as the other paths. |
+| Session storage | Implemented | OS keychain only (Credential Manager, Keychain, or Secret Service). Not a file. Several accounts can be saved, switched, and removed. Log out calls `/auth/logout` and deletes the keychain item. A 401 returns to the welcome screen. |
 | Guild list, channel list, DM list | Implemented | Demo fixture plus REST bootstrap (`/users/@me`, guilds, channels, DMs). |
 | Message history | Implemented | Bounded to 4000 messages per channel in memory, with a SQLite copy. The timeline is a variable-height virtual list. |
 | Markdown | Implemented | Headings, quotes, fenced code, bold, italic, inline code, links, mentions, spoilers. A fenced block keeps its lines, a monospace face, a background, and a Copy button. |
@@ -92,7 +99,7 @@ Honest status for this repository. "Implemented" means the code path and tests e
 | Adaptive jitter buffer | Implemented | See [Voice](#voice). |
 | Screen share / camera / Go Live | In progress | Worker, software encode, RTP, DAVE wrap, and `--golive` screens. VA-API and oneVPL are initialized when a device exists. This machine has no GPU session, so those encoders do not emit frames. PipeWire, Windows Graphics Capture, and ScreenCaptureKit do not produce frames yet. |
 | HDR | GPU shader when an adapter exists | wgpu compute BT.2390, CPU fallback, capture-format classification, RHDR+SEI sidecar when send is on. See [HDR](docs/design/HDR.md). Lavapipe is not the 2 ms budget. Hardware Main10 encode and platform 10-bit decode are not linked. |
-| Notifications, keyring, tray, hotkeys | Stub | In-process notification sink. OS keyring is the intended next store; Milestone 1 uses the private file. |
+| Notifications, tray, hotkeys | Stub | In-process notification sink. Sessions are in the OS keychain. Tray and global hotkeys are still absent. |
 | Themes & custom themes, free | Implemented | Onyx Ink is the default. Light, Ash, Dark, Onyx, AMOLED, Midnight Blurple, Nord, Soft Contrast, and Crisp ship with the app. Custom colors, gradients, and theme files are not gated. The choice is stored per account and is not written back to Discord unless Follow Discord is on. See [docs/themes.md](docs/themes.md). |
 | Responsive layout | Implemented | Breakpoints use width, height, and aspect ratio. 16:9 and 16:10 keep the four columns, including 1440×900, 1366×768, 1280×800, and 1280×720. 21:9 and 32:9 cap the message measure and leave the spare width as a gutter unless a stream, thread, or profile panel is open. Portrait keeps a narrow rail, a channel button, and drawers for channels and members. Column edges drag, double-click resets, and widths are stored per aspect and scale. `--window WxH` and `--scale` open a sized window. |
 | Search | Implemented locally | `from:`, `in:`, `has:`, `before:`, and `after:` across cached channels, plus the guild search URL. A hit jumps to that message. Not verified against Discord's search service. |
@@ -107,7 +114,8 @@ Rust **1.100** is pinned in `rust-toolchain.toml`. You also need a C toolchain, 
 
 ```sh
 sudo apt-get install pkg-config cmake g++ \
-  libopus-dev libasound2-dev libssl-dev libfontconfig1-dev \
+  libopus-dev libasound2-dev libssl-dev libdbus-1-dev \
+  libgtk-3-dev libwebkit2gtk-4.1-dev libfontconfig1-dev \
   libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
   libx11-dev libxcb1-dev libxcursor-dev libxi-dev libxrandr-dev
 
@@ -115,7 +123,7 @@ cargo test --workspace
 cargo run -p rencord-desktop -- --demo
 ```
 
-`--demo` opens the GPUI window on local fixture data. It does not contact Discord. The starting palette is Onyx Ink. `--theme` selects a preset (`onyx-ink`, `dark`, `ash`, `onyx`, `amoled`, `light`, `midnight-blurple`, `nord`, `soft-contrast`, `crisp`). `--theme-file` loads a TOML or JSON theme. `--open-settings` opens Appearance. `--layout a` is the default; `b` and `c` are the other presets. `--density compact` tightens the channel list. `--voice` starts the loopback call. `--golive picker`, `--golive viewer`, or `--golive pip` opens the Go Live screens. `--window 1440x900` sets the frame (logical pixels); `--scale 1.5` (or `150%`) sets `GPUI_X11_SCALE_FACTOR` before the window opens. `--screenshot path.png` grabs that frame and quits. `--bench` prints startup, RSS, frame gaps, and a resize sweep, then quits. `--bench stream` prints capture-to-encode time for the software encoder and quits. Omit `--demo` to paste a token.
+`--demo` opens the GPUI window on local fixture data. It does not contact Discord. The starting palette is Onyx Ink. `--theme` selects a preset (`onyx-ink`, `dark`, `ash`, `onyx`, `amoled`, `light`, `midnight-blurple`, `nord`, `soft-contrast`, `crisp`). `--theme-file` loads a TOML or JSON theme. `--open-settings` opens Appearance. `--layout a` is the default; `b` and `c` are the other presets. `--density compact` tightens the channel list. `--voice` starts the loopback call. `--golive picker`, `--golive viewer`, or `--golive pip` opens the Go Live screens. `--window 1440x900` sets the frame (logical pixels); `--scale 1.5` (or `150%`) sets `GPUI_X11_SCALE_FACTOR` before the window opens. `--screenshot path.png` grabs that frame and quits. `--bench` prints startup, RSS, frame gaps, and a resize sweep, then quits. `--bench stream` prints capture-to-encode time for the software encoder and quits. Omit `--demo` to open the welcome screen: a QR code, **Log in with Discord**, and Other options. The QR needs a network path to `remote-auth-gateway.discord.gg`. **Log in with Discord** needs WebKitGTK on Linux, WebView2 on Windows, or WKWebView on macOS. A secret service (GNOME Keyring or KWallet) has to be running or the session stays in memory for that process only. Rencord will not write the token to a file.
 
 ```sh
 cargo run -p rencord-desktop --bin rencord-measure -- --offline
@@ -218,7 +226,7 @@ DAVE v1 sits on top of the transport cipher. Media is encrypted with `davey` bef
 
 ```mermaid
 flowchart LR
-  login["Token or future official webview"] --> api["rencord-api"]
+  login["QR, Discord page, or token"] --> api["rencord-api"]
   login --> gw["rencord-gateway"]
   api --> store["rencord-store"]
   gw --> store
@@ -245,9 +253,10 @@ rencord/
     ├── rencord-voice/        RTP, transport AEAD, DAVE, Opus, jitter
     ├── rencord-media/        Stream presets, HDR policy, worker messages
     ├── rencord-hdr/          HDR probes, tone-map, 10-bit metadata, signalling
-    ├── rencord-platform/     Data dir, token file, system appearance, login requirements
+    ├── rencord-platform/     Data dir, system appearance, and the legacy token file
     ├── rencord-theme/        Semantic tokens, presets, custom theme files
-    └── rencord-upload/       Cap check, compress, external hosts, split volumes
+    ├── rencord-upload/       Cap check, compress, external hosts, split volumes
+    └── rencord-auth/         Remote auth, login window, keychain, session state
 ```
 
 The UI does not embed egui. Protocol crates do not depend on GPUI.
@@ -256,12 +265,12 @@ The UI does not embed egui. Protocol crates do not depend on GPUI.
 
 | Milestone | State | What landed |
 | --- | --- | --- |
-| 1. Shell and adaptive jitter | On `main` | GPUI window, token login, guild and DM lists, markdown history, local send, gateway identify against a local socket, jitter simulation. |
+| 1. Shell and adaptive jitter | On `main` | GPUI window, guild and DM lists, markdown history, local send, gateway identify against a local socket, jitter simulation. Token paste is now an advanced fallback. |
 | 2. Live voice path | On `main` | Gateway resume, voice websocket + UDP discovery, transport cipher, speaking, DAVE control frames, mute, deafen, per-SSRC gain, default cpal devices. Local stubs only. |
 | 3. UI | Chosen layout, ready to land | Direction A: Discord-shaped window with WCAG AA themes (Onyx, Dark, Ash, Light), grouped messages, hover actions, a flush user panel, and the six fixes (variable-height code blocks, REST reply/edit/delete/reactions, named audio devices, cross-channel search, AccessKit labels, refresh reporting). Screenshots: [docs/design/DIRECTIONS.md](docs/design/DIRECTIONS.md). |
 | 3c. Responsive window | In the shell | The four-column shell holds 16:9, 16:10, 21:9, 32:9, 9:16, and small frames down to about 800×600. Reading width is capped on wide and 4K frames. Column splitters persist per aspect and DPI step. Window restore is clamped to the visible monitors. Captures: [docs/design/onyx/responsive](docs/design/onyx/responsive). |
 | 3b. Other layouts | Behind `--layout` | `b` keyboard-first and `c` unified sidebar stay in the binary. They are not the default. |
-| 4. Threads, search, uploads, notifications | Not started | OS keyring behind the existing `SecretStore` trait. |
+| 4. Threads, search, uploads, notifications | Not started | Search across cached channels is in. Threads, uploads, and notifications are not. Sessions use the OS keychain. |
 | 5. Voice against Discord | Not started | Point `LiveCall` at a real voice server and keep DAVE rekeys without dropping the call. |
 | 6. Go Live | In progress | Preview frames, `rencord-stream`, software encode, RTP, DAVE wrap, and `--golive` screens are on `main`. VA-API, oneVPL, NVENC, AMF, and VideoToolbox are probed by loading the system library and opening a session. They do not encode until a GPU session succeeds. Real Windows Graphics Capture, ScreenCaptureKit, and a PipeWire consumer are not producing frames yet. 120 fps is offered only when the display reports that refresh and the encoder sustains the budget. |
 | 7. HDR between Rencord users (Milestone 5) | GPU shader linked; hardware codec not | wgpu runs the BT.2390 compute shader on Vulkan, Metal, or D3D12 and falls back to the CPU. DXGI `R16G16B16A16_FLOAT` and `R10G10B10A2`, ScreenCaptureKit 10-bit, and PipeWire P010 are classified. Send-on attaches an RHDR sidecar with HDR10 SEI through `Hdr10Encoder`; the NVENC/AMF/QSV/VideoToolbox/VA-API implementations of that trait return not-linked. D3D11VA, VideoToolbox, and VA-API decode are not opened. The swapchain format is chosen (`Rgb10a2Unorm` or `Rgba16Float`) and no HDR surface is created. Lavapipe measured 50.4 ms at 1080p and 241 ms at 4K, which misses the 2 ms / 4 ms mid-GPU budget. [docs/design/HDR.md](docs/design/HDR.md). |
@@ -271,8 +280,8 @@ The UI must not promise that Discord will accept a Go Live preset or a 10-bit st
 
 ## FAQ
 
-**Where do I get a token?**  
-From your own client, on an account you control. Rencord will not read another app's storage for you. Official login is the plan described above; it is not built.
+**How do I sign in?**  
+The welcome screen shows a QR code. Scan it with the Discord mobile app and confirm. **Log in with Discord** opens Discord's own login page in a system webview, including captcha, 2FA, passkeys, and SSO. Email and password are under Other options and are only the fallback when that window cannot start. A pasted user token is there too, labeled advanced. Rencord does not read another app's storage and does not solve captchas.
 
 **Does Join voice put me in a Discord channel?**  
 No. The button runs the in-process loopback and then tries to open the default microphone and speaker. `LiveCall` can complete discovery, select protocol, transport encryption, speaking, and a voice-gateway resume, but only against the local stub in tests. It has not been pointed at a Discord voice server.
@@ -281,7 +290,7 @@ No. The button runs the in-process loopback and then tries to open the default m
 The preset list is not gated. The client asks for 720p30 until you pick something else. Discord's service can refuse a higher request, and sending more than the account is allowed can put the account at risk. On this machine there is no `/dev/dri` node. VA-API cannot open a GPU, oneVPL `MFXInit` returns -3, and NVENC is not installed. The software encoder does not sustain the frame budget: 1080p60 took 49742 µs (budget 16666), 1440p120 took 88548 µs (budget 8333), 2160p60 took 197401 µs (budget 16666), and 2160p120 took 197694 µs (budget 8333). A 320×180 preview averaged 582 µs to draw and 1340 µs to encode. x264 is installed and is not loaded, because it is GPL.
 
 **Is the SQLite file encrypted?**  
-No. The token file is mode `0600` on Unix. Logout should delete it; the menu for that is not in the window yet (`FileSecretStore::clear_token` is the API).
+No. Sessions are not in that file. They are in the OS keychain. Log out is in Settings: it calls Discord's logout endpoint and deletes the keychain item. An old `0600` token file from an earlier build is read once, moved into the keychain, and deleted. If the keychain cannot be opened, the session stays in memory for that process and is not written to disk.
 
 ## Contributing
 
