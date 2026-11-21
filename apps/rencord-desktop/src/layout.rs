@@ -566,15 +566,26 @@ fn portrait_layout(
     let kind = input.right.displayed(aspect);
     let show_rail = width + 0.5 >= rail_w + CHAT_FLOOR + shell_chrome(2, gap);
     let rail = if show_rail { rail_w } else { 0.0 };
-    let cols = if show_rail { 2 } else { 1 };
-    let chat = (width - shell_chrome(cols, gap) - rail).max(0.0);
+    let channel_room = width - shell_chrome(3, gap) - rail - CHAT_FLOOR;
+    let channels_can = channel_room + 0.5 >= CHANNELS_MIN;
+    let channels = if channels_can && input.show_channels {
+        input
+            .saved
+            .channels
+            .unwrap_or(input.metrics.channels)
+            .clamp(CHANNELS_MIN, channel_room.min(CHANNELS_MAX))
+    } else {
+        0.0
+    };
+    let cols = 1 + (rail > 0.0) as u8 + (channels > 0.0) as u8;
+    let chat = (width - shell_chrome(cols, gap) - rail - channels).max(0.0);
     ResolvedLayout {
         aspect,
         mode: ColumnMode::Portrait,
         scale_bucket,
         profile_key,
         rail,
-        channels: 0.0,
+        channels,
         members: 0.0,
         right: 0.0,
         chat_width: chat,
@@ -585,7 +596,7 @@ fn portrait_layout(
             None
         },
         reading_anchor: input.reading_anchor,
-        channels_as_drawer: true,
+        channels_as_drawer: !channels_can,
         members_as_overlay: true,
         right_as_overlay: kind.is_some(),
         voice_in_chat: true,
@@ -1009,9 +1020,9 @@ mod tests {
             assert_eq!(layout.mode, ColumnMode::Portrait, "{width}x{height}");
             assert_eq!(layout.aspect, AspectClass::Portrait);
             assert!(layout.rail > 0.0, "narrow rail");
-            assert_eq!(layout.channels, 0.0);
+            assert!(layout.channels >= CHANNELS_MIN, "{width}x{height}");
             assert_eq!(layout.members, 0.0);
-            assert!(layout.channels_as_drawer);
+            assert!(!layout.channels_as_drawer, "{width}x{height}");
             assert!(layout.members_as_overlay);
             assert!(layout.voice_in_chat);
             assert!(layout.touch);

@@ -179,6 +179,8 @@ pub struct Guild {
     pub name: String,
     #[serde(default)]
     pub icon: Option<String>,
+    #[serde(default)]
+    pub banner: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,6 +197,9 @@ pub struct Channel {
     /// DM / group DM recipients. Empty for guild channels.
     #[serde(default)]
     pub recipient_ids: Vec<Snowflake>,
+    /// Avatar hash for a direct message, when the recipient has one.
+    #[serde(default)]
+    pub avatar: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

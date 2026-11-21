@@ -13,7 +13,7 @@ mod preset;
 mod theme;
 
 pub use appearance::{read_appearance, write_appearance, AppearanceFile};
-pub use color::{best_ink, contrast_ratio, ensure_contrast, Color, Oklch};
+pub use color::{best_ink, contrast_ratio, default_avatar_fill, ensure_contrast, Color, Oklch};
 pub use derive::derive_theme;
 pub use file::{
     dir_stamp, load_theme_dir, theme_from_code, theme_from_file, theme_from_json, theme_from_toml,

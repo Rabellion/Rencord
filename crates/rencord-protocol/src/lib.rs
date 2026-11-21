@@ -330,6 +330,7 @@ pub struct WireChannel {
 
 impl WireChannel {
     pub fn into_channel(self) -> rencord_model::Channel {
+        let avatar = self.recipients.first().and_then(|user| user.avatar.clone());
         let name = self.name.unwrap_or_else(|| {
             if self.recipients.is_empty() {
                 "Direct Message".to_owned()
@@ -349,6 +350,7 @@ impl WireChannel {
             parent_id: self.parent_id,
             position: self.position,
             recipient_ids: self.recipients.into_iter().map(|user| user.id).collect(),
+            avatar,
         }
     }
 }
@@ -364,15 +366,203 @@ pub struct WireMessage {
     pub timestamp: String,
     #[serde(default, rename = "type")]
     pub kind: u8,
+    #[serde(default)]
+    pub mentions: Vec<User>,
+    #[serde(default)]
+    pub mention_channels: Vec<MentionChannel>,
+    #[serde(default)]
+    pub edited_timestamp: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<WireFile>,
+    #[serde(default)]
+    pub embeds: Vec<WireEmbed>,
+    #[serde(default)]
+    pub sticker_items: Vec<WireSticker>,
+    #[serde(default)]
+    pub message_reference: Option<WireRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MentionChannel {
+    pub id: Snowflake,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireFile {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub proxy_url: String,
+    #[serde(default)]
+    pub content_type: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireEmbed {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub image: Option<WireMedia>,
+    #[serde(default)]
+    pub thumbnail: Option<WireMedia>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireMedia {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub proxy_url: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireSticker {
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireRef {
+    #[serde(default)]
+    pub message_id: Option<Snowflake>,
+}
+
+fn custom_emoji_at(content: &str) -> Option<usize> {
+    match (content.find("<:"), content.find("<a:")) {
+        (Some(plain), Some(animated)) => Some(plain.min(animated)),
+        (Some(plain), None) => Some(plain),
+        (None, Some(animated)) => Some(animated),
+        (None, None) => None,
+    }
+}
+
+fn strip_custom_emoji(content: &str) -> String {
+    let mut out = String::new();
+    let mut rest = content;
+    while let Some(start) = custom_emoji_at(rest) {
+        out.push_str(&rest[..start]);
+        let token = &rest[start..];
+        let Some(end) = token.find('>') else {
+            out.push_str(rest);
+            return out;
+        };
+        rest = &rest[start + end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn custom_emoji_ids(content: &str) -> Vec<u64> {
+    let mut ids = Vec::new();
+    let mut rest = content;
+    while let Some(start) = custom_emoji_at(rest) {
+        let token = &rest[start..];
+        let Some(end) = token.find('>') else { break };
+        let body = &token[1..end];
+        if let Some(id) = body.rsplit(':').next().and_then(|id| id.parse().ok()) {
+            ids.push(id);
+        }
+        rest = &rest[start + end + 1..];
+    }
+    ids
+}
+
+fn media_url(media: &WireMedia) -> String {
+    if media.proxy_url.is_empty() {
+        media.url.clone()
+    } else {
+        media.proxy_url.clone()
+    }
 }
 
 impl From<WireMessage> for Message {
     fn from(value: WireMessage) -> Self {
+        let mut content = value.content;
+        for user in &value.mentions {
+            let name = user.display_name();
+            let id = user.id.get();
+            content = content.replace(&format!("<@{id}>"), &format!("@{name}"));
+            content = content.replace(&format!("<@!{id}>"), &format!("@{name}"));
+        }
+        for channel in &value.mention_channels {
+            if !channel.name.is_empty() {
+                content = content.replace(
+                    &format!("<#{}>", channel.id.get()),
+                    &format!("#{}", channel.name),
+                );
+            }
+        }
+        let mut extras = Vec::new();
+        for file in &value.attachments {
+            let url = media_url(&WireMedia {
+                url: file.url.clone(),
+                proxy_url: file.proxy_url.clone(),
+            });
+            if url.is_empty() {
+                continue;
+            }
+            let image = file
+                .content_type
+                .as_deref()
+                .is_none_or(|kind| kind.starts_with("image/"));
+            if image {
+                extras.push(format!("attachment:{url}"));
+            } else {
+                extras.push(url);
+            }
+        }
+        for embed in &value.embeds {
+            for text in [embed.title.as_deref(), embed.description.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                if !content.contains(text) {
+                    if !content.is_empty() && !content.ends_with('\n') {
+                        content.push('\n');
+                    }
+                    content.push_str(text);
+                }
+            }
+            if let Some(media) = embed.image.as_ref().or(embed.thumbnail.as_ref()) {
+                let url = media_url(media);
+                if !url.is_empty() {
+                    extras.push(format!("attachment:{url}"));
+                }
+            }
+        }
+        if value.edited_timestamp.is_some() && !content.contains("(edited)") {
+            content.push_str(" (edited)");
+        }
+        if let Some(reference) = value.message_reference.as_ref().and_then(|r| r.message_id) {
+            if !content.starts_with("replying to ") {
+                content = format!("replying to {}: {content}", reference.get());
+            }
+        }
+        for sticker in &value.sticker_items {
+            if !sticker.name.is_empty() {
+                extras.push(sticker.name.clone());
+            }
+        }
+        let emoji_ids = custom_emoji_ids(&content);
+        content = strip_custom_emoji(&content);
+        for id in emoji_ids {
+            extras.push(format!("emoji:{id}"));
+        }
+        if content.trim().is_empty() && !extras.is_empty() {
+            content = extras.join("\n");
+        } else if !extras.is_empty() {
+            content.push('\n');
+            content.push_str(&extras.join("\n"));
+        }
         Message {
             id: value.id,
             channel_id: value.channel_id,
             author: value.author,
-            content: value.content,
+            content,
             timestamp: value.timestamp,
             kind: value.kind,
         }
@@ -596,6 +786,68 @@ pub struct OutgoingMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_message_keeps_mentions_edits_replies_and_attachments() {
+        let raw = r#"{
+            "id":"9","channel_id":"100","timestamp":"t","type":0,
+            "content":"hello <@2> in <#100>",
+            "edited_timestamp":"later",
+            "author":{"id":"1","username":"a"},
+            "mentions":[{"id":"2","username":"munch","global_name":"Munch"}],
+            "mention_channels":[{"id":"100","name":"welcome"}],
+            "attachments":[{"url":"https://cdn.example/a.png","proxy_url":"https://media.example/a.png"}],
+            "message_reference":{"message_id":"8"}
+        }"#;
+        let message = Message::from(serde_json::from_str::<WireMessage>(raw).unwrap());
+        assert!(message.content.contains("@Munch"), "{}", message.content);
+        assert!(message.content.contains("#welcome"), "{}", message.content);
+        assert!(message.content.contains("(edited)"), "{}", message.content);
+        assert!(
+            message
+                .content
+                .contains("attachment:https://media.example/a.png"),
+            "{}",
+            message.content
+        );
+        assert!(
+            message.content.starts_with("replying to 8:"),
+            "{}",
+            message.content
+        );
+        assert!(!message.content.contains("<@"), "{}", message.content);
+
+        let embed = r#"{"id":"1","channel_id":"1","content":"","author":{"id":"1","username":"a"},"embeds":[{"title":"Welcome card"}]}"#;
+        let message = Message::from(serde_json::from_str::<WireMessage>(embed).unwrap());
+        assert_eq!(message.content, "Welcome card");
+
+        let both = r#"{"id":"1","channel_id":"1","content":"<a:wave:11> <:smile:22>","edited_timestamp":"t","author":{"id":"1","username":"a"},"embeds":[{"title":"Report","description":"Results"}]}"#;
+        let message = Message::from(serde_json::from_str::<WireMessage>(both).unwrap());
+        assert!(
+            message.content.contains("emoji:11\nemoji:22")
+                || (message.content.find("emoji:11") < message.content.find("emoji:22")),
+            "{}",
+            message.content
+        );
+        assert!(message.content.contains("Report"), "{}", message.content);
+        assert!(message.content.contains("Results"), "{}", message.content);
+        assert!(message.content.contains("(edited)"), "{}", message.content);
+        assert!(!message.content.contains("<a:"), "{}", message.content);
+        assert!(!message.content.contains("<:"), "{}", message.content);
+
+        let file = r#"{"id":"1","channel_id":"1","content":"notes","author":{"id":"1","username":"a"},"attachments":[{"url":"https://cdn.example/a.pdf","content_type":"application/pdf"}]}"#;
+        let message = Message::from(serde_json::from_str::<WireMessage>(file).unwrap());
+        assert!(
+            message.content.contains("https://cdn.example/a.pdf"),
+            "{}",
+            message.content
+        );
+        assert!(
+            !message.content.contains("attachment:"),
+            "{}",
+            message.content
+        );
+    }
 
     #[test]
     fn identify_names_rencord() {
