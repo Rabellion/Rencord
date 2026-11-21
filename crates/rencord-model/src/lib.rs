@@ -181,6 +181,9 @@ pub struct Guild {
     pub icon: Option<String>,
     #[serde(default)]
     pub banner: Option<String>,
+    /// Client-side folder name. Empty guilds stay loose on the rail.
+    #[serde(default)]
+    pub folder: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

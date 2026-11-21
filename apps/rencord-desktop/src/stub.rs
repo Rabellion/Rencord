@@ -123,14 +123,10 @@ async fn handle_http(mut stream: TcpStream, scene: StubScene) {
 fn respond(scene: StubScene, path: &str) -> (&'static str, String) {
     if scene == StubScene::Layout {
         if path.contains("/channels/") && path.contains("/messages") {
-            return ("200 OK", layout_messages());
+            return ("200 OK", layout_messages(channel_from_path(path)));
         }
         if path.contains("/users/@me/channels") {
-            return (
-                "200 OK",
-                r#"[{"id":"200","type":1,"recipients":[{"id":"2","username":"munch","global_name":"Munch","avatar":"u2"}]}]"#
-                    .into(),
-            );
+            return ("200 OK", layout_dms());
         }
         if path.contains("/guilds/") && path.contains("/channels") {
             return (
@@ -142,14 +138,14 @@ fn respond(scene: StubScene, path: &str) -> (&'static str, String) {
         if path.contains("/users/@me/guilds") {
             return (
                 "200 OK",
-                r#"[{"id":"10","name":"Analytical Engines","icon":"g10","banner":"b10"},{"id":"11","name":"Difference Club","icon":"g11","banner":null}]"#
+                r#"[{"id":"10","name":"Analytical Engines","icon":"g10","banner":"b10","folder":"Study"},{"id":"11","name":"Difference Club","icon":"g11","banner":null,"folder":"Study"}]"#
                     .into(),
             );
         }
         if path.contains("/users/@me") {
             return (
                 "200 OK",
-                r#"{"id":"1","username":"agentprivate","global_name":"Agent Private","bot":false}"#
+                r#"{"id":"1","username":"agentprivate","global_name":"Agent Private","avatar":"u1","bot":false}"#
                     .into(),
             );
         }
@@ -231,11 +227,61 @@ fn tinted_png(seed: &str) -> Vec<u8> {
     bytes
 }
 
-fn layout_messages() -> String {
+fn channel_from_path(path: &str) -> u64 {
+    path.split("/channels/")
+        .nth(1)
+        .and_then(|rest| rest.split(['/', '?']).next())
+        .and_then(|id| id.parse().ok())
+        .unwrap_or(0)
+}
+
+fn layout_dms() -> String {
+    let names = [
+        ("200", "2", "Munch", "u2"),
+        ("201", "3", "Nosh", "u3"),
+        ("202", "4", "Boyka", "u4"),
+        ("203", "5", "Ada", "u5"),
+        ("204", "6", "Charles", "u6"),
+        ("205", "7", "Lovelace", "u7"),
+        ("206", "8", "Quill", "u8"),
+        ("207", "9", "Pepper", "u9"),
+        ("208", "10", "Sable", "u10"),
+        ("209", "11", "Indigo", "u11"),
+        ("210", "12", "Moss", "u12"),
+        ("211", "13", "Juniper", "u13"),
+        ("212", "14", "Harbor", "u14"),
+        ("213", "15", "Wren", "u15"),
+        ("214", "16", "Piper", "u16"),
+    ];
+    let rows: Vec<String> = names
+        .iter()
+        .map(|(channel, user, name, avatar)| {
+            format!(
+                r#"{{"id":"{channel}","type":1,"recipients":[{{"id":"{user}","username":"{name}","global_name":"{name}","avatar":"{avatar}"}}]}}"#
+            )
+        })
+        .collect();
+    format!("[{}]", rows.join(","))
+}
+
+fn layout_messages(channel: u64) -> String {
     let origin = HTTP_ORIGIN
         .get()
         .cloned()
         .unwrap_or_else(|| "http://127.0.0.1".to_owned());
+    if channel == 200 {
+        return r#"[
+            {"id":"9002","channel_id":"200","type":0,"content":"Want to queue after this?","timestamp":"2026-11-21T18:10:00Z","author":{"id":"2","username":"munch","global_name":"Munch","avatar":"u2"}},
+            {"id":"9001","channel_id":"200","type":0,"content":"Hey, you around?","timestamp":"2026-11-21T18:02:00Z","author":{"id":"1","username":"agentprivate","global_name":"Agent Private","avatar":"u1"}}
+        ]"#
+        .to_owned();
+    }
+    if channel != 100 {
+        let author = channel.saturating_sub(198);
+        return format!(
+            r#"[{{"id":"{channel}0","channel_id":"{channel}","type":0,"content":"Note from channel {channel}.","timestamp":"2026-11-21T12:00:00Z","author":{{"id":"{author}","username":"friend","global_name":"Friend","avatar":"u{author}"}}}}]"#
+        );
+    }
     format!(
         r#"[
         {{"id":"6","channel_id":"100","type":0,"content":"Still here, <@1>. <:wave:42>","edited_timestamp":"2026-11-21T18:07:00Z","timestamp":"2026-11-21T18:06:00Z","mentions":[{{"id":"1","username":"agentprivate","global_name":"Agent Private"}}],"attachments":[{{"url":"{origin}/attachments/note.png","proxy_url":"{origin}/attachments/note.png","content_type":"image/png"}}],"author":{{"id":"2","username":"munch","global_name":"Munch","avatar":"u2"}}}},
@@ -274,7 +320,11 @@ async fn handle_gateway(stream: TcpStream) {
     }
     // Identify (or a heartbeat) arrives before READY.
     let _ = socket.next().await;
-    let ready = r#"{"op":0,"t":"READY","s":1,"d":{"session_id":"stub","user":{"id":"1","username":"ada","global_name":"Ada"},"guilds":[{"id":"10","name":"Analytical Engines","icon":"abc","channels":[{"id":"100","type":0,"name":"general","guild_id":"10"}]},{"id":"11","name":"Difference Club","icon":null,"channels":[{"id":"111","type":0,"name":"lounge"}]}],"user_settings":{"theme":"dark"}}}"#;
+    let ready = if current() == Some(StubScene::Layout) {
+        r#"{"op":0,"t":"READY","s":1,"d":{"session_id":"stub","user":{"id":"1","username":"agentprivate","global_name":"Agent Private","avatar":"u1"},"guilds":[{"id":"10","name":"Analytical Engines","icon":"g10","channels":[{"id":"100","type":0,"name":"welcome","guild_id":"10"}]}],"user_settings":{"theme":"dark"},"read_state":{"entries":[{"id":"100","last_message_id":"4","mention_count":1}]},"presences":[{"user":{"id":"1"},"status":"online","activities":[{"type":4,"state":"RESONATING"}]},{"user":{"id":"2"},"status":"online","activities":[{"type":0,"name":"THE FINALS"}]},{"user":{"id":"3"},"status":"idle","activities":[{"name":"In voice"}]},{"user":{"id":"4"},"status":"dnd","activities":[{"type":0,"name":"ROBLOX"}]}],"voice_states":[{"guild_id":"10","channel_id":"110","user_id":"3","self_mute":false,"self_deaf":false,"member":{"user":{"id":"3","global_name":"Nosh","avatar":"u3"}}},{"guild_id":"10","channel_id":"110","user_id":"4","self_mute":true,"self_deaf":false,"member":{"user":{"id":"4","global_name":"Boyka","avatar":"u4"}}},{"guild_id":"10","channel_id":"110","user_id":"1","self_mute":false,"self_deaf":false,"member":{"user":{"id":"1","global_name":"Agent Private","avatar":"u1"}}}]}}"#
+    } else {
+        r#"{"op":0,"t":"READY","s":1,"d":{"session_id":"stub","user":{"id":"1","username":"ada","global_name":"Ada"},"guilds":[{"id":"10","name":"Analytical Engines","icon":"abc","channels":[{"id":"100","type":0,"name":"general","guild_id":"10"}]},{"id":"11","name":"Difference Club","icon":null,"channels":[{"id":"111","type":0,"name":"lounge"}]}],"user_settings":{"theme":"dark"}}}"#
+    };
     if socket
         .send(tokio_tungstenite::tungstenite::Message::Text(ready.into()))
         .await
@@ -285,7 +335,7 @@ async fn handle_gateway(stream: TcpStream) {
     while let Some(Ok(message)) = socket.next().await {
         let text = message.into_text().unwrap_or_default();
         if text.contains("\"op\":14") {
-            let update = r#"{"op":0,"t":"GUILD_MEMBER_LIST_UPDATE","s":2,"d":{"guild_id":"10","id":"100","ops":[{"op":"SYNC","range":[0,99],"items":[{"group":{"id":"Online","count":1}},{"member":{"user":{"id":"2","global_name":"Munch","avatar":"u2"},"presence":{"status":"online","activities":[{"type":0,"name":"THE FINALS"}]}}},{"group":{"id":"Ranked Players","count":2}},{"member":{"user":{"id":"3","global_name":"Nosh","avatar":"u3"},"avatar":"gm3","presence":{"status":"online","activities":[{"name":"In voice"}]}}},{"member":{"user":{"id":"4","global_name":"Boyka","avatar":"u4"},"presence":{"status":"idle","activities":[{"type":0,"name":"ROBLOX"}]}}}]}]}}"#;
+            let update = r#"{"op":0,"t":"GUILD_MEMBER_LIST_UPDATE","s":2,"d":{"guild_id":"10","id":"100","ops":[{"op":"SYNC","range":[0,99],"items":[{"group":{"id":"Online","count":1}},{"member":{"user":{"id":"2","global_name":"Munch","avatar":"u2"},"presence":{"status":"online","activities":[{"type":0,"name":"THE FINALS"}]}}},{"group":{"id":"Ranked Players","count":2}},{"member":{"user":{"id":"3","global_name":"Nosh","avatar":"u3"},"avatar":"gm3","roles":[{"id":"9","name":"Ranked","color":15158332,"position":5}],"presence":{"status":"online","activities":[{"name":"In voice"}]}}},{"member":{"user":{"id":"4","global_name":"Boyka","avatar":"u4"},"presence":{"status":"idle","activities":[{"type":0,"name":"ROBLOX"}]}}}]}]}}"#;
             if socket
                 .send(tokio_tungstenite::tungstenite::Message::Text(update.into()))
                 .await
@@ -330,5 +380,13 @@ mod tests {
         let (status, page) = respond(StubScene::Scroll, target);
         assert!(status.starts_with("200"), "{status}");
         assert!(page.contains("\"2900\""), "{page}");
+        let welcome = layout_messages(100);
+        let direct = layout_messages(200);
+        assert!(welcome.contains("\"type\":7"), "{welcome}");
+        assert!(welcome.contains("\"channel_id\":\"100\""));
+        assert!(direct.contains("Want to queue"), "{direct}");
+        assert!(direct.contains("\"channel_id\":\"200\""));
+        assert!(!direct.contains("joined the server"), "{direct}");
+        assert!(layout_dms().matches("\"type\":1").count() >= 15);
     }
 }

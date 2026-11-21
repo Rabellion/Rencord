@@ -43,6 +43,23 @@ pub struct Session {
     pub unread: HashSet<Snowflake>,
     /// Role groups for the guild currently subscribed with opcode 14.
     pub roster: Vec<RosterGroup>,
+    /// Last read message id per channel, from READY `read_state`.
+    pub read_marker: HashMap<u64, u64>,
+    pub mention_counts: HashMap<u64, u32>,
+    /// Presence line per user id: status, then activity or custom status.
+    pub presences: HashMap<u64, (String, String)>,
+    pub custom_status: String,
+    /// Voice channel id to the people sitting in it.
+    pub voice_seats: HashMap<u64, Vec<VoiceSeat>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VoiceSeat {
+    pub user_id: u64,
+    pub name: String,
+    pub avatar: Option<String>,
+    pub mute: bool,
+    pub deaf: bool,
 }
 
 impl Default for Session {
@@ -63,6 +80,11 @@ impl Default for Session {
             reactions: HashMap::new(),
             unread: HashSet::new(),
             roster: Vec::new(),
+            read_marker: HashMap::new(),
+            mention_counts: HashMap::new(),
+            presences: HashMap::new(),
+            custom_status: String::new(),
+            voice_seats: HashMap::new(),
         }
     }
 }
@@ -76,14 +98,19 @@ impl Session {
                 guilds,
                 discord_theme,
                 discord_client_theme,
+                read_state,
+                presences,
+                voice_states,
             } => {
                 self.discord_theme = discord_theme;
                 self.discord_client_theme = discord_client_theme;
                 self.session_id = Some(session_id);
+                let self_id = user.id.get();
                 self.user = Some(user);
                 for guild in guilds {
                     self.upsert_ready_guild(guild);
                 }
+                self.apply_ready_extras(self_id, read_state, presences, voice_states);
                 self.status_line = "Gateway ready".to_owned();
             }
             GatewayEvent::GuildUpsert {
@@ -153,6 +180,22 @@ impl Session {
                         None => "Left voice".to_owned(),
                     };
                 }
+                let user_id = state.user_id.get();
+                for seats in self.voice_seats.values_mut() {
+                    seats.retain(|seat| seat.user_id != user_id);
+                }
+                if let Some(channel) = state.channel_id {
+                    self.voice_seats
+                        .entry(channel.get())
+                        .or_default()
+                        .push(VoiceSeat {
+                            user_id,
+                            name: format!("User {user_id}"),
+                            avatar: None,
+                            mute: state.self_mute,
+                            deaf: state.self_deaf,
+                        });
+                }
             }
             GatewayEvent::VoiceServer(update) => {
                 if update.endpoint.is_some() {
@@ -210,6 +253,7 @@ impl Session {
             name: name.unwrap_or_else(|| format!("Guild {id}")),
             icon,
             banner: None,
+            folder: None,
         });
     }
 
@@ -259,7 +303,11 @@ impl Session {
     /// channel stays in id order with no duplicates however they arrive.
     pub fn merge_history(&mut self, channel_id: Snowflake, messages: Vec<Message>) {
         let list = self.messages.entry(channel_id).or_default();
-        list.extend(messages);
+        list.extend(
+            messages
+                .into_iter()
+                .filter(|message| message.channel_id == channel_id),
+        );
         list.sort_by_key(|message| message.id.get());
         list.dedup_by_key(|message| message.id.get());
         if list.len() > MESSAGE_CAP {
@@ -274,7 +322,11 @@ impl Session {
         let list = self.messages.entry(channel_id).or_default();
         let known: std::collections::HashSet<u64> =
             list.iter().map(|message| message.id.get()).collect();
-        list.extend(messages);
+        list.extend(
+            messages
+                .into_iter()
+                .filter(|message| message.channel_id == channel_id),
+        );
         list.sort_by_key(|message| message.id.get());
         list.dedup_by_key(|message| message.id.get());
         let prepended = list
@@ -320,6 +372,56 @@ impl Session {
     }
 
     /// Home is the direct-message list. A guild's sidebar does not include it.
+    pub fn apply_ready_extras(
+        &mut self,
+        self_id: u64,
+        read_state: Vec<rencord_gateway::ReadyRead>,
+        presences: Vec<rencord_gateway::ReadyPresence>,
+        voice_states: Vec<rencord_gateway::ReadyVoice>,
+    ) {
+        self.read_marker.clear();
+        self.mention_counts.clear();
+        for state in read_state {
+            if state.last_message_id > 0 {
+                self.read_marker
+                    .insert(state.channel_id, state.last_message_id);
+            }
+            if state.mention_count > 0 {
+                self.mention_counts
+                    .insert(state.channel_id, state.mention_count);
+            }
+        }
+        self.presences.clear();
+        self.custom_status.clear();
+        for presence in presences {
+            if presence.user_id == self_id && !presence.activity.is_empty() {
+                self.custom_status = presence.activity.clone();
+            }
+            self.presences
+                .insert(presence.user_id, (presence.status, presence.activity));
+        }
+        self.voice_seats.clear();
+        for state in voice_states {
+            self.sit_voice(state);
+        }
+    }
+
+    fn sit_voice(&mut self, state: rencord_gateway::ReadyVoice) {
+        let Some(channel) = state.channel_id else {
+            return;
+        };
+        self.voice_seats
+            .entry(channel)
+            .or_default()
+            .push(VoiceSeat {
+                user_id: state.user_id,
+                name: state.name,
+                avatar: state.avatar,
+                mute: state.mute,
+                deaf: state.deaf,
+            });
+    }
+
     pub fn open_home(&mut self) {
         self.selected_guild = None;
         self.selected_channel = self
@@ -370,12 +472,14 @@ impl Session {
             name: "Analytical Engines".into(),
             icon: None,
             banner: None,
+            folder: None,
         });
         session.upsert_guild(Guild {
             id: Snowflake::new(11),
             name: "Difference Club".into(),
             icon: None,
             banner: None,
+            folder: None,
         });
         session.upsert_channel(Channel {
             id: Snowflake::new(100),
@@ -520,6 +624,52 @@ mod tests {
     use super::*;
     use rencord_gateway::GatewayEvent;
 
+    fn sample_message(id: u64, channel: u64, content: &str) -> Message {
+        Message {
+            id: Snowflake::new(id),
+            channel_id: Snowflake::new(channel),
+            author: User {
+                id: Snowflake::new(2),
+                username: "munch".into(),
+                global_name: Some("Munch".into()),
+                discriminator: None,
+                bot: false,
+                avatar: Some("u2".into()),
+            },
+            content: content.into(),
+            timestamp: "2026-11-21T18:00:00Z".into(),
+            kind: 0,
+        }
+    }
+
+    #[test]
+    fn a_dm_keeps_only_that_channels_messages() {
+        let mut session = Session::default();
+        session.upsert_channel(Channel {
+            id: Snowflake::new(200),
+            name: "Munch".into(),
+            kind: ChannelKind::Dm,
+            guild_id: None,
+            parent_id: None,
+            position: 0,
+            recipient_ids: vec![Snowflake::new(2)],
+            avatar: Some("u2".into()),
+        });
+        session.merge_history(
+            Snowflake::new(200),
+            vec![
+                sample_message(6, 100, "Munch joined the server."),
+                sample_message(7, 200, "Want to queue?"),
+            ],
+        );
+        session.select_channel(Snowflake::new(200));
+        let shown = session.messages_for(session.selected_channel.unwrap());
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].content, "Want to queue?");
+        assert_eq!(shown[0].channel_id.get(), 200);
+        assert!(session.messages_for(Snowflake::new(100)).is_empty());
+    }
+
     #[test]
     fn demo_session_has_guilds_dms_and_messages() {
         let session = Session::demo();
@@ -655,6 +805,9 @@ mod tests {
             }],
             discord_theme: None,
             discord_client_theme: None,
+            read_state: Vec::new(),
+            presences: Vec::new(),
+            voice_states: Vec::new(),
         });
         assert_eq!(session.guilds[0].name, "Guild 10");
         session.apply_gateway(GatewayEvent::GuildUpsert {
