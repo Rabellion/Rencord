@@ -7,7 +7,7 @@
 use rencord_gateway::GatewayEvent;
 use rencord_model::{Channel, ChannelKind, Guild, Message, Snowflake, User};
 use rusqlite::{params, Connection};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 const MESSAGE_CAP: usize = 4000;
@@ -36,6 +36,8 @@ pub struct Session {
     pub discord_client_theme: Option<String>,
     /// Reaction counts keyed by message id. Gateway events maintain this.
     pub reactions: HashMap<u64, Vec<(String, u32)>>,
+    /// Channels with a message that arrived while they were not on screen.
+    pub unread: HashSet<Snowflake>,
 }
 
 impl Default for Session {
@@ -54,6 +56,7 @@ impl Default for Session {
             discord_theme: None,
             discord_client_theme: None,
             reactions: HashMap::new(),
+            unread: HashSet::new(),
         }
     }
 }
@@ -106,7 +109,14 @@ impl Session {
                 emoji,
                 remove,
             } => self.apply_reaction(message_id.get(), emoji, !remove),
-            GatewayEvent::MessageCreate(message) => self.insert_message(message),
+            GatewayEvent::MessageCreate(message) => {
+                let channel_id = message.channel_id;
+                let viewing = self.selected_channel == Some(channel_id);
+                self.insert_message(message);
+                if !viewing {
+                    self.unread.insert(channel_id);
+                }
+            }
             GatewayEvent::MessageDelete {
                 channel_id,
                 message_id,
@@ -306,6 +316,9 @@ impl Session {
             .into_iter()
             .find(|channel| channel.kind.is_text())
             .map(|channel| channel.id);
+        if let Some(channel) = self.selected_channel {
+            self.unread.remove(&channel);
+        }
     }
 
     pub fn select_channel(&mut self, channel_id: Snowflake) {
@@ -313,6 +326,7 @@ impl Session {
             self.selected_guild = channel.guild_id;
         }
         self.selected_channel = Some(channel_id);
+        self.unread.remove(&channel_id);
     }
 
     /// Demo fixture used by `--demo` and by tests. No network.
@@ -497,6 +511,33 @@ mod tests {
         }));
         let messages = session.messages_for(Snowflake::new(100));
         assert_eq!(messages.last().unwrap().content, "live");
+        assert!(!session.unread.contains(&Snowflake::new(100)));
+    }
+
+    #[test]
+    fn a_message_elsewhere_is_unread_until_that_channel_is_open() {
+        let mut session = Session::demo();
+        let author = session.user.clone().unwrap();
+        session.apply_gateway(GatewayEvent::MessageCreate(Message {
+            id: Snowflake::new(3001),
+            channel_id: Snowflake::new(110),
+            author: author.clone(),
+            content: "notes".into(),
+            timestamp: "t".into(),
+        }));
+        assert!(session.unread.contains(&Snowflake::new(110)));
+        session.select_channel(Snowflake::new(110));
+        assert!(!session.unread.contains(&Snowflake::new(110)));
+        session.apply_gateway(GatewayEvent::MessageCreate(Message {
+            id: Snowflake::new(3002),
+            channel_id: Snowflake::new(100),
+            author,
+            content: "back in general".into(),
+            timestamp: "t".into(),
+        }));
+        assert!(session.unread.contains(&Snowflake::new(100)));
+        session.select_guild(Snowflake::new(10));
+        assert!(!session.unread.contains(&Snowflake::new(100)));
     }
 
     #[test]
