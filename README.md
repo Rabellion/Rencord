@@ -1,6 +1,4 @@
-<p align="center">
-  <strong>Rencord</strong>
-</p>
+<p align="center"><img src="assets/brand/readme-header.png" width="720" alt="Rencord"></p>
 
 <p align="center">
   A native Discord desktop client in Rust. The interface is GPUI. Voice uses an adaptive jitter buffer instead of a fixed 40&nbsp;ms window.
@@ -27,6 +25,10 @@
   <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green" alt="License MIT OR Apache-2.0" /></a>
   <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/rust-1.100-blue?logo=rust&logoColor=white" alt="Rust 1.100" /></a>
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-informational" alt="Platforms Linux, macOS, and Windows" />
+</p>
+
+<p align="center">
+  Waver is the wordmark above. Hexwave is the app icon. Both live in <a href="assets/brand/README.md">assets/brand</a>.
 </p>
 
 ---

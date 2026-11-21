@@ -130,6 +130,15 @@ pub struct Notification {
     pub body: String,
 }
 
+/// Freedesktop application id. Matches `rencord.desktop` and `StartupWMClass`.
+pub const APP_ID: &str = "rencord";
+
+/// 3-bar Hexwave for a system tray. No tray is created in this build.
+pub const TRAY_ICON_SVG: &str = include_str!("../../../assets/brand/hexwave-tray.svg");
+
+/// Symbolic icon installed under hicolor as `rencord-symbolic.svg`.
+pub const SYMBOLIC_ICON_SVG: &str = include_str!("../../../assets/brand/hexwave-symbolic.svg");
+
 /// In-process notification sink. Desktop toasts are a later milestone.
 #[derive(Default)]
 pub struct RecordingNotifier {
@@ -165,6 +174,41 @@ mod tests {
         }
         store.clear_token().unwrap();
         assert!(store.load_token().unwrap().is_none());
+    }
+
+    #[test]
+    fn brand_icons_match_the_desktop_entry() {
+        assert_eq!(APP_ID, "rencord");
+        assert!(TRAY_ICON_SVG.contains("currentColor"));
+        assert!(TRAY_ICON_SVG.contains("Rencord tray icon"));
+        assert!(SYMBOLIC_ICON_SVG.contains("currentColor"));
+        let desktop = include_str!("../../../assets/brand/linux/rencord.desktop");
+        assert!(desktop.contains("Icon=rencord"));
+        assert!(desktop.contains("StartupWMClass=rencord"));
+        assert!(desktop.contains("Name=Rencord"));
+        let ico = include_bytes!("../../../assets/brand/hexwave.ico");
+        let sizes = ico_widths(ico);
+        assert!(sizes.contains(&16), "{sizes:?}");
+        assert!(sizes.contains(&24), "{sizes:?}");
+        assert!(sizes.contains(&256), "{sizes:?}");
+        let icns = include_bytes!("../../../assets/brand/hexwave.icns");
+        assert_eq!(&icns[..4], b"icns");
+        assert!(icns.windows(4).any(|chunk| chunk == b"icp4"));
+    }
+
+    fn ico_widths(bytes: &[u8]) -> Vec<u16> {
+        assert!(bytes.len() >= 6);
+        let count = u16::from_le_bytes([bytes[4], bytes[5]]) as usize;
+        (0..count)
+            .map(|index| {
+                let width = bytes[6 + index * 16];
+                if width == 0 {
+                    256
+                } else {
+                    u16::from(width)
+                }
+            })
+            .collect()
     }
 
     #[test]

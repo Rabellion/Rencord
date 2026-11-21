@@ -196,6 +196,15 @@ fn main() {
             window_min_size: Some(size(px(480.), px(360.))),
             // Client decorations drop the desktop app-menu button. Settings stays in the dock.
             window_decorations: Some(WindowDecorations::Client),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Rencord".into()),
+                ..Default::default()
+            }),
+            // Wayland looks up rencord.desktop / hicolor by this id. X11 also
+            // gets _NET_WM_ICON from `icon`. macOS and Windows take the icon
+            // from the bundle and the exe resource.
+            app_id: Some(rencord_platform::APP_ID.to_string()),
+            icon: Some(window_icon()),
             ..Default::default()
         };
         gpui_kit::open_window(options, cx, move |window, cx| {
@@ -1087,6 +1096,7 @@ impl RencordWindow {
             .justify_center()
             .gap_3()
             .bg(rgb(palette.chat))
+            .child(hexwave_mark(72., palette.text))
             .child(Label::new("Rencord"))
             .child(Label::new(
                 "Unofficial client. A user token can get the account terminated.",
@@ -1200,13 +1210,6 @@ impl RencordWindow {
         } else {
             0x2a2e38
         };
-        let home_ink = if ink {
-            palette.accent
-        } else if home_active {
-            0xffffff
-        } else {
-            palette.text
-        };
         let mut rail = v_flex()
             .w(px(rail_w))
             .h_full()
@@ -1231,7 +1234,7 @@ impl RencordWindow {
                 rail_w,
                 tile,
                 tile_radius,
-                icon("home", 20., home_ink),
+                hexwave_mark(rencord_desktop::rail_home_glyph_px(tile), palette.text),
                 move |_, _, cx| {
                     view.update(cx, |this, cx| {
                         this.shell
@@ -2235,7 +2238,17 @@ impl RencordWindow {
                 .bg(rgb(palette.elevated))
                 .border_1()
                 .border_color(rgb(palette.line))
-                .child(Label::new("Settings"))
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(hexwave_mark(28., palette.text))
+                        .child(
+                            v_flex()
+                                .child(Label::new("Rencord"))
+                                .child(Label::new("Settings")),
+                        ),
+                )
                 .child(Label::new(format!(
                     "Theme {} · {} · {} px",
                     self.shell.prefs.theme.label(),
@@ -3609,6 +3622,25 @@ fn apply_kit_theme(palette: &Palette, cx: &mut App) {
     if let Ok(config) = serde_json::from_value::<gpui_kit::component::theme::ThemeConfig>(value) {
         gpui_kit::component::theme::Theme::global_mut(cx).apply_config(&std::rc::Rc::new(config));
     }
+}
+
+fn window_icon() -> std::sync::Arc<image::RgbaImage> {
+    // Larger than 64 px is stored as an empty `_NET_WM_ICON` by this GPUI build.
+    let bytes = include_bytes!("../../../assets/brand/linux/hexwave-64.png");
+    let icon = image::load_from_memory(bytes)
+        .expect("Hexwave window icon")
+        .into_rgba8();
+    std::sync::Arc::new(icon)
+}
+
+/// Hexwave body in `ink` (the theme text color). The `#4F6BFF` bar is left as drawn.
+fn hexwave_mark(size: f32, ink: u32) -> Svg {
+    let colored =
+        rencord_desktop::hexwave_svg_for_px(size).replace("currentColor", &format!("#{ink:06X}"));
+    svg()
+        .data(colored.as_bytes())
+        .size(px(size))
+        .text_color(rgb(ink))
 }
 
 fn icon(name: &str, size: f32, color: u32) -> Svg {
