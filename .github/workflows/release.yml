@@ -109,18 +109,13 @@ jobs:
           $env:RENCORD_PFX_PASSWORD = if (Test-Path (Join-Path $dist "self-signed.txt")) { "RencordSelfSigned" } else { $env:WINDOWS_CERT_PASSWORD }
           $env:RENCORD_SIGNTOOL = $signtool
           $env:RENCORD_TIMESTAMP_FILE = Join-Path $dist "timestamp-server.txt"
-          $pwsh = (Get-Command pwsh).Source
-          $signScript = Join-Path $root "packaging\windows\sign.ps1"
-          $signCmd = "`"$pwsh`" -NoProfile -ExecutionPolicy Bypass -File `$q$signScript`$q `$f"
+          $signCmd = Join-Path $root "packaging\windows\sign-inno.cmd"
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          Invoke-Bounded -File $iscc -ArgumentList @(
-            "/Srencord=$signCmd",
-            "/DExeSource=$(Join-Path $dist 'Rencord.exe')",
-            "/DMyAppVersion=$version",
-            "/DVersionQuad=$($version).0",
-            "/O$dist",
-            (Join-Path $root "packaging\windows\rencord.iss")
-          ) -TimeoutSec 720 -Label "Inno Setup"
+          $exePath = Join-Path $dist "Rencord.exe"
+          $iss = Join-Path $root "packaging\windows\rencord.iss"
+          $quad = $version + ".0"
+          $isccArgs = '/Srencord="' + $signCmd + ' $f" /DExeSource="' + $exePath + '" /DMyAppVersion=' + $version + ' /DVersionQuad=' + $quad + ' /O"' + $dist + '" "' + $iss + '"'
+          Invoke-Bounded -File $iscc -ArgumentString $isccArgs -TimeoutSec 720 -Label "Inno Setup"
           $setup = Join-Path $dist "Rencord-v$version-setup-x64.exe"
           if (-not (Test-Path $setup)) { throw "setup exe missing: $setup" }
           Write-Host "packaged $setup"

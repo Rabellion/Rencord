@@ -2,21 +2,31 @@ function Invoke-Bounded {
     param(
         [Parameter(Mandatory = $true)][string]$File,
         [string[]]$ArgumentList = @(),
+        [string]$ArgumentString,
         [Parameter(Mandatory = $true)][int]$TimeoutSec,
         [Parameter(Mandatory = $true)][string]$Label,
         [string]$RedirectStandardOutput
     )
-    $params = @{
-        FilePath     = $File
-        ArgumentList = $ArgumentList
-        PassThru     = $true
-        NoNewWindow  = $true
+    $start = New-Object System.Diagnostics.ProcessStartInfo
+    $start.FileName = $File
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    if ($ArgumentString) {
+        $start.Arguments = $ArgumentString
+    } elseif ($ArgumentList.Count -gt 0) {
+        $start.Arguments = ($ArgumentList | ForEach-Object {
+            if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+        }) -join ' '
     }
     if ($RedirectStandardOutput) {
-        $params.RedirectStandardOutput = $RedirectStandardOutput
+        $start.RedirectStandardOutput = $true
     }
-    $proc = Start-Process @params
+    $proc = [Diagnostics.Process]::Start($start)
     $null = Wait-Process -Id $proc.Id -Timeout $TimeoutSec -ErrorAction SilentlyContinue
+    $proc.Refresh()
+    if ($proc.HasExited -and $RedirectStandardOutput) {
+        Set-Content -Path $RedirectStandardOutput -Value $proc.StandardOutput.ReadToEnd() -Encoding utf8
+    }
     $proc.Refresh()
     if (-not $proc.HasExited) {
         & taskkill.exe /F /T /PID $proc.Id | Out-Null
