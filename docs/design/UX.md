@@ -33,7 +33,7 @@ Onyx Ink uses Inter for the UI and JetBrains Mono for timestamps, the date pill,
 
 ### Space, radius, motion
 
-Spacing steps are 4, 8, 12, 16, 24, and 32 px. Onyx panels use an 8 px gap and an 8 px corner. Controls use a 6 px radius. Crisp panels, the composer, code, embeds, and media use 12 px. Avatars and the date pill are fully round. Columns do not use drop shadows. A 1 px hairline separates a panel from the canvas. Hover feedback is 80 ms. Overlays fade in over 140 ms. `reduce motion` in GPUI skips the overlay fade. The Onyx speaking ring is a tight accent stroke and does not pulse.
+Spacing steps are 4, 8, 12, 16, 24, and 32 px. Every preset uses the same four columns, set edge to edge and separated by a 1 px hairline. A gap between those columns is off unless a theme sets one; that floating-panel layout is opt-in. Corner radius is the radius token, shared by the presets. Avatars and the date pill are fully round. The window background is opaque. Hover feedback is 80 ms. Overlays fade in over 140 ms. `reduce motion` in GPUI skips the overlay fade. The Onyx speaking ring is a tight accent stroke and does not pulse.
 
 ### Density
 

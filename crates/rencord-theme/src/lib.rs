@@ -52,7 +52,8 @@ mod tests {
         assert!(theme.metrics.ink_chrome);
         assert_eq!(theme.metrics.font_ui.family(), "Inter");
         assert_eq!(theme.metrics.font_mono.family(), "JetBrains Mono");
-        assert!((theme.metrics.gap - 8.0).abs() < 0.01);
+        assert!(theme.metrics.gap < 0.5);
+        assert!(theme.metrics.radius_panel < 0.5);
     }
 
     #[test]

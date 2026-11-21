@@ -323,7 +323,7 @@ fn light() -> Theme {
         PresetId::Light,
         ColorMode::Light,
         Chrome::Classic,
-        classic_metrics(true),
+        classic_metrics(false),
         colors(InkSpec {
             bg_base: 0xe6e9f0,
             bg_elevated: 0xffffff,
@@ -458,7 +458,7 @@ fn soft() -> Theme {
         PresetId::SoftContrast,
         ColorMode::Light,
         Chrome::Classic,
-        classic_metrics(true),
+        classic_metrics(false),
         colors(InkSpec {
             bg_base: 0xe7e1d6,
             bg_elevated: 0xffffff,
@@ -541,11 +541,11 @@ fn colors(spec: InkSpec) -> Colors {
             (c(0x000000), c(0x000000), accent, accent, line, line)
         } else if lightish {
             (
-                c(0x2a2e38),
+                c(spec.bg_rail),
                 accent,
-                c(0xf2f3f5),
-                c(0xffffff),
-                c(0x2a2e38),
+                text,
+                c(spec.accent_fg),
+                line,
                 accent,
             )
         } else {
@@ -756,13 +756,13 @@ pub fn ink_metrics(shadow: bool) -> Metrics {
         radius_scale: 1.0,
         message_spacing: 1.0,
         saturation: 1.0,
-        gap: 8.0,
-        rail_width: 68.0,
+        gap: 0.0,
+        rail_width: 72.0,
         rail_pad: 10.0,
         tile_size: 44.0,
         radius_tile: 8.0,
-        sidebar_width: 216.0,
-        member_width: 176.0,
+        sidebar_width: 240.0,
+        member_width: 240.0,
         header_h: 42.0,
         header_px: 14.0,
         title_px: 15.0,
@@ -784,7 +784,7 @@ pub fn ink_metrics(shadow: bool) -> Metrics {
         avatar: 32.0,
         message_py: 4.0,
         message_gap: 10.0,
-        radius_panel: 8.0,
+        radius_panel: 0.0,
         radius_code: 6.0,
         radius_media: 6.0,
         radius_control: 6.0,
@@ -812,7 +812,7 @@ pub fn classic_metrics(shadow: bool) -> Metrics {
         radius_scale: 1.0,
         message_spacing: 1.0,
         saturation: 1.0,
-        gap: 12.0,
+        gap: 0.0,
         rail_width: 72.0,
         rail_pad: 12.0,
         tile_size: 48.0,
@@ -840,7 +840,7 @@ pub fn classic_metrics(shadow: bool) -> Metrics {
         avatar: 40.0,
         message_py: 8.0,
         message_gap: 16.0,
-        radius_panel: 12.0,
+        radius_panel: 0.0,
         radius_code: 12.0,
         radius_media: 12.0,
         radius_control: 6.0,
@@ -854,7 +854,7 @@ pub fn classic_metrics(shadow: bool) -> Metrics {
         shadow_y: if shadow { 10.0 } else { 0.0 },
         shadow_blur: if shadow { 22.0 } else { 0.0 },
         shadow_spread: 0.0,
-        show_top_rule: true,
+        show_top_rule: false,
         ink_chrome: false,
     }
 }
@@ -890,6 +890,20 @@ pub struct GuildTile {
 }
 
 pub fn guild_tile(name: &str, active: bool, theme: &Theme) -> GuildTile {
+    if theme.colors.bg_rail.relative_luminance() > 0.45 {
+        let fill = theme.colors.bg_elevated;
+        let border = if active {
+            theme.colors.accent
+        } else {
+            theme.colors.border_hairline
+        };
+        let letter = ensure_contrast(theme.colors.text_primary, fill, 4.5);
+        return GuildTile {
+            fill: fill.to_u32(),
+            border: border.to_u32(),
+            letter: letter.to_u32(),
+        };
+    }
     if theme.metrics.ink_chrome {
         let fill = if name == "Analytical Engines" {
             0x0a0a16
