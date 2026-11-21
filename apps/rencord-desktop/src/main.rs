@@ -77,7 +77,6 @@ fn big_file_outcome(output: &rencord_upload::JobOutput) -> String {
             format!("{url} ({provider}, {expires})")
         }
         rencord_upload::JobOutput::Split { note, .. } => note.clone(),
-        rencord_upload::JobOutput::Posted { detail } => detail.clone(),
     }
 }
 

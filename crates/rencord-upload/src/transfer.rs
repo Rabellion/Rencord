@@ -8,8 +8,8 @@ use crate::encode::{encode_image_to_fit, encode_wav_opus, probe_path, write_byte
 use crate::ffmpeg::{self, FfmpegPlan};
 use crate::plan::{plan_opus, plan_video, MediaKind, MediaProbe, QualityPreference, VideoSource};
 use crate::provider::{
-    discord_attachment_call, encode_multipart, file_name_of, upload_call, BodyPlan, DiscordTarget,
-    FieldPlan, HttpCall, OwnedField, ProviderKind, S3Recipe, UploadPlan, UploadRecipe, USER_AGENT,
+    encode_multipart, file_name_of, upload_call, BodyPlan, FieldPlan, HttpCall, OwnedField,
+    ProviderKind, S3Recipe, UploadPlan, UploadRecipe, USER_AGENT,
 };
 use crate::split::{self, ArchiveFormat};
 use crate::store::{append_history, HistoryEntry};
@@ -63,11 +63,6 @@ pub enum JobSpec {
         limit: u64,
         format: ArchiveFormat,
     },
-    Discord {
-        target: DiscordTarget,
-        content: String,
-        files: Vec<PathBuf>,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,9 +81,6 @@ pub enum JobOutput {
     Split {
         note: String,
         files: Vec<PathBuf>,
-    },
-    Posted {
-        detail: String,
     },
 }
 
@@ -131,11 +123,6 @@ pub fn run_job(
             limit,
             format,
         } => split_to_dir(&path, &dest_dir, limit, format, cancel, &progress),
-        JobSpec::Discord {
-            target,
-            content,
-            files,
-        } => post_discord(&target, &content, &files, cancel, &progress),
     }
 }
 
@@ -723,59 +710,6 @@ fn s3_upload(
     }
     let _ = fs::remove_file(&resume_path);
     Ok(recipe.object_url.clone())
-}
-
-fn post_discord(
-    target: &DiscordTarget,
-    content: &str,
-    files: &[PathBuf],
-    cancel: &Arc<AtomicBool>,
-    progress: &Report,
-) -> Result<JobOutput, UploadError> {
-    check_cancel(cancel)?;
-    let names: Vec<(String, String)> = files
-        .iter()
-        .map(|path| (file_name_of(path), String::new()))
-        .collect();
-    let call = discord_attachment_call(target, content, &names);
-    let BodyPlan::Multipart(fields) = &call.body else {
-        return Err(UploadError::message("discord call was not multipart"));
-    };
-    let mut owned = Vec::new();
-    let mut file_index = 0usize;
-    for field in fields {
-        match field {
-            FieldPlan::Text { name, value } => owned.push(OwnedField {
-                name: name.clone(),
-                filename: None,
-                value: value.as_bytes().to_vec(),
-            }),
-            FieldPlan::File { name, filename } => {
-                let bytes = fs::read(
-                    files
-                        .get(file_index)
-                        .ok_or_else(|| UploadError::message("missing attachment file"))?,
-                )?;
-                file_index += 1;
-                owned.push(OwnedField {
-                    name: name.clone(),
-                    filename: Some(filename.clone()),
-                    value: bytes,
-                });
-            }
-        }
-    }
-    let (content_type, body) = encode_multipart(&format!("rencordDiscord{}", unix_now()), &owned);
-    let text = send_with_progress(
-        &http_client()?,
-        &call,
-        &body,
-        &content_type,
-        cancel,
-        progress,
-        "Discord",
-    )?;
-    Ok(JobOutput::Posted { detail: text })
 }
 
 fn http_client() -> Result<reqwest::blocking::Client, UploadError> {
