@@ -109,17 +109,17 @@ Not a stream. The three chips live in the settings card, under the device lists:
 
 The copy under the chips is computed from that plan for a hypothetical 1 000 cd/m² BT.2020 master. It includes the sentence that the Go Live worker still tone-maps HDR to 8-bit. A second line is the local probe: EDID from sysfs on Linux when a connector exposes it, otherwise a note that DXGI or ScreenCaptureKit was not opened. The full limits, including what Discord's servers may strip, are in [HDR.md](HDR.md).
 
-## Later: files over the attachment cap
+## Files over the attachment cap
 
-Not part of the current UI fixes. Discord rejects attachments above the account cap on the server. The client cannot remove that cap.
+Discord rejects an attachment above the account cap on the server. The client cannot remove that cap. Discord's own pages disagree on the free number: the API reference says 20 MiB, and an older account-caps table still says 10 MB. Rencord plans against the API figure (20 MiB with no Nitro, 50 MiB for Nitro Basic, 1 GiB for Nitro, boost level 2 at 50 MiB and level 3 at 100 MiB inside that server, taking the larger of the account and the boost). When a response includes `attachment_size_limit`, that value is the one that counts. A file under the planned cap can still be rejected if Discord is experimenting with a different number for that account.
 
-The later milestone is one dialog, with a default the user can save:
+The composer plus button, a dropped file, or a pasted path opens one sheet. It is the only step. There is no Nitro row.
 
-1. Compress to fit: re-encode video, or downscale and re-encode images.
-2. Upload the original to an external host (Litterbox, Catbox, or a host the user configures) and post the link. Rencord renders that link as an inline preview.
-3. Optionally split the file into parts.
+1. **Compress.** Video is a target-size plan: bitrate from the cap and the duration, resolution lowered until the bits-per-pixel match the saved quality preference, then a two-pass ffmpeg command when the encoder supports it. Hardware encoders are preferred when `ffmpeg -encoders` lists one. Rencord does not ship ffmpeg or x264. Images are resized and re-encoded as WebP or JPEG in-process; AVIF is estimated and written only by ffmpeg with an AV1 encoder. 48 kHz WAV is encoded to Opus with libopus. The sheet shows the estimated size and time before anything runs.
+2. **Upload a link.** Litterbox (1h, 12h, 24h, 72h), Catbox, a 0x0.st-compatible host, or a custom endpoint (`put https://…` presigned PUT, or `s3 …` multipart, which can resume). The warning names the host. The checkbox starts unchecked. The request is not built into a socket until Upload is pressed with the box checked. Links are kept in a local history file.
+3. **Split.** A zip or 7z archive is cut into volumes under the cap, each with a 64-byte `RNSPLT1` header. The message carries a `rencord-split v1` note. A Rencord client shows Reassemble; other clients can concatenate the payloads and extract the archive.
 
-The dialog should be the only step. There is no second settings hunt and no Nitro upsell.
+Settings on the sheet remember the default action (Ask, Compress, Link, Split), the host, the quality preference (Smaller, Balanced, Sharper), the expiry, and zip versus 7z. A saved default only pre-selects the row. It does not send the file. Progress, cancel, and retry run off the UI thread.
 
 Layout presets A, B, and C are compared in [DIRECTIONS.md](DIRECTIONS.md). A is the default. B and C stay behind `--layout`. The responsive rules above apply to A.
 

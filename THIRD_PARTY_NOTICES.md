@@ -16,6 +16,11 @@ the Cargo registry; this file records the ones that matter for attribution.
 | [RustCrypto](https://github.com/RustCrypto) `chacha20poly1305` | Voice transport mode `aead_xchacha20_poly1305_rtpsize` | MIT OR Apache-2.0 |
 | [cpal](https://github.com/RustAudio/cpal) | Optional microphone and speaker devices | Apache-2.0 |
 | [rusqlite](https://github.com/rusqlite/rusqlite) / SQLite | Bounded local message and draft cache | MIT (rusqlite); SQLite public domain |
+| [image](https://github.com/image-rs/image) | Resize and JPEG encode for the big-file sheet | MIT OR Apache-2.0 |
+| [libwebp](https://chromium.googlesource.com/webm/libwebp) via the `webp` crate | Lossy WebP encode | BSD-3-Clause |
+| [zip](https://github.com/zip-rs/zip2) | Zip volumes under the upload cap | MIT |
+| [sevenz-rust2](https://github.com/hasenbanck/sevenz-rust2) | 7z volumes under the upload cap | Apache-2.0 |
+| [RustCrypto](https://github.com/RustCrypto) `sha2` and `hmac` | Split-archive hashes and S3 Signature Version 4 | MIT OR Apache-2.0 |
 
 ## What was not copied
 
@@ -32,7 +37,10 @@ and is not linked.
 [Yapfast](https://github.com/yapfast/yapfast) (GPL-3.0-or-later) and
 [Oxidecord](https://github.com/s1099/oxidecord) (GPL-3.0-only) were treated as
 reference reading only. No source from either repository is included here.
-Rencord does not depend on GPL libraries, including x264 and FFmpeg.
+Rencord does not depend on GPL libraries, including x264 and FFmpeg. Video
+compression may spawn an `ffmpeg` binary the user already installed. That
+program is not linked or vendored. If it is missing, the sheet says so and
+the link and split options still work.
 
 The transport ciphertext layout (RTP header as additional data, 16-byte tag,
 4-byte big-endian nonce suffix) follows Discord's published

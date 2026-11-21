@@ -3,12 +3,15 @@
 //! window for a layout check. `--bench` prints startup, RSS, and frame gaps,
 //! then quits.
 
+mod big_file_view;
+
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use rencord_desktop::layout::{
@@ -51,6 +54,30 @@ gpui_kit::actions!(
 );
 
 static PROCESS_START: OnceLock<Instant> = OnceLock::new();
+
+enum BigFileEvent {
+    Progress(rencord_upload::ProgressSnap),
+    Done(Result<rencord_upload::JobOutput, rencord_upload::UploadError>),
+}
+
+fn big_file_outcome(output: &rencord_upload::JobOutput) -> String {
+    match output {
+        rencord_upload::JobOutput::File { path, detail } => {
+            format!("Compressed file is ready at {}. {detail}", path.display())
+        }
+        rencord_upload::JobOutput::Link {
+            url,
+            provider,
+            expires,
+            ..
+        } => {
+            let expires = expires.as_deref().unwrap_or("unspecified");
+            format!("{url} ({provider}, {expires})")
+        }
+        rencord_upload::JobOutput::Split { note, .. } => note.clone(),
+        rencord_upload::JobOutput::Posted { detail } => detail.clone(),
+    }
+}
 
 fn main() {
     PROCESS_START.get_or_init(Instant::now);
@@ -100,6 +127,15 @@ fn main() {
         .find(|pair| pair[0] == "--golive")
         .map(|pair| golive::GoLiveMode::parse(&pair[1]))
         .unwrap_or(golive::GoLiveMode::Off);
+    let big_file = args
+        .windows(2)
+        .find(|pair| pair[0] == "--big-file")
+        .map(|pair| match pair[1].as_str() {
+            "progress" => rencord_upload::Flow::preview_progress(),
+            "upload" => rencord_upload::Flow::preview_upload(),
+            "error" => rencord_upload::Flow::preview_error(),
+            _ => rencord_upload::Flow::preview_sheet(),
+        });
     let reveal_hover = args.iter().any(|arg| arg == "--reveal-hover");
     let frame = args
         .windows(2)
@@ -225,6 +261,7 @@ fn main() {
                     persist_layout,
                     layout_store.clone(),
                     layout_path.clone(),
+                    big_file,
                     window,
                     cx,
                 )
@@ -303,6 +340,8 @@ struct RencordWindow {
     focus: FocusHandle,
     timeline: ListState,
     bench: bool,
+    attachment_path: Entity<InputState>,
+    upload_cancel: Option<Arc<AtomicBool>>,
     bench_frames: u32,
     bench_last: Instant,
     frame_us: Vec<u128>,
@@ -365,6 +404,7 @@ impl RencordWindow {
         persist_layout: bool,
         layout_store: LayoutStore,
         layout_path: PathBuf,
+        big_file: Option<rencord_upload::Flow>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -393,6 +433,9 @@ impl RencordWindow {
         if start_voice {
             shell.join_voice_demo();
         }
+        if let Some(flow) = big_file {
+            shell.flow = flow;
+        }
         let token_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("User token (not stored until you connect)")
         });
@@ -401,6 +444,8 @@ impl RencordWindow {
             cx.new(|cx| InputState::new(window, cx).placeholder("Search this channel"));
         let palette_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Jump to a channel or command"));
+        let attachment_path =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Path, or put/s3 endpoint"));
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let bounds_observer = cx.observe_window_bounds(window, |this, window, cx| {
@@ -419,6 +464,8 @@ impl RencordWindow {
             focus,
             timeline: ListState::new(0, ListAlignment::Bottom, px(160.)),
             bench,
+            attachment_path,
+            upload_cancel: None,
             bench_frames: 0,
             bench_last: Instant::now(),
             frame_us: Vec::new(),
@@ -810,6 +857,110 @@ impl RencordWindow {
             .ok();
         })
         .detach();
+    }
+
+    fn start_big_file(&mut self, cx: &mut Context<Self>) {
+        let dir = rencord_platform::data_dir().join("uploads");
+        let prepared = match self.shell.flow.prepare_job(&dir) {
+            Ok(prepared) => prepared,
+            Err(err) => {
+                self.shell.flow.fail(err.to_string());
+                return;
+            }
+        };
+        let rencord_upload::Prepared::Job(job) = prepared else {
+            if let rencord_upload::Prepared::Note(text) = prepared {
+                if let Some(mutation) = self.shell.send_local(&text) {
+                    self.dispatch_mutation(mutation, cx);
+                }
+                self.shell.flow.succeed(text);
+            }
+            return;
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.upload_cancel = Some(cancel.clone());
+        let (tx, rx) = async_channel::unbounded();
+        let progress = tx.clone();
+        std::thread::spawn(move || {
+            let result = rencord_upload::run_job(*job, &cancel, move |snap| {
+                let _ = progress.send_blocking(BigFileEvent::Progress(snap));
+            });
+            let _ = tx.send_blocking(BigFileEvent::Done(result));
+        });
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = rx.recv().await {
+                this.update(cx, |view, cx| {
+                    match event {
+                        BigFileEvent::Progress(snap) => view.shell.flow.apply_progress(snap),
+                        BigFileEvent::Done(Ok(output)) => {
+                            let text = big_file_outcome(&output);
+                            if let Some(mutation) = view.shell.send_local(&text) {
+                                view.dispatch_mutation(mutation, cx);
+                            }
+                            view.shell.flow.succeed(text);
+                            view.upload_cancel = None;
+                        }
+                        BigFileEvent::Done(Err(err)) => {
+                            view.shell.flow.fail(err.to_string());
+                            view.upload_cancel = None;
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn join_parts(&mut self, first: &str) {
+        let note = self
+            .shell
+            .flow
+            .parsed_note()
+            .or_else(|| rencord_upload::parse_note(&self.shell.flow.reassemble_note));
+        let Some(note) = note else {
+            self.shell.flow.error = Some("That note is not a rencord-split v1 message.".into());
+            return;
+        };
+        let start = PathBuf::from(first);
+        let Some(dir) = start.parent() else {
+            self.shell.flow.error = Some("Pick the .001 file.".into());
+            return;
+        };
+        let mut volumes = Vec::new();
+        for index in 1..=note.parts {
+            let name = format!("{}.{}.{:03}", note.name, note.format.label(), index);
+            let path = if index == 1 && start.is_file() {
+                start.clone()
+            } else {
+                dir.join(&name)
+            };
+            match std::fs::read(&path) {
+                Ok(bytes) => volumes.push(bytes),
+                Err(err) => {
+                    self.shell.flow.error = Some(format!("missing {name}: {err}"));
+                    return;
+                }
+            }
+        }
+        match rencord_upload::reassemble(&volumes) {
+            Ok(bytes) => {
+                let output = dir.join(&note.name);
+                if std::fs::write(&output, &bytes).is_ok() {
+                    self.shell.flow.succeed(format!(
+                        "Reassembled {} ({} bytes) at {}",
+                        note.name,
+                        bytes.len(),
+                        output.display()
+                    ));
+                    self.shell.note(format!("Reassembled {}", note.name));
+                } else {
+                    self.shell.flow.error = Some("could not write the joined file".into());
+                }
+            }
+            Err(err) => self.shell.flow.error = Some(err.to_string()),
+        }
     }
 
     fn send(&mut self, cx: &mut Context<Self>) {
@@ -1693,7 +1844,16 @@ impl RencordWindow {
                     32.,
                     palette,
                     |view, cx| {
-                        view.shell.note("File uploads are not in this build.");
+                        let typed = view.composer.read(cx).value().to_string();
+                        let typed = typed.trim();
+                        if !typed.is_empty() && std::path::Path::new(typed).is_file() {
+                            let _ = view.shell.flow.stage_path(std::path::Path::new(typed));
+                        } else if !view.shell.flow.open {
+                            view.shell.settings_open = false;
+                            view.shell.flow.open_picker();
+                        } else {
+                            view.shell.flow.close();
+                        }
                         cx.notify();
                     },
                 ))
@@ -1726,7 +1886,20 @@ impl RencordWindow {
                         view.shell.note("The emoji picker is not in this build.");
                         cx.notify();
                     },
-                )),
+                ))
+                .on_drop({
+                    let view = this.clone();
+                    move |paths: &ExternalPaths, _, cx| {
+                        let Some(path) = paths.paths().first().cloned() else {
+                            return;
+                        };
+                        view.update(cx, |window, cx| {
+                            window.shell.settings_open = false;
+                            let _ = window.shell.flow.stage_path(&path);
+                            cx.notify();
+                        });
+                    }
+                }),
         );
         if self.shell.prefs.stats_hud {
             chat = chat.child(
@@ -1938,6 +2111,15 @@ impl RencordWindow {
                 chosen_in.as_deref(),
                 chosen_out.as_deref(),
                 voice.as_ref(),
+            ));
+        }
+        if self.shell.flow.open {
+            let flow = self.shell.flow.clone();
+            layer = layer.child(big_file_view::sheet(
+                this,
+                &self.attachment_path,
+                &flow,
+                palette,
             ));
         }
         layer
@@ -3056,6 +3238,13 @@ fn message_row(
                 .into_any_element()
         });
     }
+    if message.content.contains("rencord-split v1") {
+        body = body.child(big_file_view::reassemble_chip(
+            view.clone(),
+            message.content.clone(),
+            palette,
+        ));
+    }
     if message.content.contains("attachment:bench.png") {
         body = body.child(
             v_flex()
@@ -3667,6 +3856,8 @@ fn icon(name: &str, size: f32, color: u32) -> Svg {
         "send" => include_str!("../../../docs/design/icons/send.svg"),
         "copy" => include_str!("../../../docs/design/icons/copy.svg"),
         "link" => include_str!("../../../docs/design/icons/link.svg"),
+        "compress" => include_str!("../../../docs/design/icons/compress.svg"),
+        "split" => include_str!("../../../docs/design/icons/split.svg"),
         "star" => include_str!("../../../docs/design/icons/star.svg"),
         "mic-off" => include_str!("../../../docs/design/icons/mic-off.svg"),
         "deafen-off" => include_str!("../../../docs/design/icons/deafen-off.svg"),

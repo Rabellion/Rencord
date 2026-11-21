@@ -79,6 +79,8 @@ pub struct Shell {
     pub inbox_open: bool,
     pub help_open: bool,
     pub secondary_action: bool,
+    /// Big-file sheet. The upload work itself runs off the UI thread.
+    pub flow: rencord_upload::Flow,
 }
 
 impl Shell {
@@ -108,6 +110,7 @@ impl Shell {
             inbox_open: false,
             help_open: false,
             secondary_action: false,
+            flow: rencord_upload::Flow::default(),
         };
         shell.reactions.insert(
             1000,
@@ -406,6 +409,7 @@ impl Shell {
     pub fn close_layers(&mut self) {
         self.palette_open = false;
         self.settings_open = false;
+        self.flow.close();
     }
 
     pub fn cycle_theme(&mut self) {
@@ -860,6 +864,15 @@ mod tests {
             shell.last_switch_us
         );
         assert!(shell.visible_messages().len() > 100);
+        let mut sheet = Shell::demo();
+        sheet.flow = rencord_upload::Flow::preview_sheet();
+        assert!(sheet
+            .flow
+            .lines()
+            .iter()
+            .any(|line| line.contains("lecture.mp4")));
+        sheet.close_layers();
+        assert!(!sheet.flow.open);
         shell.search = "from:charles has:code".into();
         assert!(!shell.search_hits().is_empty());
         let hit = shell.search_hits()[0].clone();
