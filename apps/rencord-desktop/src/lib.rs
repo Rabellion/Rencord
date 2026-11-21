@@ -23,7 +23,19 @@ pub use theme::{
     guild_tile, role_color, theme_file_from_path, token_summary, Density, HdrCurveChoice,
     LayoutKind, Palette, Preferences, Theme, ThemeMode, MOTION_OVERLAY_MS,
 };
-pub use timefmt::{day_changed, now_local, present_time, Presented};
+pub use timefmt::{day_changed, groups_with, now_local, present_time, Presented};
+
+/// Composer hint for the channel that is actually open.
+pub fn composer_placeholder(channel_name: &str) -> String {
+    let name = channel_name.trim().trim_start_matches('#').trim();
+    if name.is_empty() {
+        "Message".to_owned()
+    } else if name.starts_with('@') {
+        format!("Message {name}")
+    } else {
+        format!("Message #{name}")
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum Mutation {
@@ -107,10 +119,10 @@ impl Shell {
             reply_to: None,
             editing: None,
             reactions: HashMap::new(),
-            members: vec!["Ada".into(), "Charles".into(), "Lovelace".into()],
+            members: Vec::new(),
             last_switch_us: 0,
             jump_index: None,
-            favorites: vec![Snowflake::new(100)],
+            favorites: Vec::new(),
             read_mentions: Vec::new(),
             inbox_open: false,
             help_open: false,
@@ -135,6 +147,7 @@ impl Shell {
             vec!["Demo data is local. Nothing is sent to Discord.".into()],
         );
         shell.seed_showcase();
+        shell.favorites = vec![Snowflake::new(100)];
         shell
     }
 
@@ -166,6 +179,7 @@ impl Shell {
                     channel_id: channel,
                     author: ada.clone(),
                     content: "```rust\nfn main() {\n    let answer = 42;\n}\n```".into(),
+                    kind: 0,
                     timestamp: "Today at 3:38 PM".into(),
                 },
                 Message {
@@ -173,6 +187,7 @@ impl Shell {
                     channel_id: channel,
                     author: charles.clone(),
                     content: "replying to 1000: That buffer is the whole point. Mention <@1> if the call drops.".into(),
+                    kind: 0,
                     timestamp: "Today at 3:44 PM".into(),
                 },
                 Message {
@@ -180,6 +195,7 @@ impl Shell {
                     channel_id: channel,
                     author: lovelace,
                     content: "Write-up is here: [jitter notes](https://example.com/jitter). The preview can sit under the link.\nattachment:bench.png".into(),
+                    kind: 0,
                     timestamp: "Today at 3:51 PM".into(),
                 },
                 Message {
@@ -187,6 +203,7 @@ impl Shell {
                     channel_id: channel,
                     author: charles,
                     content: "Shipping the voice dock next. No shop, no quests.".into(),
+                    kind: 0,
                     timestamp: "Today at 4:02 PM".into(),
                 },
             ],
@@ -229,6 +246,7 @@ impl Shell {
                 channel_id: channel,
                 author,
                 content,
+                kind: 0,
                 timestamp: format!("2026-11-20T00:{:02}:{:02}Z", (index / 60) % 60, index % 60),
             });
         }
@@ -237,6 +255,7 @@ impl Shell {
             channel_id: Snowflake::new(100),
             author: ada,
             content: "```rust\nfn main() {\n    let answer = 42;\n}\n```".into(),
+            kind: 0,
             timestamp: "2026-11-20T01:00:00Z".into(),
         });
         shell
@@ -313,6 +332,7 @@ impl Shell {
             channel_id,
             author,
             content: format!("{prefix}{content}"),
+            kind: 0,
             timestamp: "local".into(),
         });
         self.session.composer.clear();
@@ -955,6 +975,16 @@ fn exact_hex(bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_signed_in_shell_does_not_invent_members() {
+        let shell = Shell::login();
+        assert!(shell.members.is_empty());
+        assert!(!shell.members.iter().any(|name| name.contains("Ada")));
+        assert_eq!(composer_placeholder("welcome"), "Message #welcome");
+        assert_ne!(composer_placeholder("welcome"), "Message #general");
+        assert_eq!(composer_placeholder("@Munch"), "Message @Munch");
+    }
 
     #[test]
     fn login_shell_leads_with_the_code_not_a_pasted_token() {

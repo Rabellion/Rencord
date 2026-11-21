@@ -205,6 +205,20 @@ pub struct Message {
     pub content: String,
     #[serde(default)]
     pub timestamp: String,
+    /// Discord message type. `0` is a normal message. `7` is a member join.
+    #[serde(default)]
+    pub kind: u8,
+}
+
+/// One-line system copy. Normal messages (`0`) return nothing so the body is shown.
+pub fn system_line(kind: u8, name: &str) -> Option<String> {
+    match kind {
+        3 => Some(format!("{name} started a call.")),
+        6 => Some(format!("{name} pinned a message to this channel.")),
+        7 => Some(format!("{name} joined the server.")),
+        8..=11 => Some(format!("{name} boosted the server.")),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -245,6 +259,20 @@ mod tests {
         let rendered = format!("{token:?}");
         assert!(!rendered.contains("super-secret"));
         assert_eq!(token.expose(), "super-secret-value");
+    }
+
+    #[test]
+    fn a_join_is_a_system_line_and_a_normal_message_is_not() {
+        assert_eq!(system_line(7, "Ada"), Some("Ada joined the server.".into()));
+        assert_eq!(
+            system_line(6, "Ada"),
+            Some("Ada pinned a message to this channel.".into())
+        );
+        assert_eq!(
+            system_line(3, "Munch"),
+            Some("Munch started a call.".into())
+        );
+        assert!(system_line(0, "Ada").is_none());
     }
 
     #[test]

@@ -362,6 +362,8 @@ pub struct WireMessage {
     pub content: String,
     #[serde(default)]
     pub timestamp: String,
+    #[serde(default, rename = "type")]
+    pub kind: u8,
 }
 
 impl From<WireMessage> for Message {
@@ -372,6 +374,7 @@ impl From<WireMessage> for Message {
             author: value.author,
             content: value.content,
             timestamp: value.timestamp,
+            kind: value.kind,
         }
     }
 }

@@ -111,11 +111,15 @@ fn main() {
             "guilds" => Some(stub::StubScene::Guilds),
             "scroll" => Some(stub::StubScene::Scroll),
             "retry" => Some(stub::StubScene::Retry),
+            "layout" => Some(stub::StubScene::Layout),
             _ => None,
         });
     if let Some(scene) = stub_scene {
         let (api_base, gateway) = net::runtime().block_on(stub::serve(scene));
         net::set_endpoints(api_base, gateway);
+    }
+    if args.iter().any(|arg| arg == "--home") {
+        stub::request_home();
     }
     let bench = args.iter().any(|arg| arg == "--bench");
     let theme = args
@@ -938,6 +942,18 @@ impl RencordWindow {
             }
             Some(stub::StubScene::Retry) => !self.failed.is_empty(),
             Some(stub::StubScene::Scroll) => self.loading_older.is_some(),
+            Some(stub::StubScene::Layout) => {
+                self.shell
+                    .session
+                    .guilds
+                    .iter()
+                    .any(|guild| guild.name == "Analytical Engines")
+                    && self
+                        .shell
+                        .session
+                        .selected_channel
+                        .is_some_and(|channel| !self.shell.session.messages_for(channel).is_empty())
+            }
         }
     }
 
@@ -1738,7 +1754,7 @@ impl Render for RencordWindow {
             .track_focus(&self.focus)
             .size_full()
             .bg(rgb(palette.app_bg))
-            .font_family(palette.font_ui)
+            .font_family("Segoe UI Variable, Segoe UI, Inter")
             .text_color(rgb(palette.text))
             .text_size(px(self.shell.prefs.font_px))
             .on_action(cx.listener(|this, _: &QuickSwitcher, _, cx| {
@@ -1819,7 +1835,39 @@ impl Render for RencordWindow {
 }
 
 impl RencordWindow {
+    #[allow(clippy::too_many_arguments)]
+    fn guild_channel_row(
+        &self,
+        view: Entity<Self>,
+        channel: &rencord_model::Channel,
+        selected: Option<Snowflake>,
+        palette: Palette,
+        favorites_open: bool,
+        favorite_ids: &[Snowflake],
+        row_px: f32,
+        in_voice: bool,
+    ) -> gpui::AnyElement {
+        let badge = self.shell.session.unread.contains(&channel.id).then_some(1);
+        let shown_as_favorite = favorites_open && favorite_ids.contains(&channel.id);
+        let prefix = if channel.kind.is_voice() { ")) " } else { "# " };
+        channel_row(
+            view,
+            channel.id,
+            format!("{prefix}{}", channel.name),
+            selected == Some(channel.id) && !shown_as_favorite,
+            palette,
+            badge,
+            channel.kind.is_voice(),
+            row_px,
+            in_voice,
+        )
+        .into_any_element()
+    }
+
     fn shell_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if stub::take_home() {
+            self.shell.session.open_home();
+        }
         let palette = rencord_desktop::Palette::from_theme(
             &self.shown,
             self.shell.prefs.font_px,
@@ -1956,8 +2004,7 @@ impl RencordWindow {
                 ),
                 move |_, _, cx| {
                     view.update(cx, |this, cx| {
-                        this.shell
-                            .select_channel_timed(rencord_model::Snowflake::new(200));
+                        this.shell.session.open_home();
                         cx.notify();
                     });
                 },
@@ -1973,7 +2020,7 @@ impl RencordWindow {
             let view = this.clone();
             let tile_colors = rencord_desktop::guild_tile(&guild.name, active, &theme);
             let fill = tile_colors.fill;
-            let border = tile_colors.border;
+            let border = fill;
             let letter = tile_colors.letter;
             let guild_unread = self.shell.session.unread.iter().any(|channel_id| {
                 self.shell
@@ -1997,8 +2044,8 @@ impl RencordWindow {
                 pill_ink,
                 border,
                 rail_w,
-                tile,
-                tile_radius,
+                tile.max(48.),
+                if active { 16. } else { 24. },
                 tile_initial(&mark, letter),
                 move |_, _, cx| {
                     view.update(cx, |this, cx| {
@@ -2097,7 +2144,11 @@ impl RencordWindow {
         let dm_open = !self.collapsed.contains("dms");
         let favorite_ids = self.shell.favorites.clone();
         let in_voice = voice.is_some();
-        let mut nav = v_flex().flex_1().overflow_hidden();
+        let mut nav = v_flex()
+            .id("channel-nav")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll();
         nav = nav.child(category_header(
             this.clone(),
             "favorites",
@@ -2122,87 +2173,116 @@ impl RencordWindow {
                 }
             }
         }
-        nav = nav.child(category_header(
-            this.clone(),
-            "text",
-            "TEXT CHANNELS",
-            text_open,
-            palette,
-        ));
-        if let Some(guild) = self.shell.session.selected_guild {
-            if let Some(message) = self.failed.get(&guild).cloned() {
-                nav = nav.child(fetch_error(
-                    this.clone(),
-                    "retry-channels",
-                    "retry-channels-button",
-                    message,
-                    palette,
-                    move |view, cx| {
-                        view.failed.remove(&guild);
-                        cx.notify();
-                    },
-                ));
+        if selected_guild.is_some() {
+            if let Some(guild) = selected_guild {
+                if let Some(message) = self.failed.get(&guild).cloned() {
+                    nav = nav.child(fetch_error(
+                        this.clone(),
+                        "retry-channels",
+                        "retry-channels-button",
+                        message,
+                        palette,
+                        move |view, cx| {
+                            view.failed.remove(&guild);
+                            cx.notify();
+                        },
+                    ));
+                }
             }
-        }
-        if text_open {
-            for channel in channels.iter().filter(|channel| channel.kind.is_text()) {
-                let badge = self.shell.session.unread.contains(&channel.id).then_some(1);
-                let shown_as_favorite = favorites_open && favorite_ids.contains(&channel.id);
-                nav = nav.child(channel_row(
+            let categories: Vec<_> = channels
+                .iter()
+                .filter(|channel| channel.kind == rencord_model::ChannelKind::GuildCategory)
+                .cloned()
+                .collect();
+            if categories.is_empty() {
+                nav = nav.child(category_header(
                     this.clone(),
-                    channel.id,
-                    format!("# {}", channel.name),
-                    selected == Some(channel.id) && !shown_as_favorite,
+                    "text",
+                    "TEXT CHANNELS",
+                    text_open,
                     palette,
-                    badge,
-                    false,
-                    row_px,
-                    false,
                 ));
+                if text_open {
+                    for channel in channels.iter().filter(|channel| channel.kind.is_text()) {
+                        nav = nav.child(self.guild_channel_row(
+                            this.clone(),
+                            channel,
+                            selected,
+                            palette,
+                            favorites_open,
+                            &favorite_ids,
+                            row_px,
+                            false,
+                        ));
+                    }
+                }
+                nav = nav.child(category_header(
+                    this.clone(),
+                    "voice",
+                    "VOICE CHANNELS",
+                    voice_open,
+                    palette,
+                ));
+                if voice_open {
+                    for channel in channels.iter().filter(|channel| channel.kind.is_voice()) {
+                        nav = nav.child(self.guild_channel_row(
+                            this.clone(),
+                            channel,
+                            selected,
+                            palette,
+                            favorites_open,
+                            &favorite_ids,
+                            row_px,
+                            in_voice,
+                        ));
+                    }
+                }
+            } else if text_open {
+                for category in categories {
+                    nav = nav.child(div().px(px(8.)).pt(px(16.)).pb(px(4.)).child(paint(
+                        category.name.to_uppercase(),
+                        palette.muted,
+                        12.,
+                    )));
+                    for channel in channels
+                        .iter()
+                        .filter(|channel| channel.parent_id == Some(category.id))
+                    {
+                        nav = nav.child(self.guild_channel_row(
+                            this.clone(),
+                            channel,
+                            selected,
+                            palette,
+                            favorites_open,
+                            &favorite_ids,
+                            row_px,
+                            in_voice && channel.kind.is_voice(),
+                        ));
+                    }
+                }
             }
-        }
-        nav = nav.child(category_header(
-            this.clone(),
-            "voice",
-            "VOICE CHANNELS",
-            voice_open,
-            palette,
-        ));
-        if voice_open {
-            for channel in channels.iter().filter(|channel| channel.kind.is_voice()) {
-                nav = nav.child(channel_row(
-                    this.clone(),
-                    channel.id,
-                    format!(")) {}", channel.name),
-                    false,
-                    palette,
-                    None,
-                    true,
-                    row_px,
-                    in_voice,
-                ));
-            }
-        }
-        nav = nav.child(category_header(
-            this.clone(),
-            "dms",
-            "DIRECT MESSAGES",
-            dm_open,
-            palette,
-        ));
-        if dm_open {
-            for channel in &dms {
-                nav = nav.child(channel_row(
-                    this.clone(),
-                    channel.id,
-                    format!("dm {}", channel.name),
-                    selected == Some(channel.id),
-                    palette,
-                    self.shell.session.unread.contains(&channel.id).then_some(1),
-                    false,
-                    row_px,
-                    false,
-                ));
+        } else {
+            nav = nav.child(category_header(
+                this.clone(),
+                "dms",
+                "DIRECT MESSAGES",
+                dm_open,
+                palette,
+            ));
+            if dm_open {
+                for channel in &dms {
+                    nav = nav.child(channel_row(
+                        this.clone(),
+                        channel.id,
+                        format!("dm {}", channel.name),
+                        selected == Some(channel.id),
+                        palette,
+                        self.shell.session.unread.contains(&channel.id).then_some(1),
+                        false,
+                        row_px,
+                        false,
+                    ));
+                }
             }
         }
         sidebar = sidebar.child(nav);
@@ -2286,8 +2366,28 @@ impl RencordWindow {
                 list_now,
             );
             let grouped = !show_day
-                && message_index > 0
-                && previous.is_some_and(|item| item.author.id == message.author.id);
+                && previous.is_some_and(|item| {
+                    rencord_desktop::groups_with(
+                        item.author.id.get(),
+                        &item.timestamp,
+                        item.kind,
+                        message.author.id.get(),
+                        &message.timestamp,
+                        message.kind,
+                    )
+                });
+            if let Some(line) =
+                rencord_model::system_line(message.kind, message.author.display_name())
+            {
+                return h_flex()
+                    .px(px(16.))
+                    .h(px(32.))
+                    .items_center()
+                    .gap(px(8.))
+                    .child(paint("→", list_palette.muted, 14.))
+                    .child(paint(line, list_palette.muted, 14.))
+                    .into_any_element();
+            }
             let row = message_row(
                 list_entity.clone(),
                 &message,
@@ -2315,7 +2415,10 @@ impl RencordWindow {
         .size_full();
 
         let channel_name = channel_title(selected, &channels, &dms);
-        let topic = !plan.hide_topic;
+        let composer_hint = rencord_desktop::composer_placeholder(&channel_name);
+        self.composer.update(cx, |input, cx| {
+            input.set_placeholder(SharedString::from(composer_hint.clone()), window, cx);
+        });
         let mut chat = v_flex()
             .flex_1()
             .min_w(px(0.))
@@ -2353,18 +2456,7 @@ impl RencordWindow {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(rgb(palette.text))
                                     .child(channel_name.clone()),
-                            )
-                            .when(topic, |title| {
-                                title
-                                    .child(
-                                        div().w(px(1.)).h(px(16.)).bg(rgb(palette.border_strong)),
-                                    )
-                                    .child(paint(
-                                        "Voice, notes, and no upsells",
-                                        palette.muted,
-                                        13.,
-                                    ))
-                            }),
+                            ),
                     )
                     .child(
                         h_flex()
@@ -2572,7 +2664,21 @@ impl RencordWindow {
             .w_full()
             .h_full()
             .bg(rgb(palette.members))
-            .child(section_label("ONLINE — 3", palette.muted));
+            .child(section_label(
+                if members.is_empty() {
+                    "MEMBERS"
+                } else {
+                    "ONLINE"
+                },
+                palette.muted,
+            ));
+        if members.is_empty() {
+            people = people.child(div().px(px(16.)).py(px(8.)).child(paint(
+                "No members loaded yet.",
+                palette.muted,
+                13.,
+            )));
+        }
         for member in members {
             let (name, activity) = member
                 .split_once(" · ")
@@ -2923,10 +3029,13 @@ impl RencordWindow {
                         .overflow_hidden()
                         .child(
                             div()
+                                .min_w(px(0.))
+                                .overflow_hidden()
                                 .text_size(px(palette.dock_name))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(rgb(palette.text))
-                                .child(user_name.to_owned()),
+                                .whitespace_nowrap()
+                                .child(truncate_end(user_name, 14)),
                         )
                         .child(meta(status, palette.muted, 11., palette)),
                 )
@@ -3138,26 +3247,17 @@ fn channel_row(
     };
     let label_px = palette.channel_label;
     let glyph_px = palette.channel_icon;
-    let height = if kind == "dm" {
-        row_px.max(32.)
-    } else {
-        row_px
-    };
+    let height = if kind == "dm" { 42. } else { row_px.max(32.) };
     let (badge_bg, badge_fg) = (palette.badge_bg, palette.badge_fg);
     div()
         .id(SharedString::from(format!("channel-{id}")))
+        .flex_shrink_0()
         .mx(px(8.))
         .px(px(8.))
         .h(px(height))
-        .rounded(px(6.))
+        .rounded(px(4.))
         .overflow_hidden()
         .bg(rgb(bg))
-        .border_l_3()
-        .border_color(rgb(if active && palette.ink_chrome {
-            palette.accent
-        } else {
-            bg
-        }))
         .cursor_pointer()
         .hover(move |style| style.bg(rgb(if active { bg } else { hover })))
         .child(
@@ -3575,7 +3675,7 @@ fn timestamp_label(
         .id(SharedString::from(format!("stamp-{message_id}")))
         .items_center()
         .gap(px(6.))
-        .font_family(palette.font_meta)
+        .font_family(palette.font_ui)
         .text_size(px(11.))
         .text_color(rgb(palette.muted))
         .child(stamp.short.clone());
@@ -4707,15 +4807,66 @@ fn discord_columns(
         );
     }
     if let Some(people) = members_layer {
+        let close = view.clone();
         shell = shell.child(
             div()
                 .absolute()
-                .top(px(gap))
-                .right(px(gap))
-                .bottom(px(gap + reserve))
-                .w(px(240.))
-                .occlude()
-                .child(panel(palette, palette.members).size_full().child(people)),
+                .inset(px(0.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    v_flex()
+                        .id("members-modal")
+                        .w(px(360.))
+                        .max_h(px(560.))
+                        .rounded(px(8.))
+                        .bg(rgb(palette.elevated))
+                        .border_1()
+                        .border_color(rgb(palette.line))
+                        .occlude()
+                        .child(
+                            h_flex()
+                                .px(px(16.))
+                                .pt(px(16.))
+                                .justify_between()
+                                .items_start()
+                                .child(
+                                    v_flex()
+                                        .child(
+                                            div()
+                                                .text_size(px(16.))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(rgb(palette.text))
+                                                .child("Members"),
+                                        )
+                                        .child(paint(
+                                            "Everyone with access to this conversation.",
+                                            palette.muted,
+                                            13.,
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .id("members-close")
+                                        .cursor_pointer()
+                                        .child(paint("×", palette.text, 18.))
+                                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                                            close.update(cx, |this, cx| {
+                                                this.members_overlay = false;
+                                                cx.notify();
+                                            });
+                                        }),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("members-scroll")
+                                .flex_1()
+                                .overflow_y_scroll()
+                                .child(people),
+                        ),
+                ),
         );
     }
     if show_right_overlay {
@@ -4809,18 +4960,14 @@ fn banner_ink(text: &str, color: u32, size: f32) -> impl IntoElement {
 }
 
 fn date_pill(label: &str, palette: Palette) -> impl IntoElement {
-    h_flex().justify_center().py(px(4.)).child(
-        h_flex()
-            .px(px(10.))
-            .h(px(20.))
-            .rounded(px(999.))
-            .items_center()
-            .justify_center()
-            .bg(rgb(palette.input))
-            .border_1()
-            .border_color(rgb(palette.line))
-            .child(meta(label, palette.muted, 11., palette)),
-    )
+    h_flex()
+        .items_center()
+        .px(px(16.))
+        .py(px(8.))
+        .gap(px(8.))
+        .child(div().flex_1().h(px(1.)).bg(rgb(palette.line)))
+        .child(paint(label, palette.muted, 12.))
+        .child(div().flex_1().h(px(1.)).bg(rgb(palette.line)))
 }
 
 fn meta(text: impl Into<String>, color: u32, size: f32, palette: Palette) -> impl IntoElement {
@@ -4849,6 +4996,16 @@ fn waveform(color: u32) -> impl IntoElement {
         );
     }
     row
+}
+
+fn truncate_end(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars {
+        text.to_owned()
+    } else {
+        let keep: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+        format!("{keep}…")
+    }
 }
 
 fn paint(text: impl Into<String>, color: u32, size: f32) -> impl IntoElement {
