@@ -8,11 +8,14 @@
 use crate::{hex_encode, sha256, UploadError};
 use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Read, Write};
+use std::path::Path;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 pub const HEADER_LEN: usize = 64;
 const MAGIC: &[u8; 8] = b"RNSPLT1\0";
+/// shortcut: the joined file is held in memory, so it is capped at 2 GiB; stream to disk to lift it.
+const MAX_JOINED: u64 = 2 << 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -146,7 +149,7 @@ pub fn reassemble(volumes: &[Vec<u8>]) -> Result<Vec<u8>, UploadError> {
             parsed.len()
         )));
     }
-    let mut archive = Vec::with_capacity(archive_len as usize);
+    let mut archive = Vec::new();
     for (expected, item) in parsed.iter().enumerate() {
         if item.index != expected as u16 || item.count != count || item.format != format {
             return Err(UploadError::message("volume headers do not agree"));
@@ -155,6 +158,9 @@ pub fn reassemble(volumes: &[Vec<u8>]) -> Result<Vec<u8>, UploadError> {
             return Err(UploadError::message("volume hash does not match"));
         }
         archive.extend_from_slice(item.payload);
+    }
+    if archive.len() as u64 != archive_len {
+        return Err(UploadError::message("archive length does not match"));
     }
     if sha256(&archive) != digest {
         return Err(UploadError::message("archive hash does not match"));
@@ -247,8 +253,22 @@ fn unzip_first(bytes: &[u8]) -> Result<Vec<u8>, UploadError> {
     let mut archive = ZipArchive::new(Cursor::new(bytes))?;
     let mut file = archive.by_index(0)?;
     let mut out = Vec::new();
-    file.read_to_end(&mut out)?;
+    read_capped(&mut file, &mut out, MAX_JOINED)?;
     Ok(out)
+}
+
+/// Appends at most `cap` bytes in total to `out`, so a small archive cannot
+/// inflate into gigabytes.
+fn read_capped(reader: impl Read, out: &mut Vec<u8>, cap: u64) -> std::io::Result<()> {
+    let room = cap.saturating_sub(out.len() as u64);
+    reader.take(room.saturating_add(1)).read_to_end(out)?;
+    if out.len() as u64 > cap {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the joined file is larger than Rencord can reassemble",
+        ));
+    }
+    Ok(())
 }
 
 fn sevenz_bytes(name: &str, data: &[u8]) -> Result<Vec<u8>, UploadError> {
@@ -277,7 +297,7 @@ fn unseven_first(bytes: &[u8]) -> Result<Vec<u8>, UploadError> {
     let mut out = Vec::new();
     reader
         .for_each_entries(|_entry, reader| {
-            reader.read_to_end(&mut out)?;
+            read_capped(reader, &mut out, MAX_JOINED)?;
             Ok(true)
         })
         .map_err(|err| UploadError::message(format!("7z extract: {err}")))?;
@@ -323,11 +343,21 @@ pub fn parse_note(text: &str) -> Option<SplitNote> {
         }
     }
     Some(SplitNote {
-        name: name?,
+        name: safe_file_name(&name?)?,
         format: format?,
         parts: parts?,
         sha256: sha256?,
     })
+}
+
+/// The note comes from someone else's message: keep only a plain file name so
+/// the joined file is written next to the parts and nowhere else.
+fn safe_file_name(raw: &str) -> Option<String> {
+    let base = sanitize_name(raw);
+    Path::new(&base)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -366,5 +396,37 @@ mod tests {
     #[test]
     fn sevenz_split_round_trip() {
         round_trip(ArchiveFormat::SevenZ);
+    }
+
+    fn note_named(name: &str) -> String {
+        format!("rencord-split v1\nname: {name}\narchive: zip\nparts: 1\nsha256: 00\n")
+    }
+
+    #[test]
+    fn note_name_cannot_leave_the_parts_folder() {
+        let name = |raw: &str| parse_note(&note_named(raw)).map(|note| note.name);
+        assert_eq!(name("../../.bashrc").as_deref(), Some(".bashrc"));
+        assert_eq!(name("/home/you/.bashrc").as_deref(), Some(".bashrc"));
+        assert_eq!(name("..\\..\\startup.bat").as_deref(), Some("startup.bat"));
+        assert_eq!(name("clip.mp4").as_deref(), Some("clip.mp4"));
+        assert_eq!(name(".."), None);
+        assert_eq!(name("."), None);
+    }
+
+    #[test]
+    fn lying_archive_length_is_an_error_not_a_panic() {
+        let bundle = split_bytes("a.bin", &[7u8; 100], 1 << 20, ArchiveFormat::Zip).unwrap();
+        let mut volume = bundle.volumes[0].clone();
+        volume[18..26].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(reassemble(&[volume]).is_err());
+    }
+
+    #[test]
+    fn extraction_stops_at_the_cap() {
+        let mut out = Vec::new();
+        assert!(read_capped(&[1u8; 10][..], &mut out, 5).is_err());
+        let mut out = Vec::new();
+        read_capped(&[1u8; 5][..], &mut out, 5).unwrap();
+        assert_eq!(out.len(), 5);
     }
 }
