@@ -34,6 +34,8 @@ pub struct Session {
     pub status_line: String,
     pub discord_theme: Option<String>,
     pub discord_client_theme: Option<String>,
+    /// Reaction counts keyed by message id. Gateway events maintain this.
+    pub reactions: HashMap<u64, Vec<(String, u32)>>,
 }
 
 impl Default for Session {
@@ -51,6 +53,7 @@ impl Default for Session {
             status_line: "Not connected".to_owned(),
             discord_theme: None,
             discord_client_theme: None,
+            reactions: HashMap::new(),
         }
     }
 }
@@ -61,7 +64,7 @@ impl Session {
             GatewayEvent::Ready {
                 session_id,
                 user,
-                guild_ids,
+                guilds,
                 discord_theme,
                 discord_client_theme,
             } => {
@@ -69,17 +72,40 @@ impl Session {
                 self.discord_client_theme = discord_client_theme;
                 self.session_id = Some(session_id);
                 self.user = Some(user);
-                for id in guild_ids {
-                    if !self.guilds.iter().any(|guild| guild.id == id) {
-                        self.guilds.push(Guild {
-                            id,
-                            name: format!("Guild {id}"),
-                            icon: None,
-                        });
-                    }
+                for guild in guilds {
+                    self.upsert_ready_guild(guild);
                 }
                 self.status_line = "Gateway ready".to_owned();
             }
+            GatewayEvent::GuildUpsert {
+                id,
+                name,
+                icon,
+                channels,
+            } => {
+                self.apply_guild(id, name, icon);
+                for channel in channels {
+                    self.upsert_channel(channel);
+                }
+            }
+            GatewayEvent::GuildDelete(id) => self.remove_guild(id),
+            GatewayEvent::ChannelUpsert(channel) => self.upsert_channel(channel),
+            GatewayEvent::ChannelDelete(id) => {
+                self.channels.remove(&id);
+                if self.selected_channel == Some(id) {
+                    self.selected_channel = self.selected_guild.and_then(|guild| {
+                        self.guild_channels(guild)
+                            .into_iter()
+                            .next()
+                            .map(|channel| channel.id)
+                    });
+                }
+            }
+            GatewayEvent::Reaction {
+                message_id,
+                emoji,
+                remove,
+            } => self.apply_reaction(message_id.get(), emoji, !remove),
             GatewayEvent::MessageCreate(message) => self.insert_message(message),
             GatewayEvent::MessageDelete {
                 channel_id,
@@ -135,6 +161,62 @@ impl Session {
         } else {
             self.guilds.push(guild);
         }
+    }
+
+    fn upsert_ready_guild(&mut self, guild: rencord_protocol::ReadyGuild) {
+        let channels = guild.channels;
+        let id = guild.id;
+        self.apply_guild(id, guild.name, guild.icon);
+        for wire in channels {
+            let mut channel = wire.into_channel();
+            if channel.guild_id.is_none() {
+                channel.guild_id = Some(id);
+            }
+            self.upsert_channel(channel);
+        }
+    }
+
+    fn apply_guild(&mut self, id: Snowflake, name: Option<String>, icon: Option<String>) {
+        if let Some(existing) = self.guilds.iter_mut().find(|guild| guild.id == id) {
+            if let Some(name) = name {
+                existing.name = name;
+            }
+            if icon.is_some() {
+                existing.icon = icon;
+            }
+            return;
+        }
+        self.guilds.push(Guild {
+            id,
+            name: name.unwrap_or_else(|| format!("Guild {id}")),
+            icon,
+        });
+    }
+
+    pub fn remove_guild(&mut self, id: Snowflake) {
+        self.guilds.retain(|guild| guild.id != id);
+        self.channels
+            .retain(|_, channel| channel.guild_id != Some(id));
+        if self.selected_guild == Some(id) {
+            self.selected_guild = self.guilds.first().map(|guild| guild.id);
+            self.selected_channel = self
+                .selected_guild
+                .and_then(|guild| self.guild_channels(guild).into_iter().next().map(|c| c.id));
+        }
+    }
+
+    fn apply_reaction(&mut self, message_id: u64, emoji: String, add: bool) {
+        let list = self.reactions.entry(message_id).or_default();
+        if let Some(existing) = list.iter_mut().find(|item| item.0 == emoji) {
+            if add {
+                existing.1 = existing.1.saturating_add(1);
+            } else {
+                existing.1 = existing.1.saturating_sub(1);
+            }
+        } else if add {
+            list.push((emoji, 1));
+        }
+        list.retain(|item| item.1 > 0);
     }
 
     pub fn upsert_channel(&mut self, channel: Channel) {
@@ -472,6 +554,77 @@ mod tests {
         assert_eq!(ids.len(), 4000);
         assert_eq!(ids[0], 1);
         assert_eq!(*ids.last().unwrap(), 4046);
+    }
+
+    #[test]
+    fn ready_placeholder_is_replaced_by_guild_create_and_delete_removes_it() {
+        let mut session = Session::default();
+        session.apply_gateway(GatewayEvent::Ready {
+            session_id: "s".into(),
+            user: User {
+                id: Snowflake::new(1),
+                username: "ada".into(),
+                global_name: None,
+                discriminator: None,
+                bot: false,
+                avatar: None,
+            },
+            guilds: vec![rencord_protocol::ReadyGuild {
+                id: Snowflake::new(10),
+                name: None,
+                icon: None,
+                unavailable: true,
+                channels: Vec::new(),
+            }],
+            discord_theme: None,
+            discord_client_theme: None,
+        });
+        assert_eq!(session.guilds[0].name, "Guild 10");
+        session.apply_gateway(GatewayEvent::GuildUpsert {
+            id: Snowflake::new(10),
+            name: Some("Analytical Engines".into()),
+            icon: Some("abc".into()),
+            channels: vec![Channel {
+                id: Snowflake::new(100),
+                name: "general".into(),
+                kind: ChannelKind::GuildText,
+                guild_id: None,
+                parent_id: None,
+                position: 0,
+                recipient_ids: Vec::new(),
+            }],
+        });
+        assert_eq!(session.guilds[0].name, "Analytical Engines");
+        assert_eq!(session.guilds[0].icon.as_deref(), Some("abc"));
+        assert_eq!(session.channels[&Snowflake::new(100)].guild_id, None);
+        session.apply_gateway(GatewayEvent::ChannelUpsert(Channel {
+            id: Snowflake::new(100),
+            name: "lounge".into(),
+            kind: ChannelKind::GuildText,
+            guild_id: Some(Snowflake::new(10)),
+            parent_id: None,
+            position: 1,
+            recipient_ids: Vec::new(),
+        }));
+        assert_eq!(session.channels[&Snowflake::new(100)].name, "lounge");
+        session.apply_gateway(GatewayEvent::Reaction {
+            message_id: Snowflake::new(5),
+            emoji: "wave".into(),
+            remove: false,
+        });
+        session.apply_gateway(GatewayEvent::Reaction {
+            message_id: Snowflake::new(5),
+            emoji: "wave".into(),
+            remove: true,
+        });
+        assert!(session
+            .reactions
+            .get(&5)
+            .map(|list| list.is_empty())
+            .unwrap_or(true));
+        session.apply_gateway(GatewayEvent::GuildDelete(Snowflake::new(10)));
+        assert!(session.guilds.is_empty());
+        assert!(session.channels.is_empty());
     }
 
     #[test]

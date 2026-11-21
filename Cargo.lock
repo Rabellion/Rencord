@@ -7729,6 +7729,7 @@ version = "0.6.0"
 dependencies = [
  "rencord-gateway",
  "rencord-model",
+ "rencord-protocol",
  "rusqlite",
  "serde",
  "serde_json",

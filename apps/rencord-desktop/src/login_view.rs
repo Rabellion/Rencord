@@ -790,7 +790,16 @@ impl RencordWindow {
                         .as_ref()
                         .is_some_and(|live| Arc::ptr_eq(live, &api));
                     if current {
+                        let reaction = match &event {
+                            rencord_gateway::GatewayEvent::Reaction { message_id, .. } => {
+                                Some(message_id.get())
+                            }
+                            _ => None,
+                        };
                         view.shell.session.apply_gateway(event);
+                        if let Some(message_id) = reaction {
+                            view.shell.mirror_reaction(message_id);
+                        }
                         cx.notify();
                     }
                     current
