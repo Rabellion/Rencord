@@ -2619,28 +2619,27 @@ impl RencordWindow {
                     .child(paint(line, list_palette.muted, 14.))
                     .into_any_element();
             }
-            let (photo, attachments) = list_entity
-                .update(_cx, |window, cx| {
-                    let urls = match message.author.avatar.as_deref() {
-                        Some(hash) => vec![
-                            rencord_desktop::user_avatar_url(message.author.id.get(), hash),
-                            rencord_desktop::default_avatar_url(
-                                message.author.id.get(),
-                                message.author.discriminator.as_deref(),
-                            ),
-                        ],
-                        None => vec![rencord_desktop::default_avatar_url(
+            let (photo, attachments) = list_entity.update(_cx, |window, cx| {
+                let urls = match message.author.avatar.as_deref() {
+                    Some(hash) => vec![
+                        rencord_desktop::user_avatar_url(message.author.id.get(), hash),
+                        rencord_desktop::default_avatar_url(
                             message.author.id.get(),
                             message.author.discriminator.as_deref(),
-                        )],
-                    };
-                    let photo = window.first_image(&urls, cx);
-                    let attachments = media_urls(&message.content)
-                        .into_iter()
-                        .filter_map(|url| window.cached_image(&url, cx))
-                        .collect();
-                    (photo, attachments)
-                });
+                        ),
+                    ],
+                    None => vec![rencord_desktop::default_avatar_url(
+                        message.author.id.get(),
+                        message.author.discriminator.as_deref(),
+                    )],
+                };
+                let photo = window.first_image(&urls, cx);
+                let attachments = media_urls(&message.content)
+                    .into_iter()
+                    .filter_map(|url| window.cached_image(&url, cx))
+                    .collect();
+                (photo, attachments)
+            });
             let row = message_row(
                 list_entity.clone(),
                 &message,
