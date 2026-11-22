@@ -35,10 +35,12 @@ pub fn present_time(raw: &str, now: DateTime<FixedOffset>) -> Presented {
     let local = parsed.with_timezone(now.offset());
     let day = day_label(local.date_naive(), now.date_naive());
     let clock = clock_label(local.hour(), local.minute());
-    let short = if day == "Today" || day == "Yesterday" {
-        format!("{day} at {clock}")
+    let short = if day == "Today" {
+        clock.clone()
+    } else if day == "Yesterday" {
+        format!("Yesterday at {clock}")
     } else {
-        day.clone()
+        format!("{}/{}/{} {clock}", local.month(), local.day(), local.year())
     };
     let full = format!(
         "{}, {} {}, {} at {clock}",
@@ -48,6 +50,30 @@ pub fn present_time(raw: &str, now: DateTime<FixedOffset>) -> Presented {
         local.year(),
     );
     Presented { short, full, day }
+}
+
+/// Same author, both ordinary messages, less than seven minutes apart.
+pub const GROUP_WINDOW_MS: i64 = 7 * 60 * 1000;
+
+pub fn groups_with(
+    previous_author: u64,
+    previous_timestamp: &str,
+    previous_kind: u8,
+    next_author: u64,
+    next_timestamp: &str,
+    next_kind: u8,
+) -> bool {
+    if previous_author != next_author || previous_kind != 0 || next_kind != 0 {
+        return false;
+    }
+    let (Ok(previous), Ok(next)) = (
+        DateTime::parse_from_rfc3339(previous_timestamp),
+        DateTime::parse_from_rfc3339(next_timestamp),
+    ) else {
+        return false;
+    };
+    (next.timestamp_millis() - previous.timestamp_millis()).unsigned_abs()
+        < u64::try_from(GROUP_WINDOW_MS).unwrap_or(0)
 }
 
 /// A divider belongs between two messages when their local days differ.
@@ -142,7 +168,31 @@ mod tests {
             now
         ));
         let today = present_time("2026-11-21T22:04:00Z", now);
-        assert_eq!(today.short, "Today at 10:04 PM");
+        assert_eq!(today.short, "10:04 PM");
+        assert!(!groups_with(
+            1,
+            "2026-11-21T22:00:00Z",
+            0,
+            1,
+            "2026-11-21T22:08:00Z",
+            0,
+        ));
+        assert!(groups_with(
+            1,
+            "2026-11-21T22:00:00Z",
+            0,
+            1,
+            "2026-11-21T22:06:00Z",
+            0,
+        ));
+        assert!(!groups_with(
+            1,
+            "2026-11-21T22:00:00Z",
+            0,
+            1,
+            "2026-11-21T22:06:00Z",
+            7,
+        ));
     }
 
     #[test]
@@ -150,7 +200,7 @@ mod tests {
         let zone = FixedOffset::west_opt(5 * 3600).unwrap();
         let now = zone.with_ymd_and_hms(2026, 11, 21, 18, 0, 0).unwrap();
         let stamp = present_time("2026-11-21T22:04:00Z", now);
-        assert_eq!(stamp.short, "Today at 5:04 PM");
+        assert_eq!(stamp.short, "5:04 PM");
         assert_eq!(stamp.full, "Saturday, November 21, 2026 at 5:04 PM");
     }
 }

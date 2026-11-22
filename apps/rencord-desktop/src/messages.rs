@@ -14,39 +14,6 @@ fn url_safe(part: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
-/// Discord only serves image sizes that are powers of two.
-fn image_size(wanted: u32) -> u32 {
-    wanted.clamp(16, 256).next_power_of_two()
-}
-
-fn banner_size(wanted: u32) -> u32 {
-    wanted.clamp(64, 1024).next_power_of_two()
-}
-
-/// The user's avatar, or the default one Discord assigns when there is none.
-pub fn avatar_url(user: &User, wanted: u32) -> String {
-    match user.avatar.as_deref() {
-        Some(hash) if url_safe(hash) => format!(
-            "https://cdn.discordapp.com/avatars/{}/{hash}.png?size={}",
-            user.id,
-            image_size(wanted)
-        ),
-        _ => format!(
-            "https://cdn.discordapp.com/embed/avatars/{}.png",
-            (user.id.get() >> 22) % 6
-        ),
-    }
-}
-
-/// A server's icon, if it has one.
-pub fn guild_icon_url(guild: Snowflake, hash: Option<&str>, wanted: u32) -> Option<String> {
-    let hash = hash.filter(|hash| url_safe(hash))?;
-    Some(format!(
-        "https://cdn.discordapp.com/icons/{guild}/{hash}.png?size={}",
-        image_size(wanted)
-    ))
-}
-
 /// The colour of someone's name in a server: their highest role that has one.
 /// A role with no colour is skipped, so it cannot hide a coloured role below it.
 pub fn name_color(guild_roles: &[Role], member_roles: &[Snowflake]) -> Option<u32> {
@@ -74,15 +41,6 @@ pub fn author_style(user: &User, member: Option<&Member>, guild_roles: &[Role]) 
             .to_owned(),
         color: member.and_then(|member| name_color(guild_roles, &member.roles)),
     }
-}
-
-/// The picture behind a server's name in the channel list, if it has one.
-pub fn guild_banner_url(guild: Snowflake, hash: Option<&str>, wanted: u32) -> Option<String> {
-    let hash = hash.filter(|hash| url_safe(hash))?;
-    Some(format!(
-        "https://cdn.discordapp.com/banners/{guild}/{hash}.png?size={}",
-        banner_size(wanted)
-    ))
 }
 
 /// The line shown for a message that has no text of its own, such as a join.
@@ -214,50 +172,6 @@ mod tests {
             avatar: avatar.map(str::to_owned),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn avatars_use_the_hash_or_discords_default() {
-        assert_eq!(
-            avatar_url(&user(42, Some("a_1b2c3")), 40),
-            "https://cdn.discordapp.com/avatars/42/a_1b2c3.png?size=64"
-        );
-        assert_eq!(
-            avatar_url(&user(42, Some("a_1b2c3")), 100),
-            "https://cdn.discordapp.com/avatars/42/a_1b2c3.png?size=128"
-        );
-        // 4194304 >> 22 is 1, so the second default avatar.
-        assert_eq!(
-            avatar_url(&user(4_194_304, None), 40),
-            "https://cdn.discordapp.com/embed/avatars/1.png"
-        );
-    }
-
-    #[test]
-    fn a_hash_that_is_not_url_safe_is_not_used() {
-        for bad in ["../../x", "a b", "x?y=1", "x/y", "", "x#y"] {
-            let url = avatar_url(&user(7, Some(bad)), 64);
-            assert!(url.contains("/embed/avatars/"), "{bad}: {url}");
-        }
-        assert_eq!(guild_icon_url(Snowflake::new(1), Some("../x"), 64), None);
-        assert_eq!(guild_icon_url(Snowflake::new(1), None, 64), None);
-        assert_eq!(
-            guild_icon_url(Snowflake::new(1), Some("abc"), 48).unwrap(),
-            "https://cdn.discordapp.com/icons/1/abc.png?size=64"
-        );
-    }
-
-    #[test]
-    fn a_banner_url_uses_a_safe_hash_and_a_size_discord_serves() {
-        assert_eq!(
-            guild_banner_url(Snowflake::new(5), Some("a_9f8e"), 480).unwrap(),
-            "https://cdn.discordapp.com/banners/5/a_9f8e.png?size=512"
-        );
-        assert_eq!(guild_banner_url(Snowflake::new(5), None, 480), None);
-        assert_eq!(guild_banner_url(Snowflake::new(5), Some("../x"), 480), None);
-        assert!(guild_banner_url(Snowflake::new(5), Some("abc"), 99_999)
-            .unwrap()
-            .ends_with("size=1024"));
     }
 
     fn role(id: u64, color: u32, position: i32) -> Role {

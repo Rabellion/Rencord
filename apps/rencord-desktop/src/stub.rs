@@ -19,14 +19,27 @@ pub enum StubScene {
     Scroll,
     /// History responds 500 so the retry row stays up.
     Retry,
+    /// Categories, join lines, several days, and a direct message.
+    Layout,
 }
 
 static SCENE: OnceLock<StubScene> = OnceLock::new();
+static HTTP_ORIGIN: OnceLock<String> = OnceLock::new();
 
 pub const TOKEN: &str = "stub-local-token";
 
 pub fn current() -> Option<StubScene> {
     SCENE.get().copied()
+}
+
+static OPEN_HOME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn request_home() {
+    OPEN_HOME.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn take_home() -> bool {
+    OPEN_HOME.swap(false, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Binds the HTTP API and the gateway, then returns their base URLs.
@@ -37,6 +50,7 @@ pub async fn serve(scene: StubScene) -> (String, String) {
         .await
         .expect("stub gateway");
     let http_addr = http.local_addr().expect("http addr");
+    let _ = HTTP_ORIGIN.set(format!("http://{http_addr}"));
     let gateway_addr = gateway.local_addr().expect("gateway addr");
     tokio::spawn(async move {
         loop {
@@ -77,11 +91,27 @@ async fn handle_http(mut stream: TcpStream, scene: StubScene) {
     let Some(line) = text.lines().next() else {
         return;
     };
-    let path = line.split_whitespace().nth(1).unwrap_or("/");
-    if path.contains("before=") {
+    let target = line.split_whitespace().nth(1).unwrap_or("/");
+    let path = target.split('?').next().unwrap_or(target);
+    if path.contains("/avatars/")
+        || path.contains("/icons/")
+        || path.contains("/banners/")
+        || path.contains("/emojis/")
+        || path.contains("/attachments/")
+    {
+        let bytes = tinted_png(path);
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            bytes.len()
+        );
+        let _ = stream.write_all(header.as_bytes()).await;
+        let _ = stream.write_all(&bytes).await;
+        return;
+    }
+    if target.contains("before=") {
         tokio::time::sleep(Duration::from_millis(1500)).await;
     }
-    let (status, body) = respond(scene, path);
+    let (status, body) = respond(scene, target);
     let header = format!(
         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
@@ -91,6 +121,35 @@ async fn handle_http(mut stream: TcpStream, scene: StubScene) {
 }
 
 fn respond(scene: StubScene, path: &str) -> (&'static str, String) {
+    if scene == StubScene::Layout {
+        if path.contains("/channels/") && path.contains("/messages") {
+            return ("200 OK", layout_messages(channel_from_path(path)));
+        }
+        if path.contains("/users/@me/channels") {
+            return ("200 OK", layout_dms());
+        }
+        if path.contains("/guilds/") && path.contains("/channels") {
+            return (
+                "200 OK",
+                r#"[{"id":"1","type":4,"name":"Start here","guild_id":"10","position":0},{"id":"100","type":0,"name":"welcome","guild_id":"10","parent_id":"1","position":0},{"id":"101","type":0,"name":"general","guild_id":"10","parent_id":"1","position":1},{"id":"2","type":4,"name":"Voice","guild_id":"10","position":1},{"id":"110","type":2,"name":"Lounge","guild_id":"10","parent_id":"2","position":0}]"#
+                    .into(),
+            );
+        }
+        if path.contains("/users/@me/guilds") {
+            return (
+                "200 OK",
+                r#"[{"id":"10","name":"Analytical Engines","icon":"g10","banner":"b10","folder":"Study"},{"id":"11","name":"Difference Club","icon":"g11","banner":null,"folder":"Study"}]"#
+                    .into(),
+            );
+        }
+        if path.contains("/users/@me") {
+            return (
+                "200 OK",
+                r#"{"id":"1","username":"agentprivate","global_name":"Agent Private","avatar":"u1","bot":false}"#
+                    .into(),
+            );
+        }
+    }
     if path.contains("/channels/") && path.contains("/messages") {
         if scene == StubScene::Retry && !path.contains("before=") {
             return (
@@ -130,6 +189,110 @@ fn respond(scene: StubScene, path: &str) -> (&'static str, String) {
     ("404 Not Found", r#"{"message":"stub"}"#.into())
 }
 
+fn tinted_png(seed: &str) -> Vec<u8> {
+    let mut hash = 0u32;
+    for byte in seed.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(u32::from(byte));
+    }
+    // Bright, distinct fills so a stub screenshot cannot collapse to one dark disc.
+    let palette = [
+        [88u8, 101, 242],
+        [87, 242, 135],
+        [254, 231, 92],
+        [237, 66, 69],
+        [235, 69, 158],
+        [59, 165, 93],
+        [255, 163, 72],
+        [79, 184, 255],
+    ];
+    let color = palette[(hash as usize) % palette.len()];
+    let mark = ((hash >> 8) % 3) as u8;
+    let image = image::RgbaImage::from_fn(64, 64, |x, y| {
+        let ink = match mark {
+            0 => x > 18 && x < 46 && y > 18 && y < 46,
+            1 => (x as i32 - 32).abs() + (y as i32 - 32).abs() < 16,
+            _ => (x as i32 - 32).pow(2) + (y as i32 - 32).pow(2) < 14 * 14,
+        };
+        if ink {
+            image::Rgba([255, 255, 255, 255])
+        } else {
+            image::Rgba([color[0], color[1], color[2], 255])
+        }
+    });
+    let mut bytes = Vec::new();
+    let _ = image::DynamicImage::ImageRgba8(image).write_to(
+        &mut std::io::Cursor::new(&mut bytes),
+        image::ImageFormat::Png,
+    );
+    bytes
+}
+
+fn channel_from_path(path: &str) -> u64 {
+    path.split("/channels/")
+        .nth(1)
+        .and_then(|rest| rest.split(['/', '?']).next())
+        .and_then(|id| id.parse().ok())
+        .unwrap_or(0)
+}
+
+fn layout_dms() -> String {
+    let names = [
+        ("200", "2", "Munch", "u2"),
+        ("201", "3", "Nosh", "u3"),
+        ("202", "4", "Boyka", "u4"),
+        ("203", "5", "Ada", "u5"),
+        ("204", "6", "Charles", "u6"),
+        ("205", "7", "Lovelace", "u7"),
+        ("206", "8", "Quill", "u8"),
+        ("207", "9", "Pepper", "u9"),
+        ("208", "10", "Sable", "u10"),
+        ("209", "11", "Indigo", "u11"),
+        ("210", "12", "Moss", "u12"),
+        ("211", "13", "Juniper", "u13"),
+        ("212", "14", "Harbor", "u14"),
+        ("213", "15", "Wren", "u15"),
+        ("214", "16", "Piper", "u16"),
+    ];
+    let rows: Vec<String> = names
+        .iter()
+        .map(|(channel, user, name, avatar)| {
+            format!(
+                r#"{{"id":"{channel}","type":1,"recipients":[{{"id":"{user}","username":"{name}","global_name":"{name}","avatar":"{avatar}"}}]}}"#
+            )
+        })
+        .collect();
+    format!("[{}]", rows.join(","))
+}
+
+fn layout_messages(channel: u64) -> String {
+    let origin = HTTP_ORIGIN
+        .get()
+        .cloned()
+        .unwrap_or_else(|| "http://127.0.0.1".to_owned());
+    if channel == 200 {
+        return r#"[
+            {"id":"9002","channel_id":"200","type":0,"content":"Want to queue after this?","timestamp":"2026-11-21T18:10:00Z","author":{"id":"2","username":"munch","global_name":"Munch","avatar":"u2"}},
+            {"id":"9001","channel_id":"200","type":0,"content":"Hey, you around?","timestamp":"2026-11-21T18:02:00Z","author":{"id":"1","username":"agentprivate","global_name":"Agent Private","avatar":"u1"}}
+        ]"#
+        .to_owned();
+    }
+    if channel != 100 {
+        let author = channel.saturating_sub(198);
+        return format!(
+            r#"[{{"id":"{channel}0","channel_id":"{channel}","type":0,"content":"Note from channel {channel}.","timestamp":"2026-11-21T12:00:00Z","author":{{"id":"{author}","username":"friend","global_name":"Friend","avatar":"u{author}"}}}}]"#
+        );
+    }
+    format!(
+        r#"[
+        {{"id":"6","channel_id":"100","type":0,"content":"Still here, <@1>. <:wave:42>","edited_timestamp":"2026-11-21T18:07:00Z","timestamp":"2026-11-21T18:06:00Z","mentions":[{{"id":"1","username":"agentprivate","global_name":"Agent Private"}}],"attachments":[{{"url":"{origin}/attachments/note.png","proxy_url":"{origin}/attachments/note.png","content_type":"image/png"}}],"author":{{"id":"2","username":"munch","global_name":"Munch","avatar":"u2"}}}},
+        {{"id":"5","channel_id":"100","type":0,"content":"Hello from the lobby.","timestamp":"2026-11-21T18:04:00Z","author":{{"id":"2","username":"munch","global_name":"Munch","avatar":"u2"}}}},
+        {{"id":"4","channel_id":"100","type":0,"content":"The notes are in <#101>.","timestamp":"2026-11-20T15:00:00Z","mention_channels":[{{"id":"101","name":"general"}}],"author":{{"id":"1","username":"agentprivate","global_name":"Agent Private","avatar":"u1"}}}},
+        {{"id":"3","channel_id":"100","type":7,"content":"","timestamp":"2026-11-19T12:00:00Z","author":{{"id":"3","username":"nosh","global_name":"Nosh","avatar":"u3"}}}},
+        {{"id":"2","channel_id":"100","type":7,"content":"","timestamp":"2026-11-18T12:00:00Z","author":{{"id":"2","username":"munch","global_name":"Munch","avatar":"u2"}}}}
+    ]"#
+    )
+}
+
 fn messages(channel: u64, first: u64, count: u64) -> String {
     let mut list = Vec::new();
     for offset in 0..count {
@@ -157,7 +320,11 @@ async fn handle_gateway(stream: TcpStream) {
     }
     // Identify (or a heartbeat) arrives before READY.
     let _ = socket.next().await;
-    let ready = r#"{"op":0,"t":"READY","s":1,"d":{"session_id":"stub","user":{"id":"1","username":"ada","global_name":"Ada"},"guilds":[{"id":"10","name":"Analytical Engines","icon":"abc","channels":[{"id":"100","type":0,"name":"general","guild_id":"10"}]},{"id":"11","name":"Difference Club","icon":null,"channels":[{"id":"111","type":0,"name":"lounge"}]}],"user_settings":{"theme":"dark"}}}"#;
+    let ready = if current() == Some(StubScene::Layout) {
+        r#"{"op":0,"t":"READY","s":1,"d":{"session_id":"stub","user":{"id":"1","username":"agentprivate","global_name":"Agent Private","avatar":"u1"},"guilds":[{"id":"10","name":"Analytical Engines","icon":"g10","channels":[{"id":"100","type":0,"name":"welcome","guild_id":"10"}]}],"user_settings":{"theme":"dark"},"read_state":{"entries":[{"id":"100","last_message_id":"4","mention_count":1}]},"presences":[{"user":{"id":"1"},"status":"online","activities":[{"type":4,"state":"RESONATING"}]},{"user":{"id":"2"},"status":"online","activities":[{"type":0,"name":"THE FINALS"}]},{"user":{"id":"3"},"status":"idle","activities":[{"name":"In voice"}]},{"user":{"id":"4"},"status":"dnd","activities":[{"type":0,"name":"ROBLOX"}]}],"voice_states":[{"guild_id":"10","channel_id":"110","user_id":"3","self_mute":false,"self_deaf":false,"member":{"user":{"id":"3","global_name":"Nosh","avatar":"u3"}}},{"guild_id":"10","channel_id":"110","user_id":"4","self_mute":true,"self_deaf":false,"member":{"user":{"id":"4","global_name":"Boyka","avatar":"u4"}}},{"guild_id":"10","channel_id":"110","user_id":"1","self_mute":false,"self_deaf":false,"member":{"user":{"id":"1","global_name":"Agent Private","avatar":"u1"}}}]}}"#
+    } else {
+        r#"{"op":0,"t":"READY","s":1,"d":{"session_id":"stub","user":{"id":"1","username":"ada","global_name":"Ada"},"guilds":[{"id":"10","name":"Analytical Engines","icon":"abc","channels":[{"id":"100","type":0,"name":"general","guild_id":"10"}]},{"id":"11","name":"Difference Club","icon":null,"channels":[{"id":"111","type":0,"name":"lounge"}]}],"user_settings":{"theme":"dark"}}}"#
+    };
     if socket
         .send(tokio_tungstenite::tungstenite::Message::Text(ready.into()))
         .await
@@ -167,6 +334,16 @@ async fn handle_gateway(stream: TcpStream) {
     }
     while let Some(Ok(message)) = socket.next().await {
         let text = message.into_text().unwrap_or_default();
+        if text.contains("\"op\":14") {
+            let update = r#"{"op":0,"t":"GUILD_MEMBER_LIST_UPDATE","s":2,"d":{"guild_id":"10","id":"100","ops":[{"op":"SYNC","range":[0,99],"items":[{"group":{"id":"Online","count":1}},{"member":{"user":{"id":"2","global_name":"Munch","avatar":"u2"},"presence":{"status":"online","activities":[{"type":0,"name":"THE FINALS"}]}}},{"group":{"id":"Ranked Players","count":2}},{"member":{"user":{"id":"3","global_name":"Nosh","avatar":"u3"},"avatar":"gm3","roles":[{"id":"9","name":"Ranked","color":15158332,"position":5}],"presence":{"status":"online","activities":[{"name":"In voice"}]}}},{"member":{"user":{"id":"4","global_name":"Boyka","avatar":"u4"},"presence":{"status":"idle","activities":[{"type":0,"name":"ROBLOX"}]}}}]}]}}"#;
+            if socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(update.into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
         if text.contains("\"op\":1") {
             let ack = r#"{"op":11,"d":null}"#;
             if socket
@@ -196,5 +373,20 @@ mod tests {
         );
         assert!(page.contains("\"2900\""), "{page}");
         assert!(!page.contains("\"3000\""), "{page}");
+        let target = "/api/v10/channels/100/messages?before=2951&limit=50";
+        let path = target.split('?').next().unwrap_or(target);
+        assert!(target.contains("before="));
+        assert!(!path.contains("before="));
+        let (status, page) = respond(StubScene::Scroll, target);
+        assert!(status.starts_with("200"), "{status}");
+        assert!(page.contains("\"2900\""), "{page}");
+        let welcome = layout_messages(100);
+        let direct = layout_messages(200);
+        assert!(welcome.contains("\"type\":7"), "{welcome}");
+        assert!(welcome.contains("\"channel_id\":\"100\""));
+        assert!(direct.contains("Want to queue"), "{direct}");
+        assert!(direct.contains("\"channel_id\":\"200\""));
+        assert!(!direct.contains("joined the server"), "{direct}");
+        assert!(layout_dms().matches("\"type\":1").count() >= 15);
     }
 }

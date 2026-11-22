@@ -225,6 +225,16 @@ impl PresenceStatus {
             _ => Self::Offline,
         }
     }
+
+    /// The word Discord uses for this status.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Online => "online",
+            Self::Idle => "idle",
+            Self::Dnd => "dnd",
+            Self::Offline => "offline",
+        }
+    }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Guild {
@@ -235,6 +245,9 @@ pub struct Guild {
     /// The picture behind the server name in the channel list.
     #[serde(default)]
     pub banner: Option<String>,
+    /// Client-side folder name. Empty guilds stay loose on the rail.
+    #[serde(default)]
+    pub folder: Option<String>,
     #[serde(default)]
     pub roles: Vec<Role>,
 }
@@ -256,6 +269,9 @@ pub struct Channel {
     /// The same people with their avatars, for the DM list.
     #[serde(default)]
     pub recipients: Vec<User>,
+    /// Avatar hash for a direct message, when the recipient has one.
+    #[serde(default)]
+    pub avatar: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -414,6 +430,17 @@ pub struct Reply {
     pub content: Option<String>,
 }
 
+/// One-line system copy. Normal messages (`0`) return nothing so the body is shown.
+pub fn system_line(kind: u8, name: &str) -> Option<String> {
+    match kind {
+        3 => Some(format!("{name} started a call.")),
+        6 => Some(format!("{name} pinned a message to this channel.")),
+        7 => Some(format!("{name} joined the server.")),
+        8..=11 => Some(format!("{name} boosted the server.")),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VoiceEndpoint {
     pub guild_id: Option<Snowflake>,
@@ -452,6 +479,20 @@ mod tests {
         let rendered = format!("{token:?}");
         assert!(!rendered.contains("super-secret"));
         assert_eq!(token.expose(), "super-secret-value");
+    }
+
+    #[test]
+    fn a_join_is_a_system_line_and_a_normal_message_is_not() {
+        assert_eq!(system_line(7, "Ada"), Some("Ada joined the server.".into()));
+        assert_eq!(
+            system_line(6, "Ada"),
+            Some("Ada pinned a message to this channel.".into())
+        );
+        assert_eq!(
+            system_line(3, "Munch"),
+            Some("Munch started a call.".into())
+        );
+        assert!(system_line(0, "Ada").is_none());
     }
 
     #[test]

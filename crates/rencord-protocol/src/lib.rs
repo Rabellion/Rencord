@@ -345,6 +345,7 @@ pub struct WireChannel {
 
 impl WireChannel {
     pub fn into_channel(self) -> rencord_model::Channel {
+        let avatar = self.recipients.first().and_then(|user| user.avatar.clone());
         let name = self.name.unwrap_or_else(|| {
             if self.recipients.is_empty() {
                 "Direct Message".to_owned()
@@ -365,6 +366,7 @@ impl WireChannel {
             position: self.position,
             recipient_ids: self.recipients.iter().map(|user| user.id).collect(),
             recipients: self.recipients,
+            avatar,
         }
     }
 }
@@ -824,6 +826,35 @@ pub struct OutgoingMessage {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_message_keeps_mentions_edits_replies_and_attachments() {
+        let raw = r#"{
+            "id":"9","channel_id":"100","timestamp":"t","type":0,
+            "content":"hello <@2> in <#100>",
+            "edited_timestamp":"later",
+            "author":{"id":"1","username":"a"},
+            "mentions":[{"id":"2","username":"munch","global_name":"Munch"}],
+            "attachments":[{"id":"5","url":"https://cdn.example/a.png","proxy_url":"https://media.example/a.png","content_type":"image/png"}],
+            "message_reference":{"message_id":"8"}
+        }"#;
+        let message = Message::from(serde_json::from_str::<WireMessage>(raw).unwrap());
+        // The text stays as sent; the UI turns mentions into names.
+        assert_eq!(message.content, "hello <@2> in <#100>");
+        assert_eq!(message.edited_timestamp.as_deref(), Some("later"));
+        assert_eq!(message.mentions[0].display_name(), "Munch");
+        assert_eq!(message.attachments[0].url, "https://cdn.example/a.png");
+        assert!(message.attachments[0].is_image());
+        assert_eq!(message.reply_to.unwrap().message_id.get(), 8);
+
+        let embed = r#"{"id":"1","channel_id":"1","content":"","author":{"id":"1","username":"a"},"embeds":[{"title":"Welcome card"}]}"#;
+        let message = Message::from(serde_json::from_str::<WireMessage>(embed).unwrap());
+        assert_eq!(message.embeds[0].title.as_deref(), Some("Welcome card"));
+        assert_eq!(message.content, "");
+
+        let both = r#"{"id":"1","channel_id":"1","content":"<a:wave:11> <:smile:22>","author":{"id":"1","username":"a"}}"#;
+        let message = Message::from(serde_json::from_str::<WireMessage>(both).unwrap());
+        assert_eq!(message.content, "<a:wave:11> <:smile:22>");
+    }
     #[test]
     fn identify_names_rencord() {
         let payload = identify_payload("token-value");

@@ -2,6 +2,7 @@
 //! without opening a window.
 
 mod breakpoints;
+mod cdn;
 mod channels;
 mod icons;
 pub mod layout;
@@ -17,20 +18,36 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 pub use breakpoints::{stacks_login, LOGIN_STACK, MEMBERS_HIDE, MEMBERS_HIDE_ONYX, SIDEBAR_HIDE};
+pub use cdn::{
+    attachment_url, cdn_base, default_avatar_index, default_avatar_url, emoji_url,
+    guild_banner_url, guild_icon_url, member_avatar_url, set_cdn_base, user_avatar_url,
+};
 pub use channels::{channel_sections, ChannelSection};
 pub use icons::{
     discord_install_icon_dir, hexwave_png, hexwave_svg_for_px, icon_pack_dir, rail_home_glyph_px,
 };
 pub use messages::{
-    author_style, avatar_url, clean_content, emoji_label, fit_size, guild_banner_url,
-    guild_icon_url, name_color, reply_preview, system_text, AuthorStyle, ReplyPreview,
+    author_style, clean_content, emoji_label, fit_size, name_color, reply_preview, system_text,
+    AuthorStyle, ReplyPreview,
 };
 pub use search::{guild_search_path, local_search, parse_message_query, MessageQuery, SearchHit};
 pub use theme::{
     guild_tile, role_color, theme_file_from_path, token_summary, Density, HdrCurveChoice,
     LayoutKind, Palette, Preferences, Theme, ThemeMode, MOTION_OVERLAY_MS,
 };
-pub use timefmt::{day_changed, now_local, present_time, Presented};
+pub use timefmt::{day_changed, groups_with, now_local, present_time, Presented};
+
+/// Composer hint for the channel that is actually open.
+pub fn composer_placeholder(channel_name: &str) -> String {
+    let name = channel_name.trim().trim_start_matches('#').trim();
+    if name.is_empty() {
+        "Message".to_owned()
+    } else if name.starts_with('@') {
+        format!("Message {name}")
+    } else {
+        format!("Message #{name}")
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum Mutation {
@@ -146,7 +163,7 @@ impl Shell {
             },
             last_switch_us: 0,
             jump_index: None,
-            favorites: vec![Snowflake::new(100)],
+            favorites: Vec::new(),
             read_mentions: Vec::new(),
             inbox_open: false,
             help_open: false,
@@ -171,6 +188,7 @@ impl Shell {
             vec!["Demo data is local. Nothing is sent to Discord.".into()],
         );
         shell.seed_showcase();
+        shell.favorites = vec![Snowflake::new(100)];
         shell
     }
 
@@ -202,6 +220,7 @@ impl Shell {
                     channel_id: channel,
                     author: ada.clone(),
                     content: "```rust\nfn main() {\n    let answer = 42;\n}\n```".into(),
+                    kind: 0,
                     timestamp: "Today at 3:38 PM".into(),
                     ..Default::default()
                 },
@@ -253,6 +272,7 @@ impl Shell {
                     channel_id: channel,
                     author: charles,
                     content: "Shipping the voice dock next. No shop, no quests.".into(),
+                    kind: 0,
                     timestamp: "Today at 4:02 PM".into(),
                     ..Default::default()
                 },
@@ -296,6 +316,7 @@ impl Shell {
                 channel_id: channel,
                 author,
                 content,
+                kind: 0,
                 timestamp: format!("2026-11-20T00:{:02}:{:02}Z", (index / 60) % 60, index % 60),
                 ..Default::default()
             });
@@ -305,6 +326,7 @@ impl Shell {
             channel_id: Snowflake::new(100),
             author: ada,
             content: "```rust\nfn main() {\n    let answer = 42;\n}\n```".into(),
+            kind: 0,
             timestamp: "2026-11-20T01:00:00Z".into(),
             ..Default::default()
         });
@@ -1072,6 +1094,16 @@ mod tests {
         assert!(Shell::login().members.is_empty());
         assert_eq!(Shell::demo().members.len(), 3);
     }
+    #[test]
+    fn a_signed_in_shell_does_not_invent_members() {
+        let shell = Shell::login();
+        assert!(shell.members.is_empty());
+        assert!(!shell.members.iter().any(|name| name.contains("Ada")));
+        assert_eq!(composer_placeholder("welcome"), "Message #welcome");
+        assert_ne!(composer_placeholder("welcome"), "Message #general");
+        assert_eq!(composer_placeholder("@Munch"), "Message @Munch");
+    }
+
     #[test]
     fn login_shell_leads_with_the_code_not_a_pasted_token() {
         let shell = Shell::login();

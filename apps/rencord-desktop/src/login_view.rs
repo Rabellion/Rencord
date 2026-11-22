@@ -115,7 +115,6 @@ impl LoginModel {
                 model.phase = LoginPhase::Confirm;
                 model.preview_name = "Ada Lovelace".into();
                 model.preview_handle = "ada".into();
-                model.avatar_bytes = Some(include_bytes!("../assets/avatars/ada.png").to_vec());
                 model.status = "Waiting for approval…".into();
             }
             LoginPreview::Error => {
@@ -840,6 +839,15 @@ impl RencordWindow {
         }
         for channel in snapshot.channels {
             self.shell.session.upsert_channel(channel);
+        }
+        if let Some(user) = self.shell.session.user.as_ref() {
+            let id = user.id.get();
+            self.shell.session.apply_ready_extras(
+                id,
+                snapshot.read_state,
+                snapshot.presences,
+                snapshot.voice_states,
+            );
         }
         if let Some(guild) = self.shell.session.guilds.first().cloned() {
             self.shell.session.select_guild(guild.id);
