@@ -471,7 +471,7 @@ struct RencordWindow {
     bench_last: Instant,
     frame_us: Vec<u128>,
     resize_us: Vec<u128>,
-    collapsed: HashSet<&'static str>,
+    collapsed: HashSet<String>,
     pinned_top: bool,
     following_tail: bool,
     followed_channel: Option<Snowflake>,
@@ -2211,8 +2211,6 @@ impl RencordWindow {
             });
         let row_px = density.channel_row_px();
         let favorites_open = !self.collapsed.contains("favorites");
-        let text_open = !self.collapsed.contains("text");
-        let voice_open = !self.collapsed.contains("voice");
         let dm_open = !self.collapsed.contains("dms");
         let favorite_ids = self.shell.favorites.clone();
         let in_voice = voice.is_some();
@@ -2224,8 +2222,8 @@ impl RencordWindow {
             .overflow_y_scroll();
         nav = nav.child(category_header(
             this.clone(),
-            "favorites",
-            "FAVORITES",
+            "favorites".into(),
+            "FAVORITES".into(),
             favorites_open,
             palette,
         ));
@@ -2247,13 +2245,6 @@ impl RencordWindow {
                 }
             }
         }
-        nav = nav.child(category_header(
-            this.clone(),
-            "text",
-            "TEXT CHANNELS",
-            text_open,
-            palette,
-        ));
         if let Some(guild) = self.shell.session.selected_guild {
             if let Some(message) = self.failed.get(&guild).cloned() {
                 nav = nav.child(fetch_error(
@@ -2269,51 +2260,63 @@ impl RencordWindow {
                 ));
             }
         }
-        if text_open {
-            for channel in channels.iter().filter(|channel| channel.kind.is_text()) {
-                let badge = self.shell.session.unread.contains(&channel.id).then_some(1);
-                let shown_as_favorite = favorites_open && favorite_ids.contains(&channel.id);
-                nav = nav.child(channel_row(
-                    this.clone(),
-                    channel.id,
-                    format!("# {}", channel.name),
-                    selected == Some(channel.id) && !shown_as_favorite,
-                    palette,
-                    badge,
-                    false,
-                    row_px,
-                    false,
-                    None,
-                ));
+        // Channels are grouped the way the server groups them, not as fixed
+        // "text" and "voice" blocks.
+        for section in rencord_desktop::channel_sections(&channels) {
+            let open = match &section.category {
+                Some(category) => {
+                    let key = format!("category-{}", category.id);
+                    let open = !self.collapsed.contains(&key);
+                    nav = nav.child(category_header(
+                        this.clone(),
+                        key,
+                        category.name.to_uppercase(),
+                        open,
+                        palette,
+                    ));
+                    open
+                }
+                None => true,
+            };
+            if !open {
+                continue;
+            }
+            for channel in &section.channels {
+                if channel.kind.is_voice() {
+                    nav = nav.child(channel_row(
+                        this.clone(),
+                        channel.id,
+                        format!(")) {}", channel.name),
+                        false,
+                        palette,
+                        None,
+                        true,
+                        row_px,
+                        in_voice,
+                        None,
+                    ));
+                } else {
+                    let badge = self.shell.session.unread.contains(&channel.id).then_some(1);
+                    let shown_as_favorite = favorites_open && favorite_ids.contains(&channel.id);
+                    nav = nav.child(channel_row(
+                        this.clone(),
+                        channel.id,
+                        format!("# {}", channel.name),
+                        selected == Some(channel.id) && !shown_as_favorite,
+                        palette,
+                        badge,
+                        false,
+                        row_px,
+                        false,
+                        None,
+                    ));
+                }
             }
         }
         nav = nav.child(category_header(
             this.clone(),
-            "voice",
-            "VOICE CHANNELS",
-            voice_open,
-            palette,
-        ));
-        if voice_open {
-            for channel in channels.iter().filter(|channel| channel.kind.is_voice()) {
-                nav = nav.child(channel_row(
-                    this.clone(),
-                    channel.id,
-                    format!(")) {}", channel.name),
-                    false,
-                    palette,
-                    None,
-                    true,
-                    row_px,
-                    in_voice,
-                    None,
-                ));
-            }
-        }
-        nav = nav.child(category_header(
-            this.clone(),
-            "dms",
-            "DIRECT MESSAGES",
+            "dms".into(),
+            "DIRECT MESSAGES".into(),
             dm_open,
             palette,
         ));
@@ -3245,8 +3248,8 @@ fn overlay(palette: Palette, child: impl IntoElement) -> impl IntoElement {
 
 fn category_header(
     view: Entity<RencordWindow>,
-    key: &'static str,
-    title: &'static str,
+    key: String,
+    title: String,
     open: bool,
     palette: Palette,
 ) -> impl IntoElement {
@@ -3261,8 +3264,8 @@ fn category_header(
         .cursor_pointer()
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| {
-                if !this.collapsed.remove(key) {
-                    this.collapsed.insert(key);
+                if !this.collapsed.remove(&key) {
+                    this.collapsed.insert(key.clone());
                 }
                 cx.notify();
             });
