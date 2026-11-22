@@ -3,10 +3,10 @@
 
 #define MyAppName "Rencord"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.6.0"
+  #define MyAppVersion "0.6.2"
 #endif
 #ifndef VersionQuad
-  #define VersionQuad "0.6.0.0"
+  #define VersionQuad "0.6.2.0"
 #endif
 #define MyAppPublisher "Rabellion"
 #define MyAppExeName "Rencord.exe"
