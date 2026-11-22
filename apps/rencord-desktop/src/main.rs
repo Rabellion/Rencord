@@ -36,8 +36,7 @@ mod stub;
 use rencord_markdown::{parse, Block, Inline};
 use rencord_model::{Message, Snowflake};
 use rows::{
-    attachment_view, embed_view, presence_color, reply_header, resolve_mentions, row_pictures,
-    Picture, RowEnv,
+    attachment_view, embed_view, presence_color, reply_header, row_pictures, Picture, RowEnv,
 };
 
 const UI_FONT: &str = "Segoe UI Variable, Segoe UI, Inter";
@@ -2888,20 +2887,17 @@ impl RencordWindow {
                 .map(|guild| guild.roles.as_slice())
                 .unwrap_or(&[]);
             let known = guild_id.and_then(|id| session.members.get(&id));
-            messages
-                .iter()
-                .map(|message| {
+            rencord_desktop::author_styles(
+                messages.iter().map(|message| {
                     // What the message itself says about its author is the newest.
                     let member = message
                         .member
                         .as_ref()
                         .or_else(|| known.and_then(|known| known.get(&message.author.id)));
-                    (
-                        message.author.id,
-                        rencord_desktop::author_style(&message.author, member, roles),
-                    )
-                })
-                .collect::<HashMap<_, _>>()
+                    (message, member)
+                }),
+                roles,
+            )
         });
         let reveal_hover = self.reveal_hover;
         let loading_older = self.loading_older == self.shell.session.selected_channel;
@@ -4512,7 +4508,7 @@ fn message_row(
 ) -> impl IntoElement {
     let id = message.id;
     let onyx = palette.ink_chrome;
-    let style = env.authors.get(&message.author.id);
+    let style = env.authors.get(&message.id);
     let name = style.map_or_else(
         || message.author.display_name().to_string(),
         |style| style.name.clone(),
@@ -4796,8 +4792,7 @@ fn message_blocks(
     font_px: f32,
     names: &HashMap<String, String>,
 ) -> impl IntoElement {
-    let mut blocks = parse(content);
-    resolve_mentions(&mut blocks, names);
+    let blocks = parse(content);
     let mut column = v_flex().gap_1();
     if blocks.is_empty() {
         return column.child(markdown_line(content, palette, font_px));
@@ -4810,7 +4805,7 @@ fn message_blocks(
             Block::Paragraph { inlines }
             | Block::Heading { inlines, .. }
             | Block::Quote { inlines } => {
-                column = column.child(rich_inlines(&inlines, palette, font_px));
+                column = column.child(rich_inlines(&inlines, names, palette, font_px));
             }
         }
     }
@@ -5869,20 +5864,21 @@ fn paint(text: impl Into<String>, color: u32, size: f32) -> impl IntoElement {
         .child(text.into())
 }
 
-fn mention_label(id: &str) -> String {
-    match id {
-        "1" => "@Ada".into(),
-        "2" => "@Charles".into(),
-        "3" => "@Lovelace".into(),
-        other => format!("@{other}"),
-    }
+fn mention_label(id: &str, names: &HashMap<String, String>) -> String {
+    rencord_desktop::mention_text(id, names)
 }
 
-fn rich_inlines(inlines: &[Inline], palette: Palette, font_px: f32) -> impl IntoElement {
+fn rich_inlines(
+    inlines: &[Inline],
+    names: &HashMap<String, String>,
+    palette: Palette,
+    font_px: f32,
+) -> impl IntoElement {
     let mut text = String::new();
     let mut runs = Vec::new();
     walk_inlines(
         inlines,
+        names,
         palette,
         FontWeight::NORMAL,
         &mut |chunk, color, weight, background| {
@@ -5927,6 +5923,7 @@ fn rich_inlines(inlines: &[Inline], palette: Palette, font_px: f32) -> impl Into
 
 fn walk_inlines(
     inlines: &[Inline],
+    names: &HashMap<String, String>,
     palette: Palette,
     weight: FontWeight,
     push: &mut impl FnMut(&str, u32, FontWeight, Option<u32>),
@@ -5934,14 +5931,14 @@ fn walk_inlines(
     for inline in inlines {
         match inline {
             Inline::Text(value) => push(value, palette.text, weight, None),
-            Inline::Bold(inner) => walk_inlines(inner, palette, FontWeight::SEMIBOLD, push),
+            Inline::Bold(inner) => walk_inlines(inner, names, palette, FontWeight::SEMIBOLD, push),
             Inline::Italic(inner) | Inline::Spoiler(inner) => {
-                walk_inlines(inner, palette, weight, push)
+                walk_inlines(inner, names, palette, weight, push)
             }
             Inline::Code(value) => push(value, palette.link, weight, Some(palette.elevated)),
             Inline::Link { text, .. } => push(text, palette.link, weight, None),
             Inline::Mention { id } => {
-                let label = mention_label(id);
+                let label = mention_label(id, names);
                 let (foreground, wash) = (palette.mention_fg, palette.mention_bg);
                 push(&label, foreground, FontWeight::SEMIBOLD, Some(wash));
             }

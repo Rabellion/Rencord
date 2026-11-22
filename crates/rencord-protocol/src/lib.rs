@@ -550,7 +550,10 @@ pub struct MessagePatch {
     pub embeds: Option<Vec<Embed>>,
     pub attachments: Option<Vec<Attachment>>,
     pub mentions: Option<Vec<User>>,
-    /// Set when the update carried the whole message (it had an author).
+    /// True when the payload had `message_reference`, including an explicit null.
+    pub reply_in_payload: bool,
+    /// Set when the update carried an author. Fields the payload omitted stay
+    /// on the stored message; this is not a replacement by itself.
     pub full: Option<Message>,
 }
 
@@ -592,6 +595,7 @@ impl MessagePatch {
                     .filter_map(|item| serde_json::from_value(item).ok())
                     .collect()
             }),
+            reply_in_payload: data.get("message_reference").is_some(),
             full: if data.get("author").is_some() {
                 serde_json::from_value::<WireMessage>(data.clone())
                     .ok()

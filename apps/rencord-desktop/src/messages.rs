@@ -4,7 +4,9 @@
 //! anything: a missing name, a hash that is not a hash, a reply to a message
 //! that no longer exists.
 
-use rencord_model::{Member, Message, Reply, Role, Snowflake, User};
+use std::collections::HashMap;
+
+use rencord_model::{Embed, EmbedImage, Member, Message, Reply, Role, Snowflake, User};
 
 /// A hash or name that is safe to put in a URL path: letters, digits, `_`.
 fn url_safe(part: &str) -> bool {
@@ -86,6 +88,8 @@ pub fn reply_preview(reply: &Reply) -> ReplyPreview {
         .unwrap_or("");
     let text = if reply.author.is_none() && reply.content.is_none() {
         "Original message was deleted".to_owned()
+    } else if reply.author.is_none() {
+        "Original message".to_owned()
     } else if line.is_empty() {
         "Click to see attachment".to_owned()
     } else if line.chars().count() > 90 {
@@ -98,30 +102,98 @@ pub fn reply_preview(reply: &Reply) -> ReplyPreview {
 }
 
 /// Turns Discord's `<#channel>` and `<:emoji:id>` markup into text. Mentions of
-/// people are left for the markdown parser, which keeps their ids.
+/// people are left for the markdown parser, which keeps their ids. Code, and a
+/// backslash before the markup, are left as typed.
 pub fn clean_content(content: &str, channel_name: impl Fn(Snowflake) -> Option<String>) -> String {
+    let chars: Vec<char> = content.chars().collect();
     let mut out = String::with_capacity(content.len());
-    let mut rest = content;
-    while let Some(start) = rest.find('<') {
-        out.push_str(&rest[..start]);
-        let tail = &rest[start..];
-        let Some(end) = tail.find('>') else {
-            out.push_str(tail);
-            return out;
-        };
-        match markup_text(&tail[1..end], &channel_name) {
-            Some(text) => {
-                out.push_str(&text);
-                rest = &tail[end + 1..];
+    let mut index = 0;
+    let mut fenced = false;
+    while index < chars.len() {
+        if chars[index..].starts_with(&['`', '`', '`']) {
+            fenced = !fenced;
+            out.push_str("```");
+            index += 3;
+            continue;
+        }
+        if !fenced && chars[index] == '`' {
+            out.push('`');
+            index += 1;
+            while index < chars.len() && chars[index] != '`' {
+                out.push(chars[index]);
+                index += 1;
             }
-            None => {
-                out.push('<');
-                rest = &tail[1..];
+            if index < chars.len() {
+                out.push('`');
+                index += 1;
+            }
+            continue;
+        }
+        if !fenced && chars[index] == '\\' && index + 1 < chars.len() {
+            out.push('\\');
+            out.push(chars[index + 1]);
+            index += 2;
+            continue;
+        }
+        if !fenced && chars[index] == '<' {
+            let tail: String = chars[index..].iter().collect();
+            if let Some(end) = tail.find('>') {
+                if let Some(text) = markup_text(&tail[1..end], &channel_name) {
+                    out.push_str(&text);
+                    index += end + 1;
+                    continue;
+                }
             }
         }
+        out.push(chars[index]);
+        index += 1;
     }
-    out.push_str(rest);
     out
+}
+
+/// The picture an embed should show. An empty image does not hide the thumbnail.
+pub fn embed_picture(embed: &Embed) -> Option<&EmbedImage> {
+    embed
+        .image
+        .as_ref()
+        .filter(|image| !image.best_url().is_empty())
+        .or_else(|| {
+            embed
+                .thumbnail
+                .as_ref()
+                .filter(|image| !image.best_url().is_empty())
+        })
+}
+
+/// Whether an embed has text, a picture, or a video the row can offer.
+pub fn embed_has_body(embed: &Embed) -> bool {
+    let has_text = embed.title.is_some() || embed.description.is_some();
+    let video = embed.video.is_some() || matches!(embed.kind.as_deref(), Some("video" | "gifv"));
+    has_text || embed_picture(embed).is_some() || video
+}
+
+/// One style per message, so two messages from one person can differ.
+pub fn author_styles<'a>(
+    rows: impl IntoIterator<Item = (&'a Message, Option<&'a Member>)>,
+    roles: &'a [Role],
+) -> HashMap<Snowflake, AuthorStyle> {
+    rows.into_iter()
+        .map(|(message, member)| (message.id, author_style(&message.author, member, roles)))
+        .collect()
+}
+
+/// A mention's visible name. A resolved name is used as given, so a person
+/// called "1" is not the demo user of that id.
+pub fn mention_text(id: &str, names: &HashMap<String, String>) -> String {
+    if let Some(name) = names.get(id) {
+        return format!("@{name}");
+    }
+    match id {
+        "1" => "@Ada".into(),
+        "2" => "@Charles".into(),
+        "3" => "@Lovelace".into(),
+        other => format!("@{other}"),
+    }
 }
 
 fn markup_text(token: &str, channel_name: &impl Fn(Snowflake) -> Option<String>) -> Option<String> {
@@ -321,6 +393,68 @@ mod tests {
         );
         assert_eq!(clean_content("unclosed <#7", name), "unclosed <#7");
         assert_eq!(clean_content("", name), "");
+        // A code span is shown as typed, including channel markup.
+        assert_eq!(
+            clean_content("see <#7> but ` <#7> ` and \\<#7>", name),
+            "see #general but ` <#7> ` and \\<#7>"
+        );
+        assert_eq!(
+            clean_content("```\n<#7>\n```\nafter <#7>", name),
+            "```\n<#7>\n```\nafter #general"
+        );
+    }
+
+    #[test]
+    fn an_empty_embed_image_does_not_hide_the_thumbnail_and_a_video_still_shows() {
+        let thumb = Embed {
+            thumbnail: Some(EmbedImage {
+                url: "https://cdn.discordapp.com/thumb.png".into(),
+                ..Default::default()
+            }),
+            image: Some(EmbedImage::default()),
+            ..Default::default()
+        };
+        assert_eq!(
+            embed_picture(&thumb).map(EmbedImage::best_url),
+            Some("https://cdn.discordapp.com/thumb.png")
+        );
+        let video = Embed {
+            kind: Some("video".into()),
+            url: Some("https://example.test/clip".into()),
+            ..Default::default()
+        };
+        assert!(embed_has_body(&video));
+        assert!(!embed_has_body(&Embed::default()));
+    }
+
+    #[test]
+    fn two_messages_from_one_person_keep_their_own_names() {
+        let ada = user(1, None);
+        let first = Message {
+            id: Snowflake::new(10),
+            author: ada.clone(),
+            member: Some(Member {
+                nick: Some("The Boss".into()),
+                roles: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let second = Message {
+            id: Snowflake::new(11),
+            author: ada,
+            ..Default::default()
+        };
+        let styles = author_styles([(&first, first.member.as_ref()), (&second, None)], &[]);
+        assert_eq!(styles[&Snowflake::new(10)].name, "The Boss");
+        assert_eq!(styles[&Snowflake::new(11)].name, "Ada");
+    }
+
+    #[test]
+    fn a_mention_named_1_is_not_rewritten_as_the_demo_user() {
+        let mut names = HashMap::new();
+        names.insert("42".into(), "1".into());
+        assert_eq!(mention_text("42", &names), "@1");
+        assert_eq!(mention_text("1", &HashMap::new()), "@Ada");
     }
 
     #[test]

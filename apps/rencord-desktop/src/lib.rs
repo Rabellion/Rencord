@@ -27,8 +27,8 @@ pub use icons::{
     discord_install_icon_dir, hexwave_png, hexwave_svg_for_px, icon_pack_dir, rail_home_glyph_px,
 };
 pub use messages::{
-    author_style, clean_content, emoji_label, fit_size, name_color, reply_preview, system_text,
-    AuthorStyle, ReplyPreview,
+    author_style, author_styles, clean_content, embed_has_body, embed_picture, emoji_label,
+    fit_size, mention_text, name_color, reply_preview, system_text, AuthorStyle, ReplyPreview,
 };
 pub use search::{guild_search_path, local_search, parse_message_query, MessageQuery, SearchHit};
 pub use theme::{
@@ -390,7 +390,11 @@ impl Shell {
             rencord_model::Reply {
                 message_id: target,
                 author: original.map(|message| message.author.clone()),
-                content: original.map(|message| message.content.clone()),
+                // An empty text with no author is a message this client has not
+                // loaded. Both fields absent is what Discord sends for a delete.
+                content: original
+                    .map(|message| message.content.clone())
+                    .or(Some(String::new())),
             }
         });
         let author = self.session.user.clone().unwrap_or(User {
@@ -1121,6 +1125,19 @@ mod tests {
         assert!(outline.contains("#voice"));
         assert!(outline.contains("Charles"));
         assert!(outline.contains("fn main()"));
+    }
+
+    #[test]
+    fn a_reply_to_a_message_that_is_not_loaded_is_not_called_deleted() {
+        let mut shell = Shell::demo();
+        shell.begin_reply(Snowflake::new(9_000_000));
+        shell.send_local("still here");
+        let reply = shell
+            .visible_messages()
+            .last()
+            .and_then(|message| message.reply_to.clone())
+            .expect("reply");
+        assert_eq!(reply_preview(&reply).text, "Original message");
     }
 
     #[test]

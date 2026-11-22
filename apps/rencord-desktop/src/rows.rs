@@ -394,19 +394,15 @@ pub(super) fn embed_view(
     env: &RowEnv,
     palette: Palette,
 ) -> Option<AnyElement> {
-    let image = embed
-        .image
-        .as_ref()
-        .or(embed.thumbnail.as_ref())
-        .filter(|image| !image.best_url().is_empty());
-    let has_text = embed.title.is_some() || embed.description.is_some();
-    if !has_text && image.is_none() {
+    let image = rencord_desktop::embed_picture(embed);
+    if !rencord_desktop::embed_has_body(embed) {
         return None;
     }
     let key = SharedString::from(format!("embed-{message_id}-{index}"));
     let link = embed.url.clone();
     let picture = image.and_then(|image| env.pic(image.best_url()));
     let video = embed.video.is_some() || matches!(embed.kind.as_deref(), Some("video" | "gifv"));
+    let has_text = embed.title.is_some() || embed.description.is_some();
     // A direct link to a picture is shown as the picture alone.
     if !has_text && !video {
         let image = image?;
@@ -512,31 +508,4 @@ pub(super) fn embed_view(
             )
             .into_any_element(),
     )
-}
-
-pub(super) fn resolve_mentions(blocks: &mut [Block], names: &HashMap<String, String>) {
-    fn walk(items: &mut [Inline], names: &HashMap<String, String>) {
-        for item in items {
-            match item {
-                Inline::Mention { id } => {
-                    *id = names
-                        .get(id.as_str())
-                        .cloned()
-                        .unwrap_or_else(|| "unknown".into());
-                }
-                Inline::Bold(inner) | Inline::Italic(inner) | Inline::Spoiler(inner) => {
-                    walk(inner, names)
-                }
-                _ => {}
-            }
-        }
-    }
-    for block in blocks {
-        match block {
-            Block::Paragraph { inlines }
-            | Block::Heading { inlines, .. }
-            | Block::Quote { inlines } => walk(inlines, names),
-            Block::Code { .. } => {}
-        }
-    }
 }

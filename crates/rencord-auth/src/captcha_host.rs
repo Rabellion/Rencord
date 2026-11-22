@@ -12,6 +12,18 @@ use crate::login_api::CaptchaChallenge;
 #[cfg(all(windows, feature = "webview"))]
 pub const CAPTCHA_DOCUMENT: &str = "https://discord.com/rencord-captcha.html";
 
+/// A profile folder no earlier panel's cleanup can delete.
+#[cfg_attr(not(all(windows, feature = "webview")), allow(dead_code))]
+pub fn captcha_profile_dir(temp: &std::path::Path, pid: u32, serial: u64) -> std::path::PathBuf {
+    temp.join(format!("rencord-captcha-profile-{pid}-{serial}"))
+}
+
+#[cfg_attr(not(all(windows, feature = "webview")), allow(dead_code))]
+fn next_captcha_serial() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn embedded_captcha_available() -> bool {
     #[cfg(all(windows, feature = "webview"))]
     {
@@ -125,7 +137,7 @@ fn present_windows<W: HasWindowHandle>(
     let dir = std::env::temp_dir().join(format!("rencord-captcha-{pid}"));
     // Without this WebView2 puts its profile next to Rencord.exe, which fails with
     // "Access is denied" when that folder is not writable (an all-users install).
-    let profile = std::env::temp_dir().join(format!("rencord-captcha-profile-{pid}"));
+    let profile = captcha_profile_dir(&std::env::temp_dir(), pid, next_captcha_serial());
     let built = build_panel(
         parent, origin_x, origin_y, width, height, challenge, &dir, &profile, on_event,
     );
@@ -210,4 +222,24 @@ fn map_discord_host(webview: &wry::WebView, dir: &std::path::Path) -> Result<(),
         .map_err(|err| format!("WebView2 rejected the discord.com document ({err})."))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_captcha_panel_gets_its_own_profile_folder() {
+        let first = next_captcha_serial();
+        let second = next_captcha_serial();
+        let temp = std::path::Path::new("/tmp");
+        let older = captcha_profile_dir(temp, 7, first);
+        let newer = captcha_profile_dir(temp, 7, second);
+        assert_ne!(older, newer);
+        assert!(older
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("rencord-captcha-profile-7-"));
+    }
 }

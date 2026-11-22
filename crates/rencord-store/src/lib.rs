@@ -349,32 +349,79 @@ impl Session {
     /// A `MESSAGE_UPDATE`. Discord often sends only the fields that changed, so
     /// those are merged into the stored message instead of replacing it.
     fn apply_patch(&mut self, patch: MessagePatch) {
+        let MessagePatch {
+            id,
+            channel_id,
+            content,
+            edited_timestamp,
+            embeds,
+            attachments,
+            mentions,
+            reply_in_payload,
+            full,
+        } = patch;
         let existing = self
             .messages
-            .get_mut(&patch.channel_id)
-            .and_then(|list| list.iter_mut().find(|item| item.id == patch.id));
-        match (existing, patch.full) {
-            (Some(existing), Some(full)) => *existing = full,
+            .get_mut(&channel_id)
+            .and_then(|list| list.iter_mut().find(|item| item.id == id));
+        match (existing, full) {
+            (Some(existing), Some(full)) => {
+                let reply = full.reply_to.clone();
+                existing.author = full.author;
+                if let Some(member) = full.member {
+                    existing.member = Some(member);
+                }
+                Self::merge_present(
+                    existing,
+                    content,
+                    edited_timestamp,
+                    embeds,
+                    attachments,
+                    mentions,
+                );
+                if reply_in_payload {
+                    existing.reply_to = reply;
+                }
+            }
             (Some(existing), None) => {
-                if let Some(content) = patch.content {
-                    existing.content = content;
-                }
-                if let Some(edited) = patch.edited_timestamp {
-                    existing.edited_timestamp = Some(edited);
-                }
-                if let Some(embeds) = patch.embeds {
-                    existing.embeds = embeds;
-                }
-                if let Some(attachments) = patch.attachments {
-                    existing.attachments = attachments;
-                }
-                if let Some(mentions) = patch.mentions {
-                    existing.mentions = mentions;
-                }
+                Self::merge_present(
+                    existing,
+                    content,
+                    edited_timestamp,
+                    embeds,
+                    attachments,
+                    mentions,
+                );
             }
             // A message that was never loaded is only worth keeping whole.
             (None, Some(full)) => self.insert_message(full),
             (None, None) => {}
+        }
+    }
+
+    /// Copies only the fields an update actually carried.
+    fn merge_present(
+        existing: &mut Message,
+        content: Option<String>,
+        edited_timestamp: Option<String>,
+        embeds: Option<Vec<rencord_model::Embed>>,
+        attachments: Option<Vec<rencord_model::Attachment>>,
+        mentions: Option<Vec<User>>,
+    ) {
+        if let Some(content) = content {
+            existing.content = content;
+        }
+        if let Some(edited) = edited_timestamp {
+            existing.edited_timestamp = Some(edited);
+        }
+        if let Some(embeds) = embeds {
+            existing.embeds = embeds;
+        }
+        if let Some(attachments) = attachments {
+            existing.attachments = attachments;
+        }
+        if let Some(mentions) = mentions {
+            existing.mentions = mentions;
         }
     }
 
@@ -1091,6 +1138,36 @@ mod tests {
         assert_eq!(message.content, "edited");
         assert!(message.edited_timestamp.is_some());
         assert_eq!(message.embeds.len(), 1);
+    }
+
+    #[test]
+    fn an_author_bearing_update_keeps_a_file_and_a_reply_it_does_not_mention() {
+        let mut session = Session::default();
+        let mut message = stored(5, "look");
+        message.attachments = vec![rencord_model::Attachment {
+            id: Snowflake::new(70),
+            filename: "shot.png".into(),
+            url: "https://cdn.discordapp.com/shot.png".into(),
+            ..Default::default()
+        }];
+        message.reply_to = Some(rencord_model::Reply {
+            message_id: Snowflake::new(4),
+            content: Some("earlier".into()),
+            ..Default::default()
+        });
+        session.insert_message(message);
+        let patch = rencord_protocol::MessagePatch::from_value(&serde_json::json!({
+            "id": "5",
+            "channel_id": "8",
+            "author": {"id": "1", "username": "ada"},
+            "content": "look again"
+        }))
+        .unwrap();
+        session.apply_gateway(GatewayEvent::MessageUpdate(patch));
+        let message = &session.messages[&Snowflake::new(8)][0];
+        assert_eq!(message.content, "look again");
+        assert_eq!(message.attachments.len(), 1);
+        assert_eq!(message.reply_to.as_ref().unwrap().message_id.get(), 4);
     }
 
     #[test]
