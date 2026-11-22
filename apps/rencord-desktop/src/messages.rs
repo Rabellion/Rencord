@@ -4,7 +4,7 @@
 //! anything: a missing name, a hash that is not a hash, a reply to a message
 //! that no longer exists.
 
-use rencord_model::{Message, Reply, Snowflake, User};
+use rencord_model::{Member, Message, Reply, Role, Snowflake, User};
 
 /// A hash or name that is safe to put in a URL path: letters, digits, `_`.
 fn url_safe(part: &str) -> bool {
@@ -45,6 +45,35 @@ pub fn guild_icon_url(guild: Snowflake, hash: Option<&str>, wanted: u32) -> Opti
         "https://cdn.discordapp.com/icons/{guild}/{hash}.png?size={}",
         image_size(wanted)
     ))
+}
+
+/// The colour of someone's name in a server: their highest role that has one.
+/// A role with no colour is skipped, so it cannot hide a coloured role below it.
+pub fn name_color(guild_roles: &[Role], member_roles: &[Snowflake]) -> Option<u32> {
+    guild_roles
+        .iter()
+        .filter(|role| role.color & 0x00FF_FFFF != 0 && member_roles.contains(&role.id))
+        .max_by_key(|role| (role.position, std::cmp::Reverse(role.id.get())))
+        .map(|role| role.color & 0x00FF_FFFF)
+}
+
+/// The name drawn for an author and its colour, where the server has an opinion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthorStyle {
+    pub name: String,
+    pub color: Option<u32>,
+}
+
+/// A nickname beats the account's display name, as in Discord. With no member
+/// information the name is the display name and the colour is the default.
+pub fn author_style(user: &User, member: Option<&Member>, guild_roles: &[Role]) -> AuthorStyle {
+    AuthorStyle {
+        name: member
+            .and_then(Member::nickname)
+            .unwrap_or_else(|| user.display_name())
+            .to_owned(),
+        color: member.and_then(|member| name_color(guild_roles, &member.roles)),
+    }
 }
 
 /// The picture behind a server's name in the channel list, if it has one.
@@ -229,6 +258,72 @@ mod tests {
         assert!(guild_banner_url(Snowflake::new(5), Some("abc"), 99_999)
             .unwrap()
             .ends_with("size=1024"));
+    }
+
+    fn role(id: u64, color: u32, position: i32) -> Role {
+        Role {
+            id: Snowflake::new(id),
+            name: format!("r{id}"),
+            color,
+            position,
+            hoist: false,
+        }
+    }
+
+    #[test]
+    fn a_name_takes_the_colour_of_the_highest_coloured_role() {
+        let roles = [
+            role(1, 0, 0),          // @everyone has no colour
+            role(2, 16_711_680, 5), // red, low
+            role(3, 65_280, 9),     // green, high
+            role(4, 0, 20),         // highest of all but uncoloured
+            role(5, 255, 30),       // blue, but this person does not have it
+        ];
+        let theirs = [1, 2, 3, 4].map(Snowflake::new);
+        assert_eq!(name_color(&roles, &theirs), Some(65_280));
+        assert_eq!(name_color(&roles, &[Snowflake::new(4)]), None);
+        assert_eq!(name_color(&roles, &[]), None);
+        assert_eq!(name_color(&[], &theirs), None);
+        // Only the colour bits count.
+        assert_eq!(
+            name_color(&[role(7, 4_279_383_126, 1)], &[Snowflake::new(7)]),
+            Some(1_193_046)
+        );
+    }
+
+    #[test]
+    fn a_nickname_beats_the_display_name_and_blank_does_not() {
+        let roles = [role(2, 16_711_680, 5)];
+        let ada = user(1, None);
+        let boss = Member {
+            nick: Some("The Boss".into()),
+            roles: vec![Snowflake::new(2)],
+        };
+        assert_eq!(
+            author_style(&ada, Some(&boss), &roles),
+            AuthorStyle {
+                name: "The Boss".into(),
+                color: Some(16_711_680)
+            }
+        );
+        let blank = Member {
+            nick: Some(String::new()),
+            roles: vec![],
+        };
+        assert_eq!(
+            author_style(&ada, Some(&blank), &roles),
+            AuthorStyle {
+                name: "Ada".into(),
+                color: None
+            }
+        );
+        assert_eq!(
+            author_style(&ada, None, &roles),
+            AuthorStyle {
+                name: "Ada".into(),
+                color: None
+            }
+        );
     }
 
     #[test]

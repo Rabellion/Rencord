@@ -174,6 +174,58 @@ impl ChannelKind {
     }
 }
 
+/// A role in a server. Field names are Discord's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Role {
+    pub id: Snowflake,
+    #[serde(default)]
+    pub name: String,
+    /// 0xRRGGBB, or 0 for a role with no colour.
+    #[serde(default)]
+    pub color: u32,
+    #[serde(default)]
+    pub position: i32,
+    #[serde(default)]
+    pub hoist: bool,
+}
+
+/// What a server knows about one of its people: a nickname and role ids.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Member {
+    #[serde(default)]
+    pub nick: Option<String>,
+    #[serde(default)]
+    pub roles: Vec<Snowflake>,
+}
+
+impl Member {
+    /// The nickname, when there is a real one.
+    pub fn nickname(&self) -> Option<&str> {
+        self.nick.as_deref().filter(|nick| !nick.is_empty())
+    }
+}
+
+/// Whether someone is online, as the presence dot shows it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PresenceStatus {
+    Online,
+    Idle,
+    Dnd,
+    /// Also what `invisible` and anything unknown becomes.
+    #[default]
+    Offline,
+}
+
+impl PresenceStatus {
+    pub fn from_wire(status: &str) -> Self {
+        match status {
+            "online" => Self::Online,
+            "idle" => Self::Idle,
+            "dnd" => Self::Dnd,
+            _ => Self::Offline,
+        }
+    }
+}
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Guild {
     pub id: Snowflake,
@@ -183,6 +235,8 @@ pub struct Guild {
     /// The picture behind the server name in the channel list.
     #[serde(default)]
     pub banner: Option<String>,
+    #[serde(default)]
+    pub roles: Vec<Role>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,6 +283,9 @@ pub struct Message {
     pub mentions: Vec<User>,
     #[serde(default)]
     pub reply_to: Option<Reply>,
+    /// The author's nickname and roles in the server, when Discord sent them.
+    #[serde(default)]
+    pub member: Option<Member>,
 }
 
 impl Message {

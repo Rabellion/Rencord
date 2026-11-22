@@ -6,7 +6,7 @@
 
 use flate2::{Decompress, FlushDecompress};
 use futures_util::{SinkExt, StreamExt};
-use rencord_model::{Message, Snowflake, User};
+use rencord_model::{Member, Message, PresenceStatus, Role, Snowflake, User};
 use rencord_protocol::{
     heartbeat_payload, identify_payload, resume_payload, voice_state_update, GatewayFrame,
     GatewayOpcode, HelloData, ReadyData, VoiceServerUpdate, VoiceStateDispatch, WireChannel,
@@ -49,6 +49,7 @@ pub enum GatewayEvent {
         session_id: String,
         user: User,
         guilds: Vec<rencord_protocol::ReadyGuild>,
+        presences: Vec<(Snowflake, PresenceStatus)>,
         discord_theme: Option<String>,
         discord_client_theme: Option<String>,
     },
@@ -63,9 +64,34 @@ pub enum GatewayEvent {
         name: Option<String>,
         icon: Option<String>,
         banner: Option<String>,
+        /// None when the event carried no role list at all.
+        roles: Option<Vec<Role>>,
+        members: Vec<(Snowflake, Member)>,
+        presences: Vec<(Snowflake, PresenceStatus)>,
         channels: Vec<rencord_model::Channel>,
     },
     GuildDelete(Snowflake),
+    Presence {
+        user_id: Snowflake,
+        status: PresenceStatus,
+    },
+    MemberUpdate {
+        guild_id: Snowflake,
+        user_id: Snowflake,
+        member: Member,
+    },
+    MembersChunk {
+        guild_id: Snowflake,
+        members: Vec<(Snowflake, Member)>,
+    },
+    RoleUpsert {
+        guild_id: Snowflake,
+        role: Role,
+    },
+    RoleDelete {
+        guild_id: Snowflake,
+        role_id: Snowflake,
+    },
     ChannelUpsert(rencord_model::Channel),
     ChannelDelete(Snowflake),
     Reaction {
@@ -307,6 +333,7 @@ fn decode_dispatch(name: &str, data: Value) -> Result<Option<GatewayEvent>, Gate
                 session_id: ready.session_id,
                 user: ready.user,
                 guilds: ready.guilds,
+                presences: rencord_protocol::presence_entries(ready.presences),
                 discord_theme: ready
                     .user_settings
                     .as_ref()
@@ -319,6 +346,52 @@ fn decode_dispatch(name: &str, data: Value) -> Result<Option<GatewayEvent>, Gate
         }
         "GUILD_CREATE" | "GUILD_UPDATE" => guild_upsert(&data)?,
         "GUILD_DELETE" => snowflake_field(&data, "id")?.map(GatewayEvent::GuildDelete),
+        "PRESENCE_UPDATE" => serde_json::from_value::<rencord_protocol::WirePresence>(data)
+            .ok()
+            .and_then(rencord_protocol::WirePresence::into_entry)
+            .map(|(user_id, status)| GatewayEvent::Presence { user_id, status }),
+        "GUILD_MEMBER_ADD" | "GUILD_MEMBER_UPDATE" => {
+            let Some(guild_id) = snowflake_field(&data, "guild_id")? else {
+                return Ok(None);
+            };
+            serde_json::from_value::<rencord_protocol::WireGuildMember>(data)
+                .ok()
+                .and_then(rencord_protocol::WireGuildMember::into_entry)
+                .map(|(user_id, member)| GatewayEvent::MemberUpdate {
+                    guild_id,
+                    user_id,
+                    member,
+                })
+        }
+        "GUILD_MEMBERS_CHUNK" => {
+            let Some(guild_id) = snowflake_field(&data, "guild_id")? else {
+                return Ok(None);
+            };
+            let members = rencord_protocol::lenient_list::<rencord_protocol::WireGuildMember>(
+                data.get("members"),
+            );
+            Some(GatewayEvent::MembersChunk {
+                guild_id,
+                members: rencord_protocol::member_entries(members),
+            })
+        }
+        "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" => {
+            let Some(guild_id) = snowflake_field(&data, "guild_id")? else {
+                return Ok(None);
+            };
+            data.get("role")
+                .and_then(|role| serde_json::from_value::<Role>(role.clone()).ok())
+                .map(|role| GatewayEvent::RoleUpsert { guild_id, role })
+        }
+        "GUILD_ROLE_DELETE" => {
+            let (Some(guild_id), Some(role_id)) = (
+                snowflake_field(&data, "guild_id")?,
+                snowflake_field(&data, "role_id")?,
+            ) else {
+                return Ok(None);
+            };
+            Some(GatewayEvent::RoleDelete { guild_id, role_id })
+        }
         "CHANNEL_CREATE" | "CHANNEL_UPDATE" => channel_upsert(&data)?,
         "CHANNEL_DELETE" => snowflake_field(&data, "id")?.map(GatewayEvent::ChannelDelete),
         "MESSAGE_REACTION_ADD" | "MESSAGE_REACTION_REMOVE" => reaction(name, &data)?,
@@ -374,6 +447,14 @@ fn guild_upsert(data: &Value) -> Result<Option<GatewayEvent>, GatewayError> {
         .get("banner")
         .and_then(|value| value.as_str())
         .map(str::to_owned);
+    let roles = data
+        .get("roles")
+        .filter(|value| value.is_array())
+        .map(|value| rencord_protocol::lenient_list::<Role>(Some(value)));
+    let members =
+        rencord_protocol::member_entries(rencord_protocol::lenient_list(data.get("members")));
+    let presences =
+        rencord_protocol::presence_entries(rencord_protocol::lenient_list(data.get("presences")));
     let mut channels = Vec::new();
     if let Some(list) = data.get("channels").and_then(|value| value.as_array()) {
         for item in list {
@@ -392,6 +473,9 @@ fn guild_upsert(data: &Value) -> Result<Option<GatewayEvent>, GatewayError> {
         name,
         icon,
         banner,
+        roles,
+        members,
+        presences,
         channels,
     }))
 }
@@ -545,9 +629,11 @@ mod tests {
                 session_id,
                 user,
                 guilds,
+                presences,
                 discord_theme,
                 discord_client_theme,
             } => {
+                assert!(presences.is_empty());
                 assert!(discord_theme.is_none());
                 assert!(discord_client_theme.is_none());
                 assert_eq!(session_id, "sess");
@@ -934,6 +1020,18 @@ mod tests {
                 "name": "Analytical Engines",
                 "icon": "abc",
                 "banner": "bnr",
+                "roles": [
+                    {"id": "900", "name": "Admin", "color": 15158332, "position": 3, "hoist": true},
+                    "junk"
+                ],
+                "members": [
+                    {"user": {"id": "42"}, "nick": "Boss", "roles": ["900"]},
+                    {"nick": "names no one"}
+                ],
+                "presences": [
+                    {"user": {"id": "42"}, "status": "idle"},
+                    {"status": "online"}
+                ],
                 "channels": [{"id": "100", "type": 0, "name": "general"}]
             }),
         )
@@ -944,9 +1042,31 @@ mod tests {
                 name,
                 icon,
                 banner,
+                roles,
+                members,
+                presences,
                 channels,
             }) => {
                 assert_eq!(banner.as_deref(), Some("bnr"));
+                // The junk role and the member that names no one are dropped.
+                let roles = roles.unwrap();
+                assert_eq!(
+                    (
+                        roles.len(),
+                        roles[0].name.as_str(),
+                        roles[0].color,
+                        roles[0].hoist
+                    ),
+                    (1, "Admin", 15158332, true)
+                );
+                assert_eq!(members.len(), 1);
+                assert_eq!(members[0].0.get(), 42);
+                assert_eq!(members[0].1.nickname(), Some("Boss"));
+                assert_eq!(members[0].1.roles, vec![Snowflake::new(900)]);
+                assert_eq!(
+                    presences,
+                    vec![(Snowflake::new(42), rencord_model::PresenceStatus::Idle)]
+                );
                 assert_eq!(id.get(), 10);
                 assert_eq!(name.as_deref(), Some("Analytical Engines"));
                 assert_eq!(icon.as_deref(), Some("abc"));
@@ -966,5 +1086,84 @@ mod tests {
             reaction,
             Some(GatewayEvent::Reaction { remove: false, .. })
         ));
+    }
+
+    #[test]
+    fn presence_member_and_role_events_decode() {
+        use rencord_model::PresenceStatus;
+        let presence = decode_dispatch(
+            "PRESENCE_UPDATE",
+            serde_json::json!({"user": {"id": "42"}, "status": "dnd", "guild_id": "10"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            presence,
+            Some(GatewayEvent::Presence { user_id, status: PresenceStatus::Dnd }) if user_id.get() == 42
+        ));
+        // `invisible` and anything unknown read as offline.
+        let unknown = decode_dispatch(
+            "PRESENCE_UPDATE",
+            serde_json::json!({"user": {"id": "42"}, "status": "invisible"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            unknown,
+            Some(GatewayEvent::Presence {
+                status: PresenceStatus::Offline,
+                ..
+            })
+        ));
+        let member = decode_dispatch(
+            "GUILD_MEMBER_UPDATE",
+            serde_json::json!({"guild_id": "10", "user": {"id": "42"}, "nick": "Boss", "roles": ["900", "901"]}),
+        )
+        .unwrap();
+        match member {
+            Some(GatewayEvent::MemberUpdate {
+                guild_id,
+                user_id,
+                member,
+            }) => {
+                assert_eq!((guild_id.get(), user_id.get()), (10, 42));
+                assert_eq!(member.nickname(), Some("Boss"));
+                assert_eq!(member.roles.len(), 2);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let chunk = decode_dispatch(
+            "GUILD_MEMBERS_CHUNK",
+            serde_json::json!({"guild_id": "10", "chunk_index": 0, "chunk_count": 1, "members": [
+                {"user": {"id": "1"}, "roles": ["900"]}, {"roles": ["900"]}, "junk"
+            ]}),
+        )
+        .unwrap();
+        assert!(
+            matches!(chunk, Some(GatewayEvent::MembersChunk { members, .. }) if members.len() == 1)
+        );
+        let role = decode_dispatch(
+            "GUILD_ROLE_UPDATE",
+            serde_json::json!({"guild_id": "10", "role": {"id": "900", "name": "Mod", "color": 255, "position": 2}}),
+        )
+        .unwrap();
+        assert!(matches!(role, Some(GatewayEvent::RoleUpsert { role, .. }) if role.color == 255));
+        let gone = decode_dispatch(
+            "GUILD_ROLE_DELETE",
+            serde_json::json!({"guild_id": "10", "role_id": "900"}),
+        )
+        .unwrap();
+        assert!(
+            matches!(gone, Some(GatewayEvent::RoleDelete { role_id, .. }) if role_id.get() == 900)
+        );
+        // An event with no id to attach it to is skipped, never an error.
+        assert!(
+            decode_dispatch("PRESENCE_UPDATE", serde_json::json!({"status": "online"}))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            decode_dispatch("GUILD_ROLE_DELETE", serde_json::json!({"guild_id": "10"}))
+                .unwrap()
+                .is_none()
+        );
     }
 }

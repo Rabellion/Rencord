@@ -5,7 +5,8 @@
 
 use base64::Engine;
 use rencord_model::{
-    Attachment, ChannelKind, Embed, Message, MessageReaction, Reply, Snowflake, User,
+    Attachment, ChannelKind, Embed, Member, Message, MessageReaction, PresenceStatus, Reply, Role,
+    Snowflake, User,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
@@ -261,6 +262,9 @@ pub struct ReadyData {
     pub user: User,
     #[serde(default)]
     pub guilds: Vec<ReadyGuild>,
+    /// Presences of friends and the people you have DMs with.
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub presences: Vec<WirePresence>,
     /// Legacy JSON settings. Newer clients send a protobuf instead. When this
     /// object is present, Rencord may use it once as a local starting theme.
     #[serde(default)]
@@ -284,6 +288,13 @@ pub struct ReadyGuild {
     pub icon: Option<String>,
     #[serde(default)]
     pub banner: Option<String>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub roles: Vec<Role>,
+    /// Limited for a user account: people you share a relationship or a voice call with.
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub members: Vec<WireGuildMember>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub presences: Vec<WirePresence>,
     #[serde(default)]
     pub unavailable: bool,
     #[serde(default)]
@@ -374,6 +385,87 @@ where
         .collect())
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct WireUserId {
+    #[serde(default)]
+    pub id: Snowflake,
+}
+
+/// A server member as READY, GUILD_CREATE and the member events carry it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct WireGuildMember {
+    #[serde(default)]
+    pub user: Option<WireUserId>,
+    #[serde(default)]
+    pub nick: Option<String>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub roles: Vec<Snowflake>,
+}
+
+impl WireGuildMember {
+    /// The user's id and what the server knows about them. `None` when the
+    /// entry does not say whose it is.
+    pub fn into_entry(self) -> Option<(Snowflake, Member)> {
+        let id = self.user?.id;
+        (id.get() != 0).then_some((
+            id,
+            Member {
+                nick: self.nick,
+                roles: self.roles,
+            },
+        ))
+    }
+}
+
+/// A presence as READY, GUILD_CREATE and PRESENCE_UPDATE carry it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct WirePresence {
+    #[serde(default)]
+    pub user: Option<WireUserId>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+impl WirePresence {
+    pub fn into_entry(self) -> Option<(Snowflake, PresenceStatus)> {
+        let id = self.user?.id;
+        (id.get() != 0).then(|| {
+            (
+                id,
+                PresenceStatus::from_wire(self.status.as_deref().unwrap_or("")),
+            )
+        })
+    }
+}
+
+/// The elements of a JSON array that decode, dropping the ones that do not.
+pub fn lenient_list<T: serde::de::DeserializeOwned>(value: Option<&Value>) -> Vec<T> {
+    value
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| serde_json::from_value(item.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Members from a list, dropping any entry that does not say whose it is.
+pub fn member_entries(members: Vec<WireGuildMember>) -> Vec<(Snowflake, Member)> {
+    members
+        .into_iter()
+        .filter_map(WireGuildMember::into_entry)
+        .collect()
+}
+
+pub fn presence_entries(presences: Vec<WirePresence>) -> Vec<(Snowflake, PresenceStatus)> {
+    presences
+        .into_iter()
+        .filter_map(WirePresence::into_entry)
+        .collect()
+}
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct WireReference {
     #[serde(default)]
@@ -407,6 +499,9 @@ pub struct WireMessage {
     /// or missing an author. Only its author and text are read.
     #[serde(default)]
     pub referenced_message: Option<Value>,
+    /// The author's server nickname and roles. Kept raw so an odd one cannot cost the message.
+    #[serde(default)]
+    pub member: Option<Value>,
 }
 
 impl From<WireMessage> for Message {
@@ -440,6 +535,9 @@ impl From<WireMessage> for Message {
             reactions: value.reactions,
             mentions: value.mentions,
             reply_to,
+            member: value
+                .member
+                .and_then(|member| serde_json::from_value(member).ok()),
         }
     }
 }
@@ -967,5 +1065,28 @@ mod tests {
             Some("edited")
         );
         assert!(MessagePatch::from_value(&json!({ "embeds": [] })).is_err());
+    }
+
+    #[test]
+    fn a_message_carries_its_authors_server_profile() {
+        let message = wire(json!({
+            "id": "1", "channel_id": "2", "content": "hi", "author": author(),
+            "member": { "nick": "The Boss", "roles": ["900", "901"], "joined_at": "2026-01-01T00:00:00Z" },
+        }));
+        let member = message.member.unwrap();
+        assert_eq!(member.nickname(), Some("The Boss"));
+        assert_eq!(member.roles, vec![Snowflake::new(900), Snowflake::new(901)]);
+        // A member that is not an object cannot cost the message.
+        let odd = wire(json!({
+            "id": "1", "channel_id": "2", "content": "hi", "author": author(), "member": 7,
+        }));
+        assert!(odd.member.is_none());
+        assert_eq!(odd.content, "hi");
+        // An empty nickname is not a nickname.
+        let blank = wire(json!({
+            "id": "1", "channel_id": "2", "content": "hi", "author": author(),
+            "member": { "nick": "", "roles": [] },
+        }));
+        assert_eq!(blank.member.unwrap().nickname(), None);
     }
 }

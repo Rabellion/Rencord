@@ -5,7 +5,9 @@
 //! Neither store is encrypted. Tokens live in `rencord-platform`, not here.
 
 use rencord_gateway::{GatewayEvent, MessagePatch};
-use rencord_model::{Channel, ChannelKind, Guild, Message, Snowflake, User};
+use rencord_model::{
+    Channel, ChannelKind, Guild, Member, Message, PresenceStatus, Role, Snowflake, User,
+};
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -38,6 +40,11 @@ pub struct Session {
     pub reactions: HashMap<u64, Vec<(String, u32)>>,
     /// Channels with a message that arrived while they were not on screen.
     pub unread: HashSet<Snowflake>,
+    /// What each server knows about its people, by server and then user: the
+    /// nickname and role ids that decide the name shown and its colour.
+    pub members: HashMap<Snowflake, HashMap<Snowflake, Member>>,
+    /// Who is online, idle, busy or offline. A user not listed is offline.
+    pub presences: HashMap<Snowflake, PresenceStatus>,
 }
 
 impl Default for Session {
@@ -57,6 +64,8 @@ impl Default for Session {
             discord_client_theme: None,
             reactions: HashMap::new(),
             unread: HashSet::new(),
+            members: HashMap::new(),
+            presences: HashMap::new(),
         }
     }
 }
@@ -68,6 +77,7 @@ impl Session {
                 session_id,
                 user,
                 guilds,
+                presences,
                 discord_theme,
                 discord_client_theme,
             } => {
@@ -78,6 +88,7 @@ impl Session {
                 for guild in guilds {
                     self.upsert_ready_guild(guild);
                 }
+                self.presences.extend(presences);
                 self.status_line = "Gateway ready".to_owned();
             }
             GatewayEvent::GuildUpsert {
@@ -85,11 +96,48 @@ impl Session {
                 name,
                 icon,
                 banner,
+                roles,
+                members,
+                presences,
                 channels,
             } => {
                 self.apply_guild(id, name, icon, banner);
+                if let Some(roles) = roles {
+                    self.set_roles(id, roles);
+                }
+                self.members.entry(id).or_default().extend(members);
+                self.presences.extend(presences);
                 for channel in channels {
                     self.upsert_channel(channel);
+                }
+            }
+            GatewayEvent::Presence { user_id, status } => {
+                self.presences.insert(user_id, status);
+            }
+            GatewayEvent::MemberUpdate {
+                guild_id,
+                user_id,
+                member,
+            } => {
+                self.members
+                    .entry(guild_id)
+                    .or_default()
+                    .insert(user_id, member);
+            }
+            GatewayEvent::MembersChunk { guild_id, members } => {
+                self.members.entry(guild_id).or_default().extend(members);
+            }
+            GatewayEvent::RoleUpsert { guild_id, role } => {
+                if let Some(guild) = self.guilds.iter_mut().find(|guild| guild.id == guild_id) {
+                    match guild.roles.iter_mut().find(|item| item.id == role.id) {
+                        Some(existing) => *existing = role,
+                        None => guild.roles.push(role),
+                    }
+                }
+            }
+            GatewayEvent::RoleDelete { guild_id, role_id } => {
+                if let Some(guild) = self.guilds.iter_mut().find(|guild| guild.id == guild_id) {
+                    guild.roles.retain(|role| role.id != role_id);
                 }
             }
             GatewayEvent::GuildDelete(id) => self.remove_guild(id),
@@ -113,6 +161,19 @@ impl Session {
             GatewayEvent::MessageCreate(message) => {
                 let channel_id = message.channel_id;
                 let viewing = self.selected_channel == Some(channel_id);
+                // A new message says who the author is in this server. Keep it, so
+                // their older messages show the same name and colour.
+                if let (Some(member), Some(guild)) = (
+                    message.member.clone(),
+                    self.channels
+                        .get(&channel_id)
+                        .and_then(|channel| channel.guild_id),
+                ) {
+                    self.members
+                        .entry(guild)
+                        .or_default()
+                        .insert(message.author.id, member);
+                }
                 self.insert_message(message);
                 if !viewing {
                     self.unread.insert(channel_id);
@@ -170,6 +231,15 @@ impl Session {
         let channels = guild.channels;
         let id = guild.id;
         self.apply_guild(id, guild.name, guild.icon, guild.banner);
+        if !guild.roles.is_empty() {
+            self.set_roles(id, guild.roles);
+        }
+        self.members
+            .entry(id)
+            .or_default()
+            .extend(rencord_protocol::member_entries(guild.members));
+        self.presences
+            .extend(rencord_protocol::presence_entries(guild.presences));
         for wire in channels {
             let mut channel = wire.into_channel();
             if channel.guild_id.is_none() {
@@ -203,7 +273,14 @@ impl Session {
             name: name.unwrap_or_else(|| format!("Guild {id}")),
             icon,
             banner,
+            ..Default::default()
         });
+    }
+
+    fn set_roles(&mut self, guild_id: Snowflake, roles: Vec<Role>) {
+        if let Some(guild) = self.guilds.iter_mut().find(|guild| guild.id == guild_id) {
+            guild.roles = roles;
+        }
     }
 
     pub fn remove_guild(&mut self, id: Snowflake) {
@@ -411,6 +488,7 @@ impl Session {
             icon: None,
             // A made-up hash; the desktop demo seeds a picture for it.
             banner: Some("demo".into()),
+            ..Default::default()
         });
         session.upsert_guild(Guild {
             id: Snowflake::new(11),
@@ -692,9 +770,13 @@ mod tests {
                 name: None,
                 icon: None,
                 banner: None,
+                roles: Vec::new(),
+                members: Vec::new(),
+                presences: Vec::new(),
                 unavailable: true,
                 channels: Vec::new(),
             }],
+            presences: Vec::new(),
             discord_theme: None,
             discord_client_theme: None,
         });
@@ -704,6 +786,9 @@ mod tests {
             name: Some("Analytical Engines".into()),
             icon: Some("abc".into()),
             banner: Some("bnr".into()),
+            roles: None,
+            members: Vec::new(),
+            presences: Vec::new(),
             channels: vec![Channel {
                 id: Snowflake::new(100),
                 name: "general".into(),
@@ -876,5 +961,108 @@ mod tests {
             remove: false,
         });
         assert_eq!(session.reactions[&5][0].1, 3);
+    }
+
+    fn session_with_a_server() -> Session {
+        let mut session = Session::default();
+        session.upsert_guild(Guild {
+            id: Snowflake::new(10),
+            name: "Engines".into(),
+            ..Default::default()
+        });
+        session.upsert_channel(Channel {
+            id: Snowflake::new(8),
+            name: "general".into(),
+            kind: ChannelKind::GuildText,
+            guild_id: Some(Snowflake::new(10)),
+            ..Default::default()
+        });
+        session
+    }
+
+    #[test]
+    fn roles_members_and_presence_follow_the_gateway() {
+        use rencord_model::{Member, PresenceStatus, Role};
+        let mut session = session_with_a_server();
+        let role = |id: u64, color: u32| Role {
+            id: Snowflake::new(id),
+            name: format!("role-{id}"),
+            color,
+            position: id as i32,
+            hoist: false,
+        };
+        session.apply_gateway(GatewayEvent::RoleUpsert {
+            guild_id: Snowflake::new(10),
+            role: role(900, 255),
+        });
+        session.apply_gateway(GatewayEvent::RoleUpsert {
+            guild_id: Snowflake::new(10),
+            role: role(900, 65280),
+        });
+        session.apply_gateway(GatewayEvent::RoleUpsert {
+            guild_id: Snowflake::new(10),
+            role: role(901, 1),
+        });
+        assert_eq!(session.guilds[0].roles.len(), 2);
+        assert_eq!(session.guilds[0].roles[0].color, 65280);
+        session.apply_gateway(GatewayEvent::RoleDelete {
+            guild_id: Snowflake::new(10),
+            role_id: Snowflake::new(901),
+        });
+        assert_eq!(session.guilds[0].roles.len(), 1);
+
+        let boss = Member {
+            nick: Some("Boss".into()),
+            roles: vec![Snowflake::new(900)],
+        };
+        session.apply_gateway(GatewayEvent::MemberUpdate {
+            guild_id: Snowflake::new(10),
+            user_id: Snowflake::new(42),
+            member: boss.clone(),
+        });
+        assert_eq!(
+            session.members[&Snowflake::new(10)][&Snowflake::new(42)],
+            boss
+        );
+        session.apply_gateway(GatewayEvent::MembersChunk {
+            guild_id: Snowflake::new(10),
+            members: vec![(Snowflake::new(43), Member::default())],
+        });
+        assert_eq!(session.members[&Snowflake::new(10)].len(), 2);
+
+        session.apply_gateway(GatewayEvent::Presence {
+            user_id: Snowflake::new(42),
+            status: PresenceStatus::Idle,
+        });
+        assert_eq!(session.presences[&Snowflake::new(42)], PresenceStatus::Idle);
+        session.apply_gateway(GatewayEvent::Presence {
+            user_id: Snowflake::new(42),
+            status: PresenceStatus::Offline,
+        });
+        assert_eq!(
+            session.presences[&Snowflake::new(42)],
+            PresenceStatus::Offline
+        );
+    }
+
+    #[test]
+    fn a_new_message_teaches_the_store_who_its_author_is_in_the_server() {
+        use rencord_model::Member;
+        let mut session = session_with_a_server();
+        let mut message = stored(5, "hello");
+        message.member = Some(Member {
+            nick: Some("Boss".into()),
+            roles: vec![Snowflake::new(900)],
+        });
+        session.apply_gateway(GatewayEvent::MessageCreate(message));
+        // Their older messages can now show the same name and colour.
+        let known = &session.members[&Snowflake::new(10)][&Snowflake::new(1)];
+        assert_eq!(known.nickname(), Some("Boss"));
+        // A message in a channel that belongs to no server learns nothing.
+        let mut dm = stored(6, "dm");
+        dm.channel_id = Snowflake::new(999);
+        dm.member = Some(Member::default());
+        session.apply_gateway(GatewayEvent::MessageCreate(dm));
+        assert_eq!(session.members.len(), 1);
     }
 }

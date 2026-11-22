@@ -2241,6 +2241,7 @@ impl RencordWindow {
                         row_px,
                         false,
                         None,
+                        None,
                     ));
                 }
             }
@@ -2294,6 +2295,7 @@ impl RencordWindow {
                         row_px,
                         in_voice,
                         None,
+                        None,
                     ));
                 } else {
                     let badge = self.shell.session.unread.contains(&channel.id).then_some(1);
@@ -2308,6 +2310,7 @@ impl RencordWindow {
                         false,
                         row_px,
                         false,
+                        None,
                         None,
                     ));
                 }
@@ -2324,6 +2327,15 @@ impl RencordWindow {
             for channel in &dms {
                 // The demo keeps its illustrated people; a real DM shows the other
                 // person's avatar, or a letter until it loads.
+                let dm_dot = (!self.shell.demo).then(|| {
+                    let status = channel
+                        .recipients
+                        .first()
+                        .and_then(|user| self.shell.session.presences.get(&user.id))
+                        .copied()
+                        .unwrap_or_default();
+                    presence_color(status, palette)
+                });
                 let dm_avatar = (!self.shell.demo).then(|| match channel.recipients.first() {
                     Some(user) => avatar(&pictures, user, palette.dm_avatar, false, palette, cx),
                     None => letter_circle(&channel.name, palette.dm_avatar, palette),
@@ -2339,6 +2351,7 @@ impl RencordWindow {
                     row_px,
                     false,
                     dm_avatar,
+                    dm_dot,
                 ));
             }
         }
@@ -2391,6 +2404,32 @@ impl RencordWindow {
                     .map(|(id, channel)| (*id, channel.name.clone()))
                     .collect(),
             ),
+            authors: Arc::new({
+                let session = &self.shell.session;
+                let guild_id = session
+                    .selected_channel
+                    .and_then(|channel| session.channels.get(&channel))
+                    .and_then(|channel| channel.guild_id);
+                let roles = guild_id
+                    .and_then(|id| session.guilds.iter().find(|guild| guild.id == id))
+                    .map(|guild| guild.roles.as_slice())
+                    .unwrap_or(&[]);
+                let known = guild_id.and_then(|id| session.members.get(&id));
+                messages
+                    .iter()
+                    .map(|message| {
+                        // What the message itself says about its author is the newest.
+                        let member = message
+                            .member
+                            .as_ref()
+                            .or_else(|| known.and_then(|known| known.get(&message.author.id)));
+                        (
+                            message.author.id,
+                            rencord_desktop::author_style(&message.author, member, roles),
+                        )
+                    })
+                    .collect()
+            }),
         };
         let reveal_hover = self.reveal_hover;
         let loading_older = self.loading_older == self.shell.session.selected_channel;
@@ -3300,6 +3339,7 @@ fn channel_row(
     row_px: f32,
     live_dot: bool,
     avatar: Option<AnyElement>,
+    presence_dot: Option<u32>,
 ) -> impl IntoElement {
     let hover = palette.hover;
     let bg = if active {
@@ -3371,7 +3411,7 @@ fn channel_row(
                                     portrait(&title, palette.dm_avatar).into_any_element()
                                 }),
                                 palette.dm_avatar,
-                                palette.status_online,
+                                presence_dot.unwrap_or(palette.status_online),
                                 palette.sidebar,
                             )
                             .into_any_element()
@@ -3815,6 +3855,19 @@ struct RowEnv {
     me: Option<Snowflake>,
     demo: bool,
     channels: Arc<HashMap<Snowflake, String>>,
+    /// How each author in view is named and coloured in this server.
+    authors: Arc<HashMap<Snowflake, rencord_desktop::AuthorStyle>>,
+}
+
+/// The colour of the presence dot.
+fn presence_color(status: rencord_model::PresenceStatus, palette: Palette) -> u32 {
+    use rencord_model::PresenceStatus;
+    match status {
+        PresenceStatus::Online => palette.status_online,
+        PresenceStatus::Idle => palette.status_idle,
+        PresenceStatus::Dnd => palette.status_dnd,
+        PresenceStatus::Offline => palette.status_offline,
+    }
 }
 
 fn first_letter(name: &str) -> String {
@@ -4285,8 +4338,18 @@ fn message_row(
     }
     let id = message.id;
     let onyx = palette.ink_chrome;
-    let name = message.author.display_name().to_string();
-    let role = role_color(&name, theme);
+    let style = env.authors.get(&message.author.id);
+    let name = style.map_or_else(
+        || message.author.display_name().to_string(),
+        |style| style.name.clone(),
+    );
+    // The demo gives its people made-up colours. A real name is white unless a
+    // role of the server colours it.
+    let role = if env.demo {
+        role_color(&name, theme)
+    } else {
+        style.and_then(|style| style.color).unwrap_or(palette.text)
+    };
     let mentioned = env.me.is_some_and(|me| message.mentions_user(me));
     let text = rencord_desktop::clean_content(&message.content, |channel| {
         env.channels.get(&channel).cloned()
