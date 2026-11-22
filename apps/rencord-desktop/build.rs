@@ -14,7 +14,7 @@ fn main() {
         ico_literal = rest.to_string();
     }
     let ico_literal = ico_literal.replace('\\', "\\\\");
-    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.6.0".into());
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.6.2".into());
     let major = std::env::var("CARGO_PKG_VERSION_MAJOR").unwrap_or_else(|_| "0".into());
     let minor = std::env::var("CARGO_PKG_VERSION_MINOR").unwrap_or_else(|_| "6".into());
     let patch = std::env::var("CARGO_PKG_VERSION_PATCH").unwrap_or_else(|_| "0".into());
