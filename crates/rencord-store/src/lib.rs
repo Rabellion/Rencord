@@ -800,7 +800,6 @@ mod tests {
             position: 0,
             recipient_ids: vec![Snowflake::new(2)],
             avatar: Some("u2".into()),
-            ..Default::default()
         });
         session.merge_history(
             Snowflake::new(200),

@@ -365,7 +365,6 @@ impl WireChannel {
             parent_id: self.parent_id,
             position: self.position,
             recipient_ids: self.recipients.iter().map(|user| user.id).collect(),
-            recipients: self.recipients,
             avatar,
         }
     }

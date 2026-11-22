@@ -266,9 +266,6 @@ pub struct Channel {
     /// DM / group DM recipients. Empty for guild channels.
     #[serde(default)]
     pub recipient_ids: Vec<Snowflake>,
-    /// The same people with their avatars, for the DM list.
-    #[serde(default)]
-    pub recipients: Vec<User>,
     /// Avatar hash for a direct message, when the recipient has one.
     #[serde(default)]
     pub avatar: Option<String>,

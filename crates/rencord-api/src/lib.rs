@@ -99,6 +99,23 @@ fn is_discord_host(host: &str) -> bool {
         || host.ends_with(".discordapp.com")
         || host.ends_with(".discordapp.net")
 }
+/// HTTP client for Discord. Redirects that leave Discord's hosts are not followed.
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.error("too many redirects")
+            } else if attempt.url().host_str().is_some_and(is_discord_host) {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        }))
+        .build()
+        .expect("reqwest client builds with rustls")
+}
+
 pub struct DiscordApi {
     http: reqwest::Client,
     base: String,
@@ -112,19 +129,7 @@ impl DiscordApi {
     }
 
     pub fn with_base(token: Token, base: String) -> Self {
-        let http = reqwest::Client::builder()
-            .user_agent(USER_AGENT)
-            .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                if attempt.previous().len() >= 5 {
-                    attempt.error("too many redirects")
-                } else if attempt.url().host_str().is_some_and(is_discord_host) {
-                    attempt.follow()
-                } else {
-                    attempt.stop()
-                }
-            }))
-            .build()
-            .expect("reqwest client builds with rustls");
+        let http = http_client();
         Self {
             http,
             base,
