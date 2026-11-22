@@ -280,7 +280,7 @@ impl Session {
     fn upsert_ready_guild(&mut self, guild: rencord_protocol::ReadyGuild) {
         let channels = guild.channels;
         let id = guild.id;
-        self.apply_guild(id, guild.name, guild.icon, guild.banner);
+        self.apply_guild(id, guild.name, guild.icon, guild.banner.map(Some));
         if !guild.roles.is_empty() {
             self.set_roles(id, guild.roles);
         }
@@ -305,7 +305,7 @@ impl Session {
         id: Snowflake,
         name: Option<String>,
         icon: Option<String>,
-        banner: Option<String>,
+        banner: Option<Option<String>>,
     ) {
         if let Some(existing) = self.guilds.iter_mut().find(|guild| guild.id == id) {
             if let Some(name) = name {
@@ -314,7 +314,7 @@ impl Session {
             if icon.is_some() {
                 existing.icon = icon;
             }
-            if banner.is_some() {
+            if let Some(banner) = banner {
                 existing.banner = banner;
             }
             return;
@@ -323,7 +323,7 @@ impl Session {
             id,
             name: name.unwrap_or_else(|| format!("Guild {id}")),
             icon,
-            banner,
+            banner: banner.flatten(),
             ..Default::default()
         });
     }
@@ -969,7 +969,7 @@ mod tests {
             id: Snowflake::new(10),
             name: Some("Analytical Engines".into()),
             icon: Some("abc".into()),
-            banner: Some("bnr".into()),
+            banner: Some(Some("bnr".into())),
             roles: None,
             members: Vec::new(),
             presences: Vec::new(),
@@ -987,6 +987,17 @@ mod tests {
         assert_eq!(session.guilds[0].name, "Analytical Engines");
         assert_eq!(session.guilds[0].icon.as_deref(), Some("abc"));
         assert_eq!(session.guilds[0].banner.as_deref(), Some("bnr"));
+        session.apply_gateway(GatewayEvent::GuildUpsert {
+            id: Snowflake::new(10),
+            name: None,
+            icon: None,
+            banner: Some(None),
+            roles: None,
+            members: Vec::new(),
+            presences: Vec::new(),
+            channels: Vec::new(),
+        });
+        assert!(session.guilds[0].banner.is_none());
         assert_eq!(session.channels[&Snowflake::new(100)].guild_id, None);
         session.apply_gateway(GatewayEvent::ChannelUpsert(Channel {
             id: Snowflake::new(100),

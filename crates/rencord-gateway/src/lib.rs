@@ -92,7 +92,8 @@ pub enum GatewayEvent {
         id: Snowflake,
         name: Option<String>,
         icon: Option<String>,
-        banner: Option<String>,
+        /// None when the event did not mention a banner. Some(None) clears it.
+        banner: Option<Option<String>>,
         /// None when the event carried no role list at all.
         roles: Option<Vec<Role>>,
         members: Vec<(Snowflake, Member)>,
@@ -631,10 +632,16 @@ fn guild_upsert(data: &Value) -> Result<Option<GatewayEvent>, GatewayError> {
         .get("icon")
         .and_then(|value| value.as_str())
         .map(str::to_owned);
-    let banner = data
-        .get("banner")
-        .and_then(|value| value.as_str())
-        .map(str::to_owned);
+    let banner = match data.get("banner") {
+        None => None,
+        Some(serde_json::Value::Null) => Some(None),
+        Some(value) => Some(
+            value
+                .as_str()
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned),
+        ),
+    };
     let roles = data
         .get("roles")
         .filter(|value| value.is_array())
@@ -1260,7 +1267,7 @@ mod tests {
                 presences,
                 channels,
             }) => {
-                assert_eq!(banner.as_deref(), Some("bnr"));
+                assert_eq!(banner, Some(Some("bnr".into())));
                 // The junk role and the member that names no one are dropped.
                 let roles = roles.unwrap();
                 assert_eq!(

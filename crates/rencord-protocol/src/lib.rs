@@ -430,12 +430,8 @@ pub struct WirePresence {
 impl WirePresence {
     pub fn into_entry(self) -> Option<(Snowflake, PresenceStatus)> {
         let id = self.user?.id;
-        (id.get() != 0).then(|| {
-            (
-                id,
-                PresenceStatus::from_wire(self.status.as_deref().unwrap_or("")),
-            )
-        })
+        let status = self.status?;
+        (id.get() != 0).then(|| (id, PresenceStatus::from_wire(&status)))
     }
 }
 
@@ -824,6 +820,12 @@ pub struct OutgoingMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_presence_without_a_status_is_not_offline() {
+        let wire: WirePresence = serde_json::from_str(r#"{"user":{"id":"42"}}"#).unwrap();
+        assert!(wire.into_entry().is_none());
+    }
 
     #[test]
     fn a_message_keeps_mentions_edits_replies_and_attachments() {

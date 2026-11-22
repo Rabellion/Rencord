@@ -16,7 +16,11 @@ pub struct ChannelSection {
 }
 
 fn is_listed(kind: ChannelKind) -> bool {
-    !matches!(kind, ChannelKind::GuildCategory | ChannelKind::PublicThread)
+    // A forum has no message view here, so it is not a sidebar row.
+    !matches!(
+        kind,
+        ChannelKind::GuildCategory | ChannelKind::PublicThread | ChannelKind::GuildForum
+    )
 }
 
 /// Text before voice, then the server's own position, then id for a stable tie.
@@ -137,6 +141,7 @@ mod tests {
             channel(4, "a thread", ChannelKind::PublicThread, Some(3), 0),
             // Its category is not in the list, so it is shown with the loose ones.
             channel(5, "orphan", ChannelKind::GuildText, Some(999), 0),
+            channel(6, "ideas", ChannelKind::GuildForum, Some(2), 1),
         ];
         let sections = channel_sections(&list);
         assert_eq!(sections.len(), 2);

@@ -99,6 +99,11 @@ fn is_discord_host(host: &str) -> bool {
         || host.ends_with(".discordapp.com")
         || host.ends_with(".discordapp.net")
 }
+/// A redirect is followed only when it stays on Discord over https.
+pub fn redirect_stays(url: &reqwest::Url) -> bool {
+    url.scheme() == "https" && url.host_str().is_some_and(is_discord_host)
+}
+
 /// HTTP client for Discord. Redirects that leave Discord's hosts are not followed.
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -106,7 +111,7 @@ pub fn http_client() -> reqwest::Client {
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= 5 {
                 attempt.error("too many redirects")
-            } else if attempt.url().host_str().is_some_and(is_discord_host) {
+            } else if redirect_stays(attempt.url()) {
                 attempt.follow()
             } else {
                 attempt.stop()
@@ -755,6 +760,16 @@ mod tests {
             let _ = socket.write_all(&response).await;
         });
         (format!("http://{addr}"), rx)
+    }
+
+    #[test]
+    fn a_redirect_to_plain_http_is_not_accepted() {
+        let https = reqwest::Url::parse("https://cdn.discordapp.com/a.png").unwrap();
+        let http = reqwest::Url::parse("http://cdn.discordapp.com/a.png").unwrap();
+        let other = reqwest::Url::parse("https://example.test/a.png").unwrap();
+        assert!(redirect_stays(&https));
+        assert!(!redirect_stays(&http));
+        assert!(!redirect_stays(&other));
     }
 
     #[test]
