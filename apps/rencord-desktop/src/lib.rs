@@ -3,8 +3,10 @@
 
 mod breakpoints;
 mod cdn;
+mod channels;
 mod icons;
 pub mod layout;
+mod messages;
 mod search;
 mod theme;
 mod timefmt;
@@ -20,8 +22,13 @@ pub use cdn::{
     attachment_url, cdn_base, default_avatar_index, default_avatar_url, emoji_url,
     guild_banner_url, guild_icon_url, member_avatar_url, set_cdn_base, user_avatar_url,
 };
+pub use channels::{channel_sections, ChannelSection};
 pub use icons::{
     discord_install_icon_dir, hexwave_png, hexwave_svg_for_px, icon_pack_dir, rail_home_glyph_px,
+};
+pub use messages::{
+    author_style, author_styles, clean_content, embed_has_body, embed_picture, emoji_label,
+    fit_size, mention_text, name_color, reply_preview, system_text, AuthorStyle, ReplyPreview,
 };
 pub use search::{guild_search_path, local_search, parse_message_query, MessageQuery, SearchHit};
 pub use theme::{
@@ -57,7 +64,8 @@ pub enum Mutation {
         next: String,
     },
     Delete {
-        message: Message,
+        // Boxed: a message with its files, embeds and reactions is large.
+        message: Box<Message>,
     },
     React {
         channel_id: Snowflake,
@@ -72,6 +80,29 @@ pub struct Reaction {
     pub emoji: String,
     pub count: u32,
     pub mine: bool,
+}
+
+impl Reaction {
+    /// The reactions a message arrived with, for one nobody has toggled here.
+    pub fn from_message(message: &Message) -> Vec<Reaction> {
+        message
+            .reactions
+            .iter()
+            .filter(|reaction| reaction.count > 0)
+            .filter_map(|reaction| {
+                let emoji = reaction
+                    .emoji
+                    .name
+                    .clone()
+                    .filter(|name| !name.is_empty())?;
+                Some(Reaction {
+                    emoji,
+                    count: reaction.count,
+                    mine: reaction.me,
+                })
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -124,7 +155,12 @@ impl Shell {
             reply_to: None,
             editing: None,
             reactions: HashMap::new(),
-            members: Vec::new(),
+            // Only the demo has people to show; a real session has no member data yet.
+            members: if demo {
+                vec!["Ada".into(), "Charles".into(), "Lovelace".into()]
+            } else {
+                Vec::new()
+            },
             last_switch_us: 0,
             jump_index: None,
             favorites: Vec::new(),
@@ -186,22 +222,50 @@ impl Shell {
                     content: "```rust\nfn main() {\n    let answer = 42;\n}\n```".into(),
                     kind: 0,
                     timestamp: "Today at 3:38 PM".into(),
+                    ..Default::default()
                 },
                 Message {
                     id: Snowflake::new(1002),
                     channel_id: channel,
                     author: charles.clone(),
-                    content: "replying to 1000: That buffer is the whole point. Mention <@1> if the call drops.".into(),
-                    kind: 0,
+                    content: "That buffer is the whole point. Mention <@1> if the call drops.".into(),
                     timestamp: "Today at 3:44 PM".into(),
+                    mentions: vec![ada.clone()],
+                    reply_to: Some(rencord_model::Reply {
+                        message_id: Snowflake::new(1000),
+                        author: Some(ada.clone()),
+                        content: Some("```rust\nfn main() {\n    let answer = 42;\n}\n```".into()),
+                    }),
+                    ..Default::default()
                 },
                 Message {
                     id: Snowflake::new(1003),
                     channel_id: channel,
                     author: lovelace,
-                    content: "Write-up is here: [jitter notes](https://example.com/jitter). The preview can sit under the link.\nattachment:bench.png".into(),
-                    kind: 0,
+                    content: "Write-up is here: [jitter notes](https://example.com/jitter). The preview can sit under the link.".into(),
                     timestamp: "Today at 3:51 PM".into(),
+                    embeds: vec![rencord_model::Embed {
+                        kind: Some("link".into()),
+                        title: Some("Jitter notes".into()),
+                        description: Some("How the adaptive buffer stays under the idle budget.".into()),
+                        url: Some("https://example.com/jitter".into()),
+                        provider: Some(rencord_model::EmbedProvider {
+                            name: Some("example.com".into()),
+                        }),
+                        ..Default::default()
+                    }],
+                    // "demo://" pictures are built in, so the demo needs no network.
+                    attachments: vec![rencord_model::Attachment {
+                        id: Snowflake::new(5001),
+                        filename: "voice-bench.jpg".into(),
+                        url: "demo://bench".into(),
+                        content_type: Some("image/jpeg".into()),
+                        size: 48_213,
+                        width: Some(640),
+                        height: Some(152),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
                 },
                 Message {
                     id: Snowflake::new(1004),
@@ -210,6 +274,7 @@ impl Shell {
                     content: "Shipping the voice dock next. No shop, no quests.".into(),
                     kind: 0,
                     timestamp: "Today at 4:02 PM".into(),
+                    ..Default::default()
                 },
             ],
         );
@@ -253,6 +318,7 @@ impl Shell {
                 content,
                 kind: 0,
                 timestamp: format!("2026-11-20T00:{:02}:{:02}Z", (index / 60) % 60, index % 60),
+                ..Default::default()
             });
         }
         shell.session.insert_message(Message {
@@ -262,6 +328,7 @@ impl Shell {
             content: "```rust\nfn main() {\n    let answer = 42;\n}\n```".into(),
             kind: 0,
             timestamp: "2026-11-20T01:00:00Z".into(),
+            ..Default::default()
         });
         shell
     }
@@ -312,11 +379,24 @@ impl Shell {
             }
         }
         let reply_to = self.reply_to.take();
-        let prefix = if let Some(reply) = reply_to {
-            format!("replying to {reply}: ")
-        } else {
-            String::new()
-        };
+        // The local copy carries the reply the way a stored message does, so it
+        // looks the same before and after Discord confirms it.
+        let reply = reply_to.map(|target| {
+            let original = self
+                .session
+                .messages
+                .get(&channel_id)
+                .and_then(|list| list.iter().find(|message| message.id == target));
+            rencord_model::Reply {
+                message_id: target,
+                author: original.map(|message| message.author.clone()),
+                // An empty text with no author is a message this client has not
+                // loaded. Both fields absent is what Discord sends for a delete.
+                content: original
+                    .map(|message| message.content.clone())
+                    .or(Some(String::new())),
+            }
+        });
         let author = self.session.user.clone().unwrap_or(User {
             id: Snowflake::new(0),
             username: "you".into(),
@@ -336,9 +416,10 @@ impl Shell {
             id,
             channel_id,
             author,
-            content: format!("{prefix}{content}"),
-            kind: 0,
+            content: content.to_owned(),
             timestamp: "local".into(),
+            reply_to: reply,
+            ..Default::default()
         });
         self.session.composer.clear();
         self.note(format!("Queued message in channel {channel_id}"));
@@ -357,16 +438,36 @@ impl Shell {
             self.reactions.remove(&message_id);
             return;
         };
-        self.reactions.insert(
-            message_id,
-            list.iter()
-                .map(|(emoji, count)| Reaction {
-                    emoji: emoji.clone(),
-                    count: *count,
-                    mine: false,
-                })
-                .collect(),
-        );
+        // The session counts do not know which are yours, so keep what was shown.
+        let mine: HashMap<String, bool> = self
+            .displayed_reactions(message_id)
+            .into_iter()
+            .map(|reaction| (reaction.emoji, reaction.mine))
+            .collect();
+        let next = list
+            .iter()
+            .map(|(emoji, count)| Reaction {
+                emoji: emoji.clone(),
+                count: *count,
+                mine: mine.get(emoji).copied().unwrap_or(false),
+            })
+            .collect();
+        self.reactions.insert(message_id, next);
+    }
+
+    /// The reactions shown on a message: those changed in this window, or else
+    /// the ones Discord sent with it.
+    pub fn displayed_reactions(&self, message_id: u64) -> Vec<Reaction> {
+        if let Some(list) = self.reactions.get(&message_id) {
+            return list.clone();
+        }
+        self.session
+            .messages
+            .values()
+            .flatten()
+            .find(|message| message.id.get() == message_id)
+            .map(Reaction::from_message)
+            .unwrap_or_default()
     }
 
     pub fn confirm_create(&mut self, mutation: &Mutation, sent: Message) {
@@ -410,7 +511,7 @@ impl Shell {
                 self.note("Edit rolled back");
             }
             Mutation::Delete { message } => {
-                self.session.insert_message(message.clone());
+                self.session.insert_message(Message::clone(message));
                 self.note("Delete rolled back");
             }
             Mutation::React {
@@ -669,6 +770,11 @@ impl Shell {
 
     pub fn toggle_reaction(&mut self, message_id: u64, emoji: &str) -> Mutation {
         let channel_id = self.session.selected_channel.unwrap_or(Snowflake::new(0));
+        // Start from what the message already has, not from nothing.
+        if !self.reactions.contains_key(&message_id) {
+            let seed = self.displayed_reactions(message_id);
+            self.reactions.insert(message_id, seed);
+        }
         let list = self.reactions.entry(message_id).or_default();
         if let Some(index) = list
             .iter()
@@ -873,8 +979,13 @@ impl Shell {
         if let Some(channel_id) = self.session.selected_channel {
             lines.push(format!("timeline {channel_id}:"));
             for message in self.session.messages_for(channel_id) {
+                let reply = message
+                    .reply_to
+                    .as_ref()
+                    .map(|reply| format!(" (replying to {})", reply.message_id))
+                    .unwrap_or_default();
                 lines.push(format!(
-                    "  {}: {}",
+                    "  {}{reply}: {}",
                     message.author.display_name(),
                     message.content.replace('\n', " ")
                 ));
@@ -982,6 +1093,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_real_session_has_no_made_up_members_but_the_demo_does() {
+        // The member list used to show Ada, Charles and Lovelace after a real login.
+        assert!(Shell::login().members.is_empty());
+        assert_eq!(Shell::demo().members.len(), 3);
+    }
+    #[test]
     fn a_signed_in_shell_does_not_invent_members() {
         let shell = Shell::login();
         assert!(shell.members.is_empty());
@@ -1008,6 +1125,19 @@ mod tests {
         assert!(outline.contains("#voice"));
         assert!(outline.contains("Charles"));
         assert!(outline.contains("fn main()"));
+    }
+
+    #[test]
+    fn a_reply_to_a_message_that_is_not_loaded_is_not_called_deleted() {
+        let mut shell = Shell::demo();
+        shell.begin_reply(Snowflake::new(9_000_000));
+        shell.send_local("still here");
+        let reply = shell
+            .visible_messages()
+            .last()
+            .and_then(|message| message.reply_to.clone())
+            .expect("reply");
+        assert_eq!(reply_preview(&reply).text, "Original message");
     }
 
     #[test]
@@ -1133,5 +1263,66 @@ mod tests {
             "raw hex colors belong in rencord-theme:\n{}",
             offenders.join("\n")
         );
+    }
+
+    fn message_with_reactions() -> Message {
+        Message {
+            id: Snowflake::new(500),
+            channel_id: Snowflake::new(8),
+            author: User {
+                id: Snowflake::new(9),
+                username: "ada".into(),
+                ..Default::default()
+            },
+            content: "popular".into(),
+            reactions: vec![rencord_model::MessageReaction {
+                count: 2,
+                me: false,
+                emoji: rencord_model::ReactionEmoji {
+                    id: None,
+                    name: Some("wave".into()),
+                },
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn reactions_a_message_arrived_with_are_shown_and_built_on_when_toggled() {
+        let mut shell = Shell::login();
+        shell.session.selected_channel = Some(Snowflake::new(8));
+        shell.session.insert_message(message_with_reactions());
+        let shown = shell.displayed_reactions(500);
+        assert_eq!(
+            (shown[0].emoji.as_str(), shown[0].count, shown[0].mine),
+            ("wave", 2, false)
+        );
+        // Reacting adds to the two that were there. It used to start again at 1.
+        shell.toggle_reaction(500, "wave");
+        let after = shell.displayed_reactions(500);
+        assert_eq!((after[0].count, after[0].mine), (3, true));
+    }
+
+    #[test]
+    fn a_gateway_reaction_update_keeps_which_ones_are_yours() {
+        let mut shell = Shell::login();
+        shell.session.selected_channel = Some(Snowflake::new(8));
+        let mut message = message_with_reactions();
+        message.reactions[0].me = true;
+        shell.session.insert_message(message);
+        shell.reactions.insert(
+            500,
+            Reaction::from_message(shell.session.messages[&Snowflake::new(8)].first().unwrap()),
+        );
+        shell
+            .session
+            .apply_gateway(rencord_gateway::GatewayEvent::Reaction {
+                message_id: Snowflake::new(500),
+                emoji: "wave".into(),
+                remove: false,
+            });
+        shell.mirror_reaction(500);
+        let shown = shell.displayed_reactions(500);
+        assert_eq!((shown[0].count, shown[0].mine), (3, true));
     }
 }

@@ -4,6 +4,7 @@
 //! then quits.
 
 mod big_file_view;
+mod rows;
 mod settings_ui;
 
 use std::borrow::Cow;
@@ -34,6 +35,9 @@ mod hdr_ui;
 mod stub;
 use rencord_markdown::{parse, Block, Inline};
 use rencord_model::{Message, Snowflake};
+use rows::{
+    attachment_view, embed_view, presence_color, reply_header, row_pictures, Picture, RowEnv,
+};
 
 const UI_FONT: &str = "Segoe UI Variable, Segoe UI, Inter";
 
@@ -88,7 +92,45 @@ mod voice_call;
 
 use login_view::{LoginModel, LoginPreview};
 
+/// This is a console program, so a panic used to print to a window that closed
+/// with the process and left no trace. Keep the message in a file as well.
+fn install_crash_log() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        let entry = crash_entry(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs()),
+            thread.name().unwrap_or("unnamed"),
+            &info.to_string(),
+            &std::backtrace::Backtrace::force_capture().to_string(),
+        );
+        let path = rencord_platform::data_dir().join("crash.log");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = std::io::Write::write_all(&mut file, entry.as_bytes());
+        }
+        previous(info);
+    }));
+}
+
+/// One crash.log entry. Tokens are removed first (RULES section 4.1).
+fn crash_entry(unix: u64, thread: &str, message: &str, backtrace: &str) -> String {
+    rencord_auth::redact(&format!(
+        "[{unix}] rencord {} thread {thread}\n{message}\n{backtrace}\n\n",
+        env!("CARGO_PKG_VERSION")
+    ))
+}
+
 fn main() {
+    install_crash_log();
     PROCESS_START.get_or_init(Instant::now);
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|arg| arg == "--discord-login-window") {
@@ -420,6 +462,8 @@ struct RencordWindow {
     image_order: VecDeque<String>,
     image_wait: HashSet<String>,
     image_fail: HashSet<String>,
+    /// Width and height of each cached picture, read from its PNG header.
+    image_dims: HashMap<String, (u32, u32)>,
     voice_join: Option<rencord_voice::VoiceJoin>,
     voice_cmd: Option<tokio::sync::mpsc::Sender<voice_call::VoiceCmd>>,
     voice_status: Option<std::sync::mpsc::Receiver<String>>,
@@ -657,6 +701,7 @@ impl RencordWindow {
             image_order: VecDeque::new(),
             image_wait: HashSet::new(),
             image_fail: HashSet::new(),
+            image_dims: HashMap::new(),
             voice_join: None,
             voice_cmd: None,
             voice_status: None,
@@ -2040,6 +2085,7 @@ impl RencordWindow {
             in_voice,
             None,
             None,
+            None,
         );
         if !channel.kind.is_voice() {
             return row.into_any_element();
@@ -2145,6 +2191,9 @@ impl RencordWindow {
             let _ = this.update(cx, |view, cx| {
                 view.image_wait.remove(&key);
                 if let Some(bytes) = loaded {
+                    if let Some(size) = png_size(&bytes) {
+                        view.image_dims.insert(key.clone(), size);
+                    }
                     let image = Image::from_bytes(ImageFormat::Png, bytes);
                     view.remember_image(key, std::sync::Arc::new(image));
                 } else {
@@ -2154,6 +2203,28 @@ impl RencordWindow {
             });
         })
         .detach();
+    }
+
+    /// The pictures among `urls` that are ready, with their sizes; the rest start loading.
+    fn pictures_for(
+        &mut self,
+        urls: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> HashMap<String, Picture> {
+        urls.into_iter()
+            .filter_map(|url| {
+                let image = self.cached_image(&url, cx)?;
+                let (width, height) = self.image_dims.get(&url).copied().unwrap_or((0, 0));
+                Some((
+                    url,
+                    Picture {
+                        image,
+                        width,
+                        height,
+                    },
+                ))
+            })
+            .collect()
     }
 
     fn member_list_is_current(&self, data: &serde_json::Value) -> bool {
@@ -2604,6 +2675,7 @@ impl RencordWindow {
                         false,
                         None,
                         None,
+                        None,
                     ));
                 }
             }
@@ -2624,12 +2696,10 @@ impl RencordWindow {
                     ));
                 }
             }
-            let categories: Vec<_> = channels
+            let has_categories = channels
                 .iter()
-                .filter(|channel| channel.kind == rencord_model::ChannelKind::GuildCategory)
-                .cloned()
-                .collect();
-            if categories.is_empty() {
+                .any(|channel| channel.kind == rencord_model::ChannelKind::GuildCategory);
+            if !has_categories {
                 nav = nav.child(category_header(
                     this.clone(),
                     "text",
@@ -2674,17 +2744,16 @@ impl RencordWindow {
                         ));
                     }
                 }
-            } else if text_open {
-                for category in categories {
-                    nav = nav.child(div().px(px(8.)).pt(px(16.)).pb(px(4.)).child(paint(
-                        category.name.to_uppercase(),
-                        palette.muted,
-                        12.,
-                    )));
-                    for channel in channels
-                        .iter()
-                        .filter(|channel| channel.parent_id == Some(category.id))
-                    {
+            } else {
+                for section in rencord_desktop::channel_sections(&channels) {
+                    if let Some(category) = &section.category {
+                        nav = nav.child(div().px(px(8.)).pt(px(16.)).pb(px(4.)).child(paint(
+                            category.name.to_uppercase(),
+                            palette.muted,
+                            12.,
+                        )));
+                    }
+                    for channel in &section.channels {
                         nav = nav.child(self.guild_channel_row(
                             this.clone(),
                             cx,
@@ -2750,6 +2819,16 @@ impl RencordWindow {
                         false,
                         face,
                         subtitle,
+                        Some(presence_color(
+                            rencord_model::PresenceStatus::from_wire(
+                                self.shell
+                                    .session
+                                    .presences
+                                    .get(&recipient)
+                                    .map_or("offline", |(status, _)| status.as_str()),
+                            ),
+                            palette,
+                        )),
                     ));
                 }
             }
@@ -2787,6 +2866,39 @@ impl RencordWindow {
         let list_theme = theme.clone();
         let list_entity = this.clone();
         let list_reactions = reactions.clone();
+        let list_me = self.shell.session.user.as_ref().map(|user| user.id);
+        let list_demo = self.shell.demo;
+        let list_channels: Arc<HashMap<Snowflake, String>> = Arc::new(
+            self.shell
+                .session
+                .channels
+                .iter()
+                .map(|(id, channel)| (*id, channel.name.clone()))
+                .collect(),
+        );
+        let list_authors = Arc::new({
+            let session = &self.shell.session;
+            let guild_id = session
+                .selected_channel
+                .and_then(|channel| session.channels.get(&channel))
+                .and_then(|channel| channel.guild_id);
+            let roles = guild_id
+                .and_then(|id| session.guilds.iter().find(|guild| guild.id == id))
+                .map(|guild| guild.roles.as_slice())
+                .unwrap_or(&[]);
+            let known = guild_id.and_then(|id| session.members.get(&id));
+            rencord_desktop::author_styles(
+                messages.iter().map(|message| {
+                    // What the message itself says about its author is the newest.
+                    let member = message
+                        .member
+                        .as_ref()
+                        .or_else(|| known.and_then(|known| known.get(&message.author.id)));
+                    (message, member)
+                }),
+                roles,
+            )
+        });
         let reveal_hover = self.reveal_hover;
         let loading_older = self.loading_older == self.shell.session.selected_channel;
         let _density = density;
@@ -2861,20 +2973,10 @@ impl RencordWindow {
             let new_here = marker > 0
                 && message.id.get() > marker
                 && previous.map(|item| item.id.get() <= marker).unwrap_or(true);
-            let row = if let Some(line) =
-                rencord_model::system_line(message.kind, message.author.display_name())
-            {
-                h_flex()
-                    .w_full()
-                    .px(px(16.))
-                    .h(px(32.))
-                    .items_center()
-                    .gap(px(8.))
-                    .child(paint("→", list_palette.muted, 14.))
-                    .child(paint(line, list_palette.muted, 14.))
-                    .into_any_element()
+            let row = if message.is_system() {
+                rows::system_row(&message, &stamp, list_palette)
             } else {
-                let (photo, attachments) = list_entity.update(_cx, |window, cx| {
+                let (photo, pics) = list_entity.update(_cx, |window, cx| {
                     let urls = match message.author.avatar.as_deref() {
                         Some(hash) => vec![
                             rencord_desktop::user_avatar_url(message.author.id.get(), hash),
@@ -2889,12 +2991,20 @@ impl RencordWindow {
                         )],
                     };
                     let photo = window.first_image(&urls, cx);
-                    let attachments = media_urls(&message.content)
-                        .into_iter()
-                        .filter_map(|url| window.cached_image(&url, cx))
-                        .collect();
-                    (photo, attachments)
+                    let pics = if list_demo {
+                        HashMap::new()
+                    } else {
+                        window.pictures_for(row_pictures(&message), cx)
+                    };
+                    (photo, pics)
                 });
+                let env = RowEnv {
+                    pics,
+                    me: list_me,
+                    demo: list_demo,
+                    channels: list_channels.clone(),
+                    authors: list_authors.clone(),
+                };
                 message_row(
                     list_entity.clone(),
                     &message,
@@ -2910,7 +3020,7 @@ impl RencordWindow {
                     &stamp,
                     reveal_hover,
                     photo,
-                    attachments,
+                    &env,
                 )
                 .into_any_element()
             };
@@ -3878,6 +3988,7 @@ fn channel_row(
     live_dot: bool,
     dm_face: Option<std::sync::Arc<Image>>,
     subtitle: Option<String>,
+    presence_dot: Option<u32>,
 ) -> impl IntoElement {
     let hover = palette.hover;
     let bg = if active {
@@ -3940,7 +4051,7 @@ fn channel_row(
                                     None => letter_face(&title, id.get(), 32.).into_any_element(),
                                 },
                                 32.,
-                                palette.status_online,
+                                presence_dot.unwrap_or(palette.status_online),
                                 palette.sidebar,
                             )
                             .into_any_element()
@@ -4393,26 +4504,31 @@ fn message_row(
     stamp: &rencord_desktop::Presented,
     reveal_time: bool,
     photo: Option<std::sync::Arc<Image>>,
-    attachments: Vec<std::sync::Arc<Image>>,
+    env: &RowEnv,
 ) -> impl IntoElement {
     let id = message.id;
     let onyx = palette.ink_chrome;
-    let name = message.author.display_name().to_string();
-    let role = role_color(&name, theme);
-    let body_source = message.content.clone();
-    let (reply_note, body_source) = if let Some(rest) = body_source.strip_prefix("replying to ") {
-        let (target, text) = rest.split_once(':').unwrap_or(("a message", rest));
-        let who = match target.trim() {
-            "1000" | "1" => "Ada",
-            "2" => "Charles",
-            "3" => "Lovelace",
-            _ => "a message",
-        };
-        (Some(format!("Replying to {who}")), text.trim().to_owned())
+    let style = env.authors.get(&message.id);
+    let name = style.map_or_else(
+        || message.author.display_name().to_string(),
+        |style| style.name.clone(),
+    );
+    // The demo gives its people made-up colours. A real name is white unless a
+    // role of the server colours it.
+    let role = if env.demo {
+        role_color(&name, theme)
     } else {
-        (None, body_source)
+        style.and_then(|style| style.color).unwrap_or(palette.text)
     };
-    let body_source = without_media_markers(&body_source);
+    let mentioned = env.me.is_some_and(|me| message.mentions_user(me));
+    let text = rencord_desktop::clean_content(&message.content, |channel| {
+        env.channels.get(&channel).cloned()
+    });
+    let names: HashMap<String, String> = message
+        .mentions
+        .iter()
+        .map(|user| (user.id.to_string(), user.display_name().to_owned()))
+        .collect();
     let group = SharedString::from(format!("row-{id}"));
     let hover = palette.hover;
     let mut body = v_flex().flex_1().min_w(px(0.)).gap_1();
@@ -4436,24 +4552,22 @@ fn message_row(
                 )),
         );
     }
-    if let Some(note) = reply_note {
-        body = body.child(
-            h_flex()
-                .gap(px(6.))
-                .items_center()
-                .child(icon("reply", 14., palette.muted))
-                .child(paint(note, palette.muted, 12.)),
-        );
+    if let Some(reply) = &message.reply_to {
+        body = body.child(reply_header(reply, env, palette));
     }
-    body = body.child(message_blocks(&body_source, id, palette, font_px));
-    for image in attachments {
-        body = body.child(
-            img(image)
-                .max_w(px(400.))
-                .max_h(px(300.))
-                .rounded(px(8.))
-                .object_fit(ObjectFit::Contain),
-        );
+    if !text.trim().is_empty() {
+        body = body.child(message_blocks(&text, id, palette, font_px, &names));
+        if message.edited_timestamp.is_some() {
+            body = body.child(paint("(edited)", palette.faint, 11.));
+        }
+    }
+    for (index, attachment) in message.attachments.iter().enumerate() {
+        body = body.child(attachment_view(attachment, id, index, env, palette));
+    }
+    for (index, embed) in message.embeds.iter().enumerate() {
+        if let Some(card) = embed_view(embed, id, index, env, palette) {
+            body = body.child(card);
+        }
     }
     if !reactions.is_empty() {
         let mut pills = h_flex().gap_1().mt(px(2.));
@@ -4480,9 +4594,9 @@ fn message_row(
                     .child(format!(
                         "{} {}",
                         if reaction.emoji == "wave" {
-                            "👋"
+                            "{1F44B}".to_owned()
                         } else {
-                            reaction.emoji.as_str()
+                            rencord_desktop::emoji_label(&reaction.emoji)
                         },
                         reaction.count
                     )),
@@ -4490,79 +4604,12 @@ fn message_row(
         }
         body = body.child(pills);
     }
-    if message.content.contains("](") {
-        let embed = v_flex()
-            .gap(px(2.))
-            .child(paint("example.com", palette.muted, 11.))
-            .child(paint("Jitter notes", palette.link, 14.))
-            .child(paint(
-                "How the adaptive buffer stays under the idle budget.",
-                if onyx {
-                    palette.text_secondary
-                } else {
-                    palette.text
-                },
-                13.,
-            ));
-        body = body.child(if onyx {
-            div()
-                .mt(px(7.))
-                .max_w(px(380.))
-                .rounded(px(6.))
-                .bg(rgb(palette.chat))
-                .border_1()
-                .border_color(rgb(palette.line))
-                .child(
-                    div()
-                        .border_l_3()
-                        .border_color(rgb(palette.accent))
-                        .px(px(14.))
-                        .py(px(8.))
-                        .child(embed),
-                )
-                .into_any_element()
-        } else {
-            v_flex()
-                .mt(px(4.))
-                .max_w(px(432.))
-                .px(px(16.))
-                .py(px(8.))
-                .rounded(px(12.))
-                .bg(rgb(palette.elevated))
-                .border_l_4()
-                .border_color(rgb(palette.link))
-                .child(embed)
-                .into_any_element()
-        });
-    }
     if message.content.contains("rencord-split v1") {
         body = body.child(big_file_view::reassemble_chip(
             view.clone(),
             message.content.clone(),
             palette,
         ));
-    }
-    if message.content.contains("attachment:bench.png") {
-        body = body.child(
-            v_flex()
-                .mt(px(7.))
-                .gap_1()
-                .child(
-                    div()
-                        .w(px(320.))
-                        .h(px(76.))
-                        .rounded(px(if onyx { 6. } else { 12. }))
-                        .overflow_hidden()
-                        .border_1()
-                        .border_color(rgb(palette.line))
-                        .child(bench_photo()),
-                )
-                .child(if onyx {
-                    meta("voice-bench.jpg", palette.muted, 11., palette).into_any_element()
-                } else {
-                    paint("voice-bench.jpg", palette.muted, 12.).into_any_element()
-                }),
-        );
     }
     let avatar = if onyx { 32. } else { 40. };
     h_flex()
@@ -4579,12 +4626,12 @@ fn message_row(
             8.
         }))
         .border_l_3()
-        .border_color(rgb(if message.content.contains("Mention") {
+        .border_color(rgb(if mentioned {
             palette.accent
         } else {
             palette.chat
         }))
-        .bg(rgb(if message.content.contains("Mention") {
+        .bg(rgb(if mentioned {
             palette.ping
         } else {
             palette.chat
@@ -4726,7 +4773,12 @@ fn delete_action(view: Entity<RencordWindow>, id: Snowflake, palette: Palette) -
         .on_click(move |_, _, cx| {
             view.update(cx, |this, cx| {
                 if let Some(message) = this.shell.delete_local(id) {
-                    this.dispatch_mutation(rencord_desktop::Mutation::Delete { message }, cx);
+                    this.dispatch_mutation(
+                        rencord_desktop::Mutation::Delete {
+                            message: Box::new(message),
+                        },
+                        cx,
+                    );
                 }
                 cx.notify();
             });
@@ -4738,6 +4790,7 @@ fn message_blocks(
     id: Snowflake,
     palette: Palette,
     font_px: f32,
+    names: &HashMap<String, String>,
 ) -> impl IntoElement {
     let blocks = parse(content);
     let mut column = v_flex().gap_1();
@@ -4752,7 +4805,7 @@ fn message_blocks(
             Block::Paragraph { inlines }
             | Block::Heading { inlines, .. }
             | Block::Quote { inlines } => {
-                column = column.child(rich_inlines(&inlines, palette, font_px));
+                column = column.child(rich_inlines(&inlines, names, palette, font_px));
             }
         }
     }
@@ -5149,45 +5202,12 @@ fn member_list_invalidates(data: &serde_json::Value) -> bool {
         })
 }
 
-fn is_generated_media_line(line: &str) -> bool {
-    if let Some(url) = line.strip_prefix("attachment:") {
-        return !url.is_empty();
-    }
-    line.strip_prefix("emoji:")
-        .and_then(|id| id.parse::<u64>().ok())
-        .is_some()
-}
-
-fn without_media_markers(content: &str) -> String {
-    let mut fenced = false;
-    let mut lines = Vec::new();
-    for line in content.lines() {
-        if line.trim_start().starts_with("```") {
-            fenced = !fenced;
-            lines.push(line);
-            continue;
-        }
-        if !fenced && is_generated_media_line(line) {
-            continue;
-        }
-        lines.push(line);
-    }
-    lines.join("\n")
-}
-
-fn media_urls(content: &str) -> Vec<String> {
-    content
-        .lines()
-        .filter_map(|line| {
-            if let Some(url) = line.strip_prefix("attachment:") {
-                Some(url.to_owned())
-            } else {
-                line.strip_prefix("emoji:")
-                    .and_then(|id| id.parse::<u64>().ok())
-                    .map(rencord_desktop::emoji_url)
-            }
-        })
-        .collect()
+/// Width and height from a PNG header, which `load_cdn_bytes` always produces.
+fn png_size(bytes: &[u8]) -> Option<(u32, u32)> {
+    let header = bytes.get(16..24)?;
+    let width = u32::from_be_bytes(header[..4].try_into().ok()?);
+    let height = u32::from_be_bytes(header[4..].try_into().ok()?);
+    Some((width, height))
 }
 
 fn cache_file(url: &str) -> std::path::PathBuf {
@@ -5202,24 +5222,39 @@ fn cache_file(url: &str) -> std::path::PathBuf {
 }
 
 async fn load_cdn_bytes(url: &str) -> Option<Vec<u8>> {
+    // Embeds can name any host; only Discord's own CDN, or the test base, is contacted.
+    if !url.starts_with(&rencord_desktop::cdn_base()) && !rencord_api::is_discord_image_url(url) {
+        tracing::warn!("refused an image that is not on Discord's CDN");
+        return None;
+    }
     let path = cache_file(url);
     if let Ok(bytes) = std::fs::read(&path) {
         if image::load_from_memory(&bytes).is_ok() {
             return Some(bytes);
         }
     }
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .ok()?;
-    let response = match client.get(url).send().await {
+    let client = rencord_api::http_client();
+    let response = match client.get(url).timeout(Duration::from_secs(5)).send().await {
         Ok(response) => response,
         Err(err) => {
             tracing::warn!("cdn image failed: {err}");
             return None;
         }
     };
-    let bytes = response.bytes().await.ok()?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > rencord_api::MAX_IMAGE_BYTES as u64)
+    {
+        return None;
+    }
+    let mut response = response;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() > rencord_api::MAX_IMAGE_BYTES {
+            return None;
+        }
+    }
     let decoded = image::load_from_memory(&bytes).ok()?;
     let mut png = Vec::new();
     decoded
@@ -5829,20 +5864,21 @@ fn paint(text: impl Into<String>, color: u32, size: f32) -> impl IntoElement {
         .child(text.into())
 }
 
-fn mention_label(id: &str) -> String {
-    match id {
-        "1" => "@Ada".into(),
-        "2" => "@Charles".into(),
-        "3" => "@Lovelace".into(),
-        other => format!("@{other}"),
-    }
+fn mention_label(id: &str, names: &HashMap<String, String>) -> String {
+    rencord_desktop::mention_text(id, names)
 }
 
-fn rich_inlines(inlines: &[Inline], palette: Palette, font_px: f32) -> impl IntoElement {
+fn rich_inlines(
+    inlines: &[Inline],
+    names: &HashMap<String, String>,
+    palette: Palette,
+    font_px: f32,
+) -> impl IntoElement {
     let mut text = String::new();
     let mut runs = Vec::new();
     walk_inlines(
         inlines,
+        names,
         palette,
         FontWeight::NORMAL,
         &mut |chunk, color, weight, background| {
@@ -5887,6 +5923,7 @@ fn rich_inlines(inlines: &[Inline], palette: Palette, font_px: f32) -> impl Into
 
 fn walk_inlines(
     inlines: &[Inline],
+    names: &HashMap<String, String>,
     palette: Palette,
     weight: FontWeight,
     push: &mut impl FnMut(&str, u32, FontWeight, Option<u32>),
@@ -5894,14 +5931,14 @@ fn walk_inlines(
     for inline in inlines {
         match inline {
             Inline::Text(value) => push(value, palette.text, weight, None),
-            Inline::Bold(inner) => walk_inlines(inner, palette, FontWeight::SEMIBOLD, push),
+            Inline::Bold(inner) => walk_inlines(inner, names, palette, FontWeight::SEMIBOLD, push),
             Inline::Italic(inner) | Inline::Spoiler(inner) => {
-                walk_inlines(inner, palette, weight, push)
+                walk_inlines(inner, names, palette, weight, push)
             }
             Inline::Code(value) => push(value, palette.link, weight, Some(palette.elevated)),
             Inline::Link { text, .. } => push(text, palette.link, weight, None),
             Inline::Mention { id } => {
-                let label = mention_label(id);
+                let label = mention_label(id, names);
                 let (foreground, wash) = (palette.mention_fg, palette.mention_bg);
                 push(&label, foreground, FontWeight::SEMIBOLD, Some(wash));
             }
@@ -5990,5 +6027,27 @@ mod fetch_failure {
         assert!(fetch_is_blocked(&requested, &failed, id));
         failed.remove(&id);
         assert!(!fetch_is_blocked(&requested, &failed, id));
+    }
+}
+
+#[cfg(test)]
+mod crash_log_tests {
+    use super::crash_entry;
+
+    #[test]
+    fn an_entry_names_the_thread_and_the_panic_but_never_a_token() {
+        let entry = crash_entry(
+            1_700_000_000,
+            "tokio-runtime-worker",
+            "panicked at src/net.rs:10:5:\ncalled unwrap on None while handling ODUyODky.GX5Xdp.22jsdSqEiHLUYEJSsjeq_vJKLp",
+            "   0: rencord::net::run",
+        );
+        assert!(entry.starts_with("[1700000000] rencord "), "{entry}");
+        assert!(entry.contains("thread tokio-runtime-worker"), "{entry}");
+        assert!(entry.contains("src/net.rs:10:5"), "{entry}");
+        assert!(entry.contains("rencord::net::run"), "{entry}");
+        assert!(!entry.contains("GX5Xdp"), "{entry}");
+        assert!(!entry.contains("22jsdSqEiHLU"), "{entry}");
+        assert!(entry.ends_with("\n\n"));
     }
 }

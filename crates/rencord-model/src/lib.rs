@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
 /// Discord snowflake identifier.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Snowflake(pub u64);
 
 impl Snowflake {
@@ -94,7 +94,7 @@ impl fmt::Debug for Token {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct User {
     pub id: Snowflake,
     pub username: String,
@@ -114,7 +114,7 @@ impl User {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelKind {
     GuildText,
@@ -125,6 +125,7 @@ pub enum ChannelKind {
     GuildAnnouncement,
     GuildForum,
     PublicThread,
+    #[default]
     Other,
 }
 
@@ -173,20 +174,85 @@ impl ChannelKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A role in a server. Field names are Discord's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Role {
+    pub id: Snowflake,
+    #[serde(default)]
+    pub name: String,
+    /// 0xRRGGBB, or 0 for a role with no colour.
+    #[serde(default)]
+    pub color: u32,
+    #[serde(default)]
+    pub position: i32,
+    #[serde(default)]
+    pub hoist: bool,
+}
+
+/// What a server knows about one of its people: a nickname and role ids.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Member {
+    #[serde(default)]
+    pub nick: Option<String>,
+    #[serde(default)]
+    pub roles: Vec<Snowflake>,
+}
+
+impl Member {
+    /// The nickname, when there is a real one.
+    pub fn nickname(&self) -> Option<&str> {
+        self.nick.as_deref().filter(|nick| !nick.is_empty())
+    }
+}
+
+/// Whether someone is online, as the presence dot shows it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PresenceStatus {
+    Online,
+    Idle,
+    Dnd,
+    /// Also what `invisible` and anything unknown becomes.
+    #[default]
+    Offline,
+}
+
+impl PresenceStatus {
+    pub fn from_wire(status: &str) -> Self {
+        match status {
+            "online" => Self::Online,
+            "idle" => Self::Idle,
+            "dnd" => Self::Dnd,
+            _ => Self::Offline,
+        }
+    }
+
+    /// The word Discord uses for this status.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Online => "online",
+            Self::Idle => "idle",
+            Self::Dnd => "dnd",
+            Self::Offline => "offline",
+        }
+    }
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Guild {
     pub id: Snowflake,
     pub name: String,
     #[serde(default)]
     pub icon: Option<String>,
+    /// The picture behind the server name in the channel list.
     #[serde(default)]
     pub banner: Option<String>,
     /// Client-side folder name. Empty guilds stay loose on the rail.
     #[serde(default)]
     pub folder: Option<String>,
+    #[serde(default)]
+    pub roles: Vec<Role>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Channel {
     pub id: Snowflake,
     pub name: String,
@@ -205,7 +271,7 @@ pub struct Channel {
     pub avatar: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub id: Snowflake,
     pub channel_id: Snowflake,
@@ -213,20 +279,152 @@ pub struct Message {
     pub content: String,
     #[serde(default)]
     pub timestamp: String,
-    /// Discord message type. `0` is a normal message. `7` is a member join.
+    /// Discord's message type: 0 and 19 are ordinary, 7 is a join, 3 a call.
     #[serde(default)]
     pub kind: u8,
+    /// Set when the message has been edited.
+    #[serde(default)]
+    pub edited_timestamp: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+    #[serde(default)]
+    pub embeds: Vec<Embed>,
+    #[serde(default)]
+    pub reactions: Vec<MessageReaction>,
+    /// Users the message mentions, so `<@id>` can be shown as a name.
+    #[serde(default)]
+    pub mentions: Vec<User>,
+    #[serde(default)]
+    pub reply_to: Option<Reply>,
+    /// The author's nickname and roles in the server, when Discord sent them.
+    #[serde(default)]
+    pub member: Option<Member>,
 }
 
-/// One-line system copy. Normal messages (`0`) return nothing so the body is shown.
-pub fn system_line(kind: u8, name: &str) -> Option<String> {
-    match kind {
-        3 => Some(format!("{name} started a call.")),
-        6 => Some(format!("{name} pinned a message to this channel.")),
-        7 => Some(format!("{name} joined the server.")),
-        8..=11 => Some(format!("{name} boosted the server.")),
-        _ => None,
+impl Message {
+    /// A system message such as "joined the server" has no text of its own.
+    pub fn is_system(&self) -> bool {
+        !matches!(self.kind, 0 | 19 | 20 | 21)
     }
+
+    /// Whether `user` is named in the message.
+    pub fn mentions_user(&self, user: Snowflake) -> bool {
+        self.mentions.iter().any(|mentioned| mentioned.id == user)
+    }
+}
+
+/// A file on a message. Field names are Discord's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    #[serde(default)]
+    pub id: Snowflake,
+    #[serde(default)]
+    pub filename: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+}
+
+impl Attachment {
+    pub fn is_image(&self) -> bool {
+        self.content_type
+            .as_deref()
+            .is_some_and(|kind| kind.starts_with("image/"))
+    }
+
+    pub fn is_video(&self) -> bool {
+        self.content_type
+            .as_deref()
+            .is_some_and(|kind| kind.starts_with("video/"))
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbedImage {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+}
+
+impl EmbedImage {
+    /// Discord's proxy copy when there is one, so the original host is not contacted.
+    pub fn best_url(&self) -> &str {
+        self.proxy_url.as_deref().unwrap_or(&self.url)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbedProvider {
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// A link preview or rich embed. Field names are Discord's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Embed {
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub color: Option<u32>,
+    #[serde(default)]
+    pub provider: Option<EmbedProvider>,
+    #[serde(default)]
+    pub thumbnail: Option<EmbedImage>,
+    #[serde(default)]
+    pub image: Option<EmbedImage>,
+    #[serde(default)]
+    pub video: Option<EmbedImage>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReactionEmoji {
+    #[serde(default)]
+    pub id: Option<Snowflake>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// A reaction group on a message, as Discord reports it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageReaction {
+    #[serde(default)]
+    pub count: u32,
+    /// True when the signed-in user reacted.
+    #[serde(default)]
+    pub me: bool,
+    #[serde(default)]
+    pub emoji: ReactionEmoji,
+}
+
+/// What a reply points at. The text and author are there when Discord sent
+/// the original message along, and absent when it was deleted.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reply {
+    pub message_id: Snowflake,
+    #[serde(default)]
+    pub author: Option<User>,
+    #[serde(default)]
+    pub content: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -267,20 +465,6 @@ mod tests {
         let rendered = format!("{token:?}");
         assert!(!rendered.contains("super-secret"));
         assert_eq!(token.expose(), "super-secret-value");
-    }
-
-    #[test]
-    fn a_join_is_a_system_line_and_a_normal_message_is_not() {
-        assert_eq!(system_line(7, "Ada"), Some("Ada joined the server.".into()));
-        assert_eq!(
-            system_line(6, "Ada"),
-            Some("Ada pinned a message to this channel.".into())
-        );
-        assert_eq!(
-            system_line(3, "Munch"),
-            Some("Munch started a call.".into())
-        );
-        assert!(system_line(0, "Ada").is_none());
     }
 
     #[test]

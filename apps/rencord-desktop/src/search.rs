@@ -202,6 +202,7 @@ mod tests {
             content: "notes mention https://example.com and `code`".into(),
             kind: 0,
             timestamp: "2026-11-19T00:00:00Z".into(),
+            ..Default::default()
         });
         let _ = ChannelKind::GuildText;
         session
@@ -250,7 +251,7 @@ mod tests {
             parent_id: None,
             position: 0,
             recipient_ids: Vec::new(),
-            avatar: None,
+            ..Default::default()
         };
     }
 }

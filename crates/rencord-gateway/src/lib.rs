@@ -4,14 +4,18 @@
 //! still compress, and is covered by a unit test. Live Discord traffic is not
 //! contacted from tests; a local websocket stands in for the gateway.
 
+mod shape;
+
 use flate2::{Decompress, FlushDecompress};
 use futures_util::{SinkExt, StreamExt};
-use rencord_model::{Message, Snowflake, User};
+use rencord_model::{Member, Message, PresenceStatus, Role, Snowflake, User};
 use rencord_protocol::{
     heartbeat_payload, identify_payload, resume_payload, voice_state_update, GatewayFrame,
     GatewayOpcode, HelloData, ReadyData, VoiceServerUpdate, VoiceStateDispatch, WireChannel,
     WireMessage,
 };
+// The store applies these, so it takes the type from here.
+pub use rencord_protocol::MessagePatch;
 use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -79,7 +83,7 @@ pub enum GatewayEvent {
         voice_states: Vec<ReadyVoice>,
     },
     MessageCreate(Message),
-    MessageUpdate(Message),
+    MessageUpdate(MessagePatch),
     MessageDelete {
         channel_id: Snowflake,
         message_id: Snowflake,
@@ -88,9 +92,36 @@ pub enum GatewayEvent {
         id: Snowflake,
         name: Option<String>,
         icon: Option<String>,
+        /// None when the event did not mention a banner. Some(None) clears it.
+        banner: Option<Option<String>>,
+        /// None when the event carried no role list at all.
+        roles: Option<Vec<Role>>,
+        members: Vec<(Snowflake, Member)>,
+        presences: Vec<(Snowflake, PresenceStatus)>,
         channels: Vec<rencord_model::Channel>,
     },
     GuildDelete(Snowflake),
+    Presence {
+        user_id: Snowflake,
+        status: PresenceStatus,
+    },
+    MemberUpdate {
+        guild_id: Snowflake,
+        user_id: Snowflake,
+        member: Member,
+    },
+    MembersChunk {
+        guild_id: Snowflake,
+        members: Vec<(Snowflake, Member)>,
+    },
+    RoleUpsert {
+        guild_id: Snowflake,
+        role: Role,
+    },
+    RoleDelete {
+        guild_id: Snowflake,
+        role_id: Snowflake,
+    },
     ChannelUpsert(rencord_model::Channel),
     ChannelDelete(Snowflake),
     Reaction {
@@ -336,6 +367,7 @@ async fn run_socket(
     let (socket, _) = connect_async(url.as_str()).await?;
     let (mut write, mut read) = socket.split();
     let mut inflater = ZlibStream::new();
+    let mut shape_log = shape::ShapeLog::from_env();
     let mut ticker: Option<tokio::time::Interval> = None;
     let mut awaiting_ack = false;
 
@@ -415,6 +447,9 @@ async fn run_socket(
                                 .get("resume_gateway_url")
                                 .and_then(Value::as_str)
                                 .map(str::to_owned);
+                        }
+                        if let Some(log) = shape_log.as_mut() {
+                            log.record(&name, &frame.data);
                         }
                         match decode_dispatch(&name, frame.data) {
                             Ok(Some(event)) => {
@@ -499,6 +534,52 @@ fn decode_dispatch(name: &str, data: Value) -> Result<Option<GatewayEvent>, Gate
         }
         "GUILD_CREATE" | "GUILD_UPDATE" => guild_upsert(&data)?,
         "GUILD_DELETE" => snowflake_field(&data, "id")?.map(GatewayEvent::GuildDelete),
+        "PRESENCE_UPDATE" => serde_json::from_value::<rencord_protocol::WirePresence>(data)
+            .ok()
+            .and_then(rencord_protocol::WirePresence::into_entry)
+            .map(|(user_id, status)| GatewayEvent::Presence { user_id, status }),
+        "GUILD_MEMBER_ADD" | "GUILD_MEMBER_UPDATE" => {
+            let Some(guild_id) = snowflake_field(&data, "guild_id")? else {
+                return Ok(None);
+            };
+            serde_json::from_value::<rencord_protocol::WireGuildMember>(data)
+                .ok()
+                .and_then(rencord_protocol::WireGuildMember::into_entry)
+                .map(|(user_id, member)| GatewayEvent::MemberUpdate {
+                    guild_id,
+                    user_id,
+                    member,
+                })
+        }
+        "GUILD_MEMBERS_CHUNK" => {
+            let Some(guild_id) = snowflake_field(&data, "guild_id")? else {
+                return Ok(None);
+            };
+            let members = rencord_protocol::lenient_list::<rencord_protocol::WireGuildMember>(
+                data.get("members"),
+            );
+            Some(GatewayEvent::MembersChunk {
+                guild_id,
+                members: rencord_protocol::member_entries(members),
+            })
+        }
+        "GUILD_ROLE_CREATE" | "GUILD_ROLE_UPDATE" => {
+            let Some(guild_id) = snowflake_field(&data, "guild_id")? else {
+                return Ok(None);
+            };
+            data.get("role")
+                .and_then(|role| serde_json::from_value::<Role>(role.clone()).ok())
+                .map(|role| GatewayEvent::RoleUpsert { guild_id, role })
+        }
+        "GUILD_ROLE_DELETE" => {
+            let (Some(guild_id), Some(role_id)) = (
+                snowflake_field(&data, "guild_id")?,
+                snowflake_field(&data, "role_id")?,
+            ) else {
+                return Ok(None);
+            };
+            Some(GatewayEvent::RoleDelete { guild_id, role_id })
+        }
         "CHANNEL_CREATE" | "CHANNEL_UPDATE" => channel_upsert(&data)?,
         "CHANNEL_DELETE" => snowflake_field(&data, "id")?.map(GatewayEvent::ChannelDelete),
         "MESSAGE_REACTION_ADD" | "MESSAGE_REACTION_REMOVE" => reaction(name, &data)?,
@@ -513,15 +594,14 @@ fn decode_dispatch(name: &str, data: Value) -> Result<Option<GatewayEvent>, Gate
                 message_id,
             })
         }
-        "MESSAGE_CREATE" | "MESSAGE_UPDATE" => {
+        "MESSAGE_CREATE" => {
             let wire: WireMessage = serde_json::from_value(data)?;
-            let message = Message::from(wire);
-            Some(if name == "MESSAGE_CREATE" {
-                GatewayEvent::MessageCreate(message)
-            } else {
-                GatewayEvent::MessageUpdate(message)
-            })
+            Some(GatewayEvent::MessageCreate(Message::from(wire)))
         }
+        // Often only what changed (an embed resolving), with no author.
+        "MESSAGE_UPDATE" => Some(GatewayEvent::MessageUpdate(MessagePatch::from_value(
+            &data,
+        )?)),
         "VOICE_STATE_UPDATE" => Some(GatewayEvent::VoiceState(serde_json::from_value(data)?)),
         "VOICE_SERVER_UPDATE" => Some(GatewayEvent::VoiceServer(serde_json::from_value(data)?)),
         other if !other.is_empty() => Some(GatewayEvent::Other {
@@ -552,6 +632,24 @@ fn guild_upsert(data: &Value) -> Result<Option<GatewayEvent>, GatewayError> {
         .get("icon")
         .and_then(|value| value.as_str())
         .map(str::to_owned);
+    let banner = match data.get("banner") {
+        None => None,
+        Some(serde_json::Value::Null) => Some(None),
+        Some(value) => Some(
+            value
+                .as_str()
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned),
+        ),
+    };
+    let roles = data
+        .get("roles")
+        .filter(|value| value.is_array())
+        .map(|value| rencord_protocol::lenient_list::<Role>(Some(value)));
+    let members =
+        rencord_protocol::member_entries(rencord_protocol::lenient_list(data.get("members")));
+    let presences =
+        rencord_protocol::presence_entries(rencord_protocol::lenient_list(data.get("presences")));
     let mut channels = Vec::new();
     if let Some(list) = data.get("channels").and_then(|value| value.as_array()) {
         for item in list {
@@ -569,6 +667,10 @@ fn guild_upsert(data: &Value) -> Result<Option<GatewayEvent>, GatewayError> {
         id,
         name,
         icon,
+        banner,
+        roles,
+        members,
+        presences,
         channels,
     }))
 }
@@ -746,10 +848,12 @@ mod tests {
                 session_id,
                 user,
                 guilds,
+                presences,
                 discord_theme,
                 discord_client_theme,
                 ..
             } => {
+                assert!(presences.is_empty());
                 assert!(discord_theme.is_none());
                 assert!(discord_client_theme.is_none());
                 assert_eq!(session_id, "sess");
@@ -999,7 +1103,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dispatch_that_does_not_decode_is_skipped() {
+    async fn a_bad_dispatch_is_skipped_and_a_partial_update_is_a_patch() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -1008,9 +1112,11 @@ mod tests {
             socket.send(hello(60000)).await.unwrap();
             first_op(&mut socket).await;
             socket.send(ready("sess", "")).await.unwrap();
-            // A partial update with no author, then a normal message.
-            socket.send(text(r#"{"op":0,"t":"MESSAGE_UPDATE","s":2,"d":{"id":"5","channel_id":"8","embeds":[]}}"#)).await.unwrap();
-            socket.send(text(r#"{"op":0,"t":"MESSAGE_CREATE","s":3,"d":{"id":"6","channel_id":"8","content":"still here","timestamp":"t","author":{"id":"9","username":"ada"}}}"#)).await.unwrap();
+            // A new message with no author cannot be shown and is skipped. A partial
+            // update with no author is normal (an embed resolving) and arrives as a patch.
+            socket.send(text(r#"{"op":0,"t":"MESSAGE_CREATE","s":2,"d":{"id":"4","channel_id":"8","content":"no author"}}"#)).await.unwrap();
+            socket.send(text(r#"{"op":0,"t":"MESSAGE_UPDATE","s":3,"d":{"id":"5","channel_id":"8","embeds":[{"title":"Resolved"}]}}"#)).await.unwrap();
+            socket.send(text(r#"{"op":0,"t":"MESSAGE_CREATE","s":4,"d":{"id":"6","channel_id":"8","content":"still here","timestamp":"t","author":{"id":"9","username":"ada"}}}"#)).await.unwrap();
             tokio::time::sleep(Duration::from_millis(200)).await;
         });
         let (mut events, runner, _commands) = start(format!("ws://{addr}"));
@@ -1018,6 +1124,14 @@ mod tests {
             next_event(&mut events).await,
             GatewayEvent::Ready { .. }
         ));
+        match next_event(&mut events).await {
+            GatewayEvent::MessageUpdate(patch) => {
+                assert_eq!(patch.id.get(), 5);
+                assert_eq!(patch.embeds.as_ref().map(|e| e.len()), Some(1));
+                assert!(patch.full.is_none());
+            }
+            other => panic!("expected the patch, got {other:?}"),
+        }
         match next_event(&mut events).await {
             GatewayEvent::MessageCreate(message) => assert_eq!(message.content, "still here"),
             other => panic!("unexpected {other:?}"),
@@ -1125,6 +1239,19 @@ mod tests {
                 "id": "10",
                 "name": "Analytical Engines",
                 "icon": "abc",
+                "banner": "bnr",
+                "roles": [
+                    {"id": "900", "name": "Admin", "color": 15158332, "position": 3, "hoist": true},
+                    "junk"
+                ],
+                "members": [
+                    {"user": {"id": "42"}, "nick": "Boss", "roles": ["900"]},
+                    {"nick": "names no one"}
+                ],
+                "presences": [
+                    {"user": {"id": "42"}, "status": "idle"},
+                    {"status": "online"}
+                ],
                 "channels": [{"id": "100", "type": 0, "name": "general"}]
             }),
         )
@@ -1134,8 +1261,32 @@ mod tests {
                 id,
                 name,
                 icon,
+                banner,
+                roles,
+                members,
+                presences,
                 channels,
             }) => {
+                assert_eq!(banner, Some(Some("bnr".into())));
+                // The junk role and the member that names no one are dropped.
+                let roles = roles.unwrap();
+                assert_eq!(
+                    (
+                        roles.len(),
+                        roles[0].name.as_str(),
+                        roles[0].color,
+                        roles[0].hoist
+                    ),
+                    (1, "Admin", 15158332, true)
+                );
+                assert_eq!(members.len(), 1);
+                assert_eq!(members[0].0.get(), 42);
+                assert_eq!(members[0].1.nickname(), Some("Boss"));
+                assert_eq!(members[0].1.roles, vec![Snowflake::new(900)]);
+                assert_eq!(
+                    presences,
+                    vec![(Snowflake::new(42), rencord_model::PresenceStatus::Idle)]
+                );
                 assert_eq!(id.get(), 10);
                 assert_eq!(name.as_deref(), Some("Analytical Engines"));
                 assert_eq!(icon.as_deref(), Some("abc"));
@@ -1155,5 +1306,84 @@ mod tests {
             reaction,
             Some(GatewayEvent::Reaction { remove: false, .. })
         ));
+    }
+
+    #[test]
+    fn presence_member_and_role_events_decode() {
+        use rencord_model::PresenceStatus;
+        let presence = decode_dispatch(
+            "PRESENCE_UPDATE",
+            serde_json::json!({"user": {"id": "42"}, "status": "dnd", "guild_id": "10"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            presence,
+            Some(GatewayEvent::Presence { user_id, status: PresenceStatus::Dnd }) if user_id.get() == 42
+        ));
+        // `invisible` and anything unknown read as offline.
+        let unknown = decode_dispatch(
+            "PRESENCE_UPDATE",
+            serde_json::json!({"user": {"id": "42"}, "status": "invisible"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            unknown,
+            Some(GatewayEvent::Presence {
+                status: PresenceStatus::Offline,
+                ..
+            })
+        ));
+        let member = decode_dispatch(
+            "GUILD_MEMBER_UPDATE",
+            serde_json::json!({"guild_id": "10", "user": {"id": "42"}, "nick": "Boss", "roles": ["900", "901"]}),
+        )
+        .unwrap();
+        match member {
+            Some(GatewayEvent::MemberUpdate {
+                guild_id,
+                user_id,
+                member,
+            }) => {
+                assert_eq!((guild_id.get(), user_id.get()), (10, 42));
+                assert_eq!(member.nickname(), Some("Boss"));
+                assert_eq!(member.roles.len(), 2);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let chunk = decode_dispatch(
+            "GUILD_MEMBERS_CHUNK",
+            serde_json::json!({"guild_id": "10", "chunk_index": 0, "chunk_count": 1, "members": [
+                {"user": {"id": "1"}, "roles": ["900"]}, {"roles": ["900"]}, "junk"
+            ]}),
+        )
+        .unwrap();
+        assert!(
+            matches!(chunk, Some(GatewayEvent::MembersChunk { members, .. }) if members.len() == 1)
+        );
+        let role = decode_dispatch(
+            "GUILD_ROLE_UPDATE",
+            serde_json::json!({"guild_id": "10", "role": {"id": "900", "name": "Mod", "color": 255, "position": 2}}),
+        )
+        .unwrap();
+        assert!(matches!(role, Some(GatewayEvent::RoleUpsert { role, .. }) if role.color == 255));
+        let gone = decode_dispatch(
+            "GUILD_ROLE_DELETE",
+            serde_json::json!({"guild_id": "10", "role_id": "900"}),
+        )
+        .unwrap();
+        assert!(
+            matches!(gone, Some(GatewayEvent::RoleDelete { role_id, .. }) if role_id.get() == 900)
+        );
+        // An event with no id to attach it to is skipped, never an error.
+        assert!(
+            decode_dispatch("PRESENCE_UPDATE", serde_json::json!({"status": "online"}))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            decode_dispatch("GUILD_ROLE_DELETE", serde_json::json!({"guild_id": "10"}))
+                .unwrap()
+                .is_none()
+        );
     }
 }

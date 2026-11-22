@@ -4,12 +4,15 @@
 //! recent messages and the composer draft so a restart can refill the timeline.
 //! Neither store is encrypted. Tokens live in `rencord-platform`, not here.
 
+use rencord_gateway::{GatewayEvent, MessagePatch};
+use rencord_model::{
+    Channel, ChannelKind, Guild, Member, Message, PresenceStatus, Role, Snowflake, User,
+};
 mod members;
 
 pub use members::{apply_member_list, RosterGroup, RosterMember};
-use rencord_gateway::GatewayEvent;
-use rencord_model::{Channel, ChannelKind, Guild, Message, Snowflake, User};
 use rusqlite::{params, Connection};
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -41,6 +44,9 @@ pub struct Session {
     pub reactions: HashMap<u64, Vec<(String, u32)>>,
     /// Channels with a message that arrived while they were not on screen.
     pub unread: HashSet<Snowflake>,
+    /// What each server knows about its people, by server and then user: the
+    /// nickname and role ids that decide the name shown and its colour.
+    pub members: HashMap<Snowflake, HashMap<Snowflake, Member>>,
     /// Role groups for the guild currently subscribed with opcode 14.
     pub roster: Vec<RosterGroup>,
     /// Last read message id per channel, from READY `read_state`.
@@ -79,6 +85,7 @@ impl Default for Session {
             discord_client_theme: None,
             reactions: HashMap::new(),
             unread: HashSet::new(),
+            members: HashMap::new(),
             roster: Vec::new(),
             read_marker: HashMap::new(),
             mention_counts: HashMap::new(),
@@ -117,11 +124,51 @@ impl Session {
                 id,
                 name,
                 icon,
+                banner,
+                roles,
+                members,
+                presences,
                 channels,
             } => {
-                self.apply_guild(id, name, icon);
+                self.apply_guild(id, name, icon, banner);
+                if let Some(roles) = roles {
+                    self.set_roles(id, roles);
+                }
+                self.members.entry(id).or_default().extend(members);
+                for (user, status) in presences {
+                    self.set_presence(user, status);
+                }
                 for channel in channels {
                     self.upsert_channel(channel);
+                }
+            }
+            GatewayEvent::Presence { user_id, status } => {
+                self.set_presence(user_id, status);
+            }
+            GatewayEvent::MemberUpdate {
+                guild_id,
+                user_id,
+                member,
+            } => {
+                self.members
+                    .entry(guild_id)
+                    .or_default()
+                    .insert(user_id, member);
+            }
+            GatewayEvent::MembersChunk { guild_id, members } => {
+                self.members.entry(guild_id).or_default().extend(members);
+            }
+            GatewayEvent::RoleUpsert { guild_id, role } => {
+                if let Some(guild) = self.guilds.iter_mut().find(|guild| guild.id == guild_id) {
+                    match guild.roles.iter_mut().find(|item| item.id == role.id) {
+                        Some(existing) => *existing = role,
+                        None => guild.roles.push(role),
+                    }
+                }
+            }
+            GatewayEvent::RoleDelete { guild_id, role_id } => {
+                if let Some(guild) = self.guilds.iter_mut().find(|guild| guild.id == guild_id) {
+                    guild.roles.retain(|role| role.id != role_id);
                 }
             }
             GatewayEvent::GuildDelete(id) => self.remove_guild(id),
@@ -145,6 +192,19 @@ impl Session {
             GatewayEvent::MessageCreate(message) => {
                 let channel_id = message.channel_id;
                 let viewing = self.selected_channel == Some(channel_id);
+                // A new message says who the author is in this server. Keep it, so
+                // their older messages show the same name and colour.
+                if let (Some(member), Some(guild)) = (
+                    message.member.clone(),
+                    self.channels
+                        .get(&channel_id)
+                        .and_then(|channel| channel.guild_id),
+                ) {
+                    self.members
+                        .entry(guild)
+                        .or_default()
+                        .insert(message.author.id, member);
+                }
                 self.insert_message(message);
                 if !viewing {
                     self.unread.insert(channel_id);
@@ -158,16 +218,8 @@ impl Session {
                     list.retain(|message| message.id != message_id);
                 }
             }
-            GatewayEvent::MessageUpdate(message) => {
-                if let Some(list) = self.messages.get_mut(&message.channel_id) {
-                    if let Some(existing) = list.iter_mut().find(|item| item.id == message.id) {
-                        *existing = message;
-                        return;
-                    }
-                }
-                let channel_id = message.channel_id;
-                self.messages.entry(channel_id).or_default().push(message);
-            }
+            GatewayEvent::MessageUpdate(patch) => self.apply_patch(patch),
+
             GatewayEvent::VoiceState(state) => {
                 if self
                     .user
@@ -228,7 +280,17 @@ impl Session {
     fn upsert_ready_guild(&mut self, guild: rencord_protocol::ReadyGuild) {
         let channels = guild.channels;
         let id = guild.id;
-        self.apply_guild(id, guild.name, guild.icon);
+        self.apply_guild(id, guild.name, guild.icon, guild.banner.map(Some));
+        if !guild.roles.is_empty() {
+            self.set_roles(id, guild.roles);
+        }
+        self.members
+            .entry(id)
+            .or_default()
+            .extend(rencord_protocol::member_entries(guild.members));
+        for (user, status) in rencord_protocol::presence_entries(guild.presences) {
+            self.set_presence(user, status);
+        }
         for wire in channels {
             let mut channel = wire.into_channel();
             if channel.guild_id.is_none() {
@@ -238,7 +300,13 @@ impl Session {
         }
     }
 
-    fn apply_guild(&mut self, id: Snowflake, name: Option<String>, icon: Option<String>) {
+    fn apply_guild(
+        &mut self,
+        id: Snowflake,
+        name: Option<String>,
+        icon: Option<String>,
+        banner: Option<Option<String>>,
+    ) {
         if let Some(existing) = self.guilds.iter_mut().find(|guild| guild.id == id) {
             if let Some(name) = name {
                 existing.name = name;
@@ -246,15 +314,24 @@ impl Session {
             if icon.is_some() {
                 existing.icon = icon;
             }
+            if let Some(banner) = banner {
+                existing.banner = banner;
+            }
             return;
         }
         self.guilds.push(Guild {
             id,
             name: name.unwrap_or_else(|| format!("Guild {id}")),
             icon,
-            banner: None,
-            folder: None,
+            banner: banner.flatten(),
+            ..Default::default()
         });
+    }
+
+    fn set_roles(&mut self, guild_id: Snowflake, roles: Vec<Role>) {
+        if let Some(guild) = self.guilds.iter_mut().find(|guild| guild.id == guild_id) {
+            guild.roles = roles;
+        }
     }
 
     pub fn remove_guild(&mut self, id: Snowflake) {
@@ -266,6 +343,109 @@ impl Session {
             self.selected_channel = self
                 .selected_guild
                 .and_then(|guild| self.guild_channels(guild).into_iter().next().map(|c| c.id));
+        }
+    }
+
+    /// A `MESSAGE_UPDATE`. Discord often sends only the fields that changed, so
+    /// those are merged into the stored message instead of replacing it.
+    fn apply_patch(&mut self, patch: MessagePatch) {
+        let MessagePatch {
+            id,
+            channel_id,
+            content,
+            edited_timestamp,
+            embeds,
+            attachments,
+            mentions,
+            reply_in_payload,
+            full,
+        } = patch;
+        let existing = self
+            .messages
+            .get_mut(&channel_id)
+            .and_then(|list| list.iter_mut().find(|item| item.id == id));
+        match (existing, full) {
+            (Some(existing), Some(full)) => {
+                let reply = full.reply_to.clone();
+                existing.author = full.author;
+                if let Some(member) = full.member {
+                    existing.member = Some(member);
+                }
+                Self::merge_present(
+                    existing,
+                    content,
+                    edited_timestamp,
+                    embeds,
+                    attachments,
+                    mentions,
+                );
+                if reply_in_payload {
+                    existing.reply_to = reply;
+                }
+            }
+            (Some(existing), None) => {
+                Self::merge_present(
+                    existing,
+                    content,
+                    edited_timestamp,
+                    embeds,
+                    attachments,
+                    mentions,
+                );
+            }
+            // A message that was never loaded is only worth keeping whole.
+            (None, Some(full)) => self.insert_message(full),
+            (None, None) => {}
+        }
+    }
+
+    /// Copies only the fields an update actually carried.
+    fn merge_present(
+        existing: &mut Message,
+        content: Option<String>,
+        edited_timestamp: Option<String>,
+        embeds: Option<Vec<rencord_model::Embed>>,
+        attachments: Option<Vec<rencord_model::Attachment>>,
+        mentions: Option<Vec<User>>,
+    ) {
+        if let Some(content) = content {
+            existing.content = content;
+        }
+        if let Some(edited) = edited_timestamp {
+            existing.edited_timestamp = Some(edited);
+        }
+        if let Some(embeds) = embeds {
+            existing.embeds = embeds;
+        }
+        if let Some(attachments) = attachments {
+            existing.attachments = attachments;
+        }
+        if let Some(mentions) = mentions {
+            existing.mentions = mentions;
+        }
+    }
+
+    /// Reaction counts a fetched message already carries. Gateway events keep
+    /// them current from there.
+    fn seed_reactions(&mut self, message: &Message) {
+        if message.reactions.is_empty() || self.reactions.contains_key(&message.id.get()) {
+            return;
+        }
+        let counts: Vec<(String, u32)> = message
+            .reactions
+            .iter()
+            .filter(|reaction| reaction.count > 0)
+            .filter_map(|reaction| {
+                let name = reaction
+                    .emoji
+                    .name
+                    .clone()
+                    .filter(|name| !name.is_empty())?;
+                Some((name, reaction.count))
+            })
+            .collect();
+        if !counts.is_empty() {
+            self.reactions.insert(message.id.get(), counts);
         }
     }
 
@@ -288,6 +468,7 @@ impl Session {
     }
 
     pub fn insert_message(&mut self, message: Message) {
+        self.seed_reactions(&message);
         let list = self.messages.entry(message.channel_id).or_default();
         if list.iter().any(|item| item.id == message.id) {
             return;
@@ -302,6 +483,9 @@ impl Session {
     /// Adds fetched or confirmed messages. Snowflakes grow with time, so the
     /// channel stays in id order with no duplicates however they arrive.
     pub fn merge_history(&mut self, channel_id: Snowflake, messages: Vec<Message>) {
+        for message in &messages {
+            self.seed_reactions(message);
+        }
         let list = self.messages.entry(channel_id).or_default();
         list.extend(
             messages
@@ -369,6 +553,12 @@ impl Session {
             .get(&channel_id)
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    /// A presence update changes the status and keeps the activity line READY gave.
+    fn set_presence(&mut self, user: Snowflake, status: PresenceStatus) {
+        let entry = self.presences.entry(user.get()).or_default();
+        entry.0 = status.as_wire().to_owned();
     }
 
     /// Home is the direct-message list. A guild's sidebar does not include it.
@@ -471,15 +661,15 @@ impl Session {
             id: Snowflake::new(10),
             name: "Analytical Engines".into(),
             icon: None,
-            banner: None,
-            folder: None,
+            // A made-up hash; the desktop demo seeds a picture for it.
+            banner: Some("demo".into()),
+            ..Default::default()
         });
         session.upsert_guild(Guild {
             id: Snowflake::new(11),
             name: "Difference Club".into(),
             icon: None,
-            banner: None,
-            folder: None,
+            ..Default::default()
         });
         session.upsert_channel(Channel {
             id: Snowflake::new(100),
@@ -489,7 +679,7 @@ impl Session {
             parent_id: None,
             position: 0,
             recipient_ids: Vec::new(),
-            avatar: None,
+            ..Default::default()
         });
         session.upsert_channel(Channel {
             id: Snowflake::new(101),
@@ -499,7 +689,7 @@ impl Session {
             parent_id: None,
             position: 1,
             recipient_ids: Vec::new(),
-            avatar: None,
+            ..Default::default()
         });
         session.upsert_channel(Channel {
             id: Snowflake::new(110),
@@ -509,7 +699,7 @@ impl Session {
             parent_id: None,
             position: 0,
             recipient_ids: Vec::new(),
-            avatar: None,
+            ..Default::default()
         });
         session.upsert_channel(Channel {
             id: Snowflake::new(200),
@@ -519,7 +709,7 @@ impl Session {
             parent_id: None,
             position: 0,
             recipient_ids: vec![Snowflake::new(2)],
-            avatar: None,
+            ..Default::default()
         });
         session.insert_message(Message {
             id: Snowflake::new(1000),
@@ -529,6 +719,7 @@ impl Session {
                 .into(),
             kind: 0,
             timestamp: "2026-11-20T00:00:00Z".into(),
+            ..Default::default()
         });
         session.insert_message(Message {
             id: Snowflake::new(2000),
@@ -544,6 +735,7 @@ impl Session {
             content: "The voice channel is the one named voice.".into(),
             kind: 0,
             timestamp: "2026-11-20T00:01:00Z".into(),
+            ..Default::default()
         });
         session.select_guild(Snowflake::new(10));
         session
@@ -639,6 +831,7 @@ mod tests {
             content: content.into(),
             timestamp: "2026-11-21T18:00:00Z".into(),
             kind: 0,
+            ..Default::default()
         }
     }
 
@@ -690,6 +883,7 @@ mod tests {
             content: "live".into(),
             kind: 0,
             timestamp: "t".into(),
+            ..Default::default()
         }));
         let messages = session.messages_for(Snowflake::new(100));
         assert_eq!(messages.last().unwrap().content, "live");
@@ -707,6 +901,7 @@ mod tests {
             content: "notes".into(),
             kind: 0,
             timestamp: "t".into(),
+            ..Default::default()
         }));
         assert!(session.unread.contains(&Snowflake::new(110)));
         session.select_channel(Snowflake::new(110));
@@ -718,6 +913,7 @@ mod tests {
             content: "back in general".into(),
             kind: 0,
             timestamp: "t".into(),
+            ..Default::default()
         }));
         assert!(session.unread.contains(&Snowflake::new(100)));
         session.select_guild(Snowflake::new(10));
@@ -736,6 +932,7 @@ mod tests {
             content: id.to_string(),
             kind: 0,
             timestamp: "t".into(),
+            ..Default::default()
         };
         // A live message arrives first; history comes back newest-first.
         session.insert_message(at(30));
@@ -767,6 +964,7 @@ mod tests {
             content: id.to_string(),
             kind: 0,
             timestamp: "t".into(),
+            ..Default::default()
         };
         for id in 50..4050 {
             session.insert_message(at(id));
@@ -800,6 +998,10 @@ mod tests {
                 id: Snowflake::new(10),
                 name: None,
                 icon: None,
+                banner: None,
+                roles: Vec::new(),
+                members: Vec::new(),
+                presences: Vec::new(),
                 unavailable: true,
                 channels: Vec::new(),
             }],
@@ -814,6 +1016,10 @@ mod tests {
             id: Snowflake::new(10),
             name: Some("Analytical Engines".into()),
             icon: Some("abc".into()),
+            banner: Some(Some("bnr".into())),
+            roles: None,
+            members: Vec::new(),
+            presences: Vec::new(),
             channels: vec![Channel {
                 id: Snowflake::new(100),
                 name: "general".into(),
@@ -822,11 +1028,23 @@ mod tests {
                 parent_id: None,
                 position: 0,
                 recipient_ids: Vec::new(),
-                avatar: None,
+                ..Default::default()
             }],
         });
         assert_eq!(session.guilds[0].name, "Analytical Engines");
         assert_eq!(session.guilds[0].icon.as_deref(), Some("abc"));
+        assert_eq!(session.guilds[0].banner.as_deref(), Some("bnr"));
+        session.apply_gateway(GatewayEvent::GuildUpsert {
+            id: Snowflake::new(10),
+            name: None,
+            icon: None,
+            banner: Some(None),
+            roles: None,
+            members: Vec::new(),
+            presences: Vec::new(),
+            channels: Vec::new(),
+        });
+        assert!(session.guilds[0].banner.is_none());
         assert_eq!(session.channels[&Snowflake::new(100)].guild_id, None);
         session.apply_gateway(GatewayEvent::ChannelUpsert(Channel {
             id: Snowflake::new(100),
@@ -836,7 +1054,7 @@ mod tests {
             parent_id: None,
             position: 1,
             recipient_ids: Vec::new(),
-            avatar: None,
+            ..Default::default()
         }));
         assert_eq!(session.channels[&Snowflake::new(100)].name, "lounge");
         session.apply_gateway(GatewayEvent::Reaction {
@@ -875,5 +1093,245 @@ mod tests {
             Some("draft")
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    fn stored(id: u64, content: &str) -> Message {
+        Message {
+            id: Snowflake::new(id),
+            channel_id: Snowflake::new(8),
+            author: User {
+                id: Snowflake::new(1),
+                username: "ada".into(),
+                ..Default::default()
+            },
+            content: content.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_partial_update_merges_into_the_message_and_keeps_the_rest() {
+        let mut session = Session::default();
+        session.insert_message(stored(5, "see this https://example.test"));
+        session.apply_gateway(GatewayEvent::MessageUpdate(MessagePatch {
+            id: Snowflake::new(5),
+            channel_id: Snowflake::new(8),
+            embeds: Some(vec![rencord_model::Embed {
+                title: Some("Resolved".into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }));
+        let message = &session.messages[&Snowflake::new(8)][0];
+        // The embed arrived, and the text and author were not lost.
+        assert_eq!(message.embeds[0].title.as_deref(), Some("Resolved"));
+        assert_eq!(message.content, "see this https://example.test");
+        assert_eq!(message.author.username, "ada");
+        session.apply_gateway(GatewayEvent::MessageUpdate(MessagePatch {
+            id: Snowflake::new(5),
+            channel_id: Snowflake::new(8),
+            content: Some("edited".into()),
+            edited_timestamp: Some("2026-11-20T01:00:00+00:00".into()),
+            ..Default::default()
+        }));
+        let message = &session.messages[&Snowflake::new(8)][0];
+        assert_eq!(message.content, "edited");
+        assert!(message.edited_timestamp.is_some());
+        assert_eq!(message.embeds.len(), 1);
+    }
+
+    #[test]
+    fn an_author_bearing_update_keeps_a_file_and_a_reply_it_does_not_mention() {
+        let mut session = Session::default();
+        let mut message = stored(5, "look");
+        message.attachments = vec![rencord_model::Attachment {
+            id: Snowflake::new(70),
+            filename: "shot.png".into(),
+            url: "https://cdn.discordapp.com/shot.png".into(),
+            ..Default::default()
+        }];
+        message.reply_to = Some(rencord_model::Reply {
+            message_id: Snowflake::new(4),
+            content: Some("earlier".into()),
+            ..Default::default()
+        });
+        session.insert_message(message);
+        let patch = rencord_protocol::MessagePatch::from_value(&serde_json::json!({
+            "id": "5",
+            "channel_id": "8",
+            "author": {"id": "1", "username": "ada"},
+            "content": "look again"
+        }))
+        .unwrap();
+        session.apply_gateway(GatewayEvent::MessageUpdate(patch));
+        let message = &session.messages[&Snowflake::new(8)][0];
+        assert_eq!(message.content, "look again");
+        assert_eq!(message.attachments.len(), 1);
+        assert_eq!(message.reply_to.as_ref().unwrap().message_id.get(), 4);
+    }
+
+    #[test]
+    fn an_update_for_a_message_not_loaded_is_kept_only_when_whole() {
+        let mut session = Session::default();
+        session.apply_gateway(GatewayEvent::MessageUpdate(MessagePatch {
+            id: Snowflake::new(9),
+            channel_id: Snowflake::new(8),
+            embeds: Some(Vec::new()),
+            ..Default::default()
+        }));
+        assert!(session
+            .messages
+            .get(&Snowflake::new(8))
+            .is_none_or(Vec::is_empty));
+        session.apply_gateway(GatewayEvent::MessageUpdate(MessagePatch {
+            id: Snowflake::new(9),
+            channel_id: Snowflake::new(8),
+            full: Some(stored(9, "whole")),
+            ..Default::default()
+        }));
+        assert_eq!(session.messages[&Snowflake::new(8)][0].content, "whole");
+    }
+
+    #[test]
+    fn reactions_on_fetched_history_are_counted_and_stay_live() {
+        let mut session = Session::default();
+        let mut message = stored(5, "popular");
+        message.reactions = vec![
+            rencord_model::MessageReaction {
+                count: 2,
+                me: true,
+                emoji: rencord_model::ReactionEmoji {
+                    id: None,
+                    name: Some("\u{1F44D}".into()),
+                },
+            },
+            rencord_model::MessageReaction {
+                count: 1,
+                me: false,
+                emoji: rencord_model::ReactionEmoji {
+                    id: Some(Snowflake::new(900)),
+                    name: Some("pepe".into()),
+                },
+            },
+            rencord_model::MessageReaction {
+                count: 0,
+                me: false,
+                emoji: rencord_model::ReactionEmoji {
+                    id: None,
+                    name: Some("gone".into()),
+                },
+            },
+        ];
+        session.merge_history(Snowflake::new(8), vec![message]);
+        assert_eq!(
+            session.reactions[&5],
+            vec![("\u{1F44D}".to_owned(), 2), ("pepe".to_owned(), 1)]
+        );
+        session.apply_gateway(GatewayEvent::Reaction {
+            message_id: Snowflake::new(5),
+            emoji: "\u{1F44D}".into(),
+            remove: false,
+        });
+        assert_eq!(session.reactions[&5][0].1, 3);
+    }
+
+    fn session_with_a_server() -> Session {
+        let mut session = Session::default();
+        session.upsert_guild(Guild {
+            id: Snowflake::new(10),
+            name: "Engines".into(),
+            ..Default::default()
+        });
+        session.upsert_channel(Channel {
+            id: Snowflake::new(8),
+            name: "general".into(),
+            kind: ChannelKind::GuildText,
+            guild_id: Some(Snowflake::new(10)),
+            ..Default::default()
+        });
+        session
+    }
+
+    #[test]
+    fn roles_members_and_presence_follow_the_gateway() {
+        use rencord_model::{Member, PresenceStatus, Role};
+        let mut session = session_with_a_server();
+        let role = |id: u64, color: u32| Role {
+            id: Snowflake::new(id),
+            name: format!("role-{id}"),
+            color,
+            position: id as i32,
+            hoist: false,
+        };
+        session.apply_gateway(GatewayEvent::RoleUpsert {
+            guild_id: Snowflake::new(10),
+            role: role(900, 255),
+        });
+        session.apply_gateway(GatewayEvent::RoleUpsert {
+            guild_id: Snowflake::new(10),
+            role: role(900, 65280),
+        });
+        session.apply_gateway(GatewayEvent::RoleUpsert {
+            guild_id: Snowflake::new(10),
+            role: role(901, 1),
+        });
+        assert_eq!(session.guilds[0].roles.len(), 2);
+        assert_eq!(session.guilds[0].roles[0].color, 65280);
+        session.apply_gateway(GatewayEvent::RoleDelete {
+            guild_id: Snowflake::new(10),
+            role_id: Snowflake::new(901),
+        });
+        assert_eq!(session.guilds[0].roles.len(), 1);
+
+        let boss = Member {
+            nick: Some("Boss".into()),
+            roles: vec![Snowflake::new(900)],
+        };
+        session.apply_gateway(GatewayEvent::MemberUpdate {
+            guild_id: Snowflake::new(10),
+            user_id: Snowflake::new(42),
+            member: boss.clone(),
+        });
+        assert_eq!(
+            session.members[&Snowflake::new(10)][&Snowflake::new(42)],
+            boss
+        );
+        session.apply_gateway(GatewayEvent::MembersChunk {
+            guild_id: Snowflake::new(10),
+            members: vec![(Snowflake::new(43), Member::default())],
+        });
+        assert_eq!(session.members[&Snowflake::new(10)].len(), 2);
+
+        session.apply_gateway(GatewayEvent::Presence {
+            user_id: Snowflake::new(42),
+            status: PresenceStatus::Idle,
+        });
+        assert_eq!(session.presences[&42].0, "idle");
+        session.apply_gateway(GatewayEvent::Presence {
+            user_id: Snowflake::new(42),
+            status: PresenceStatus::Offline,
+        });
+        assert_eq!(session.presences[&42].0, "offline");
+    }
+
+    #[test]
+    fn a_new_message_teaches_the_store_who_its_author_is_in_the_server() {
+        use rencord_model::Member;
+        let mut session = session_with_a_server();
+        let mut message = stored(5, "hello");
+        message.member = Some(Member {
+            nick: Some("Boss".into()),
+            roles: vec![Snowflake::new(900)],
+        });
+        session.apply_gateway(GatewayEvent::MessageCreate(message));
+        // Their older messages can now show the same name and colour.
+        let known = &session.members[&Snowflake::new(10)][&Snowflake::new(1)];
+        assert_eq!(known.nickname(), Some("Boss"));
+        // A message in a channel that belongs to no server learns nothing.
+        let mut dm = stored(6, "dm");
+        dm.channel_id = Snowflake::new(999);
+        dm.member = Some(Member::default());
+        session.apply_gateway(GatewayEvent::MessageCreate(dm));
+        assert_eq!(session.members.len(), 1);
     }
 }

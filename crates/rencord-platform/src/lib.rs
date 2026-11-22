@@ -23,14 +23,25 @@ pub enum PlatformError {
 }
 
 pub fn data_dir() -> PathBuf {
-    if let Ok(override_dir) = std::env::var("RENCORD_DATA_DIR") {
-        return PathBuf::from(override_dir);
+    data_dir_from(|name| std::env::var_os(name))
+}
+
+/// The lookup is a parameter so tests do not touch the real environment.
+fn data_dir_from(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(dir) = var("RENCORD_DATA_DIR") {
+        return PathBuf::from(dir);
     }
-    let base = std::env::var_os("XDG_DATA_HOME")
+    // Windows sets neither XDG_DATA_HOME nor HOME. Without this the folder was
+    // relative to the working directory, which is the install folder for a Start
+    // Menu shortcut, and an all-users install under Program Files is read-only.
+    // The uninstaller also looks in %APPDATA%\rencord.
+    #[cfg(windows)]
+    if let Some(appdata) = var("APPDATA") {
+        return PathBuf::from(appdata).join("rencord");
+    }
+    let base = var("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local").join("share"))
-        })
+        .or_else(|| var("HOME").map(|home| PathBuf::from(home).join(".local").join("share")))
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("rencord")
 }
@@ -86,6 +97,54 @@ pub const SYMBOLIC_ICON_SVG: &str = include_str!("../../../assets/brand/hexwave-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env<'a>(
+        pairs: &'a [(&'a str, &'a str)],
+    ) -> impl Fn(&str) -> Option<std::ffi::OsString> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| std::ffi::OsString::from(value))
+        }
+    }
+
+    #[test]
+    fn the_override_wins_over_every_other_variable() {
+        let dir = data_dir_from(env(&[
+            ("RENCORD_DATA_DIR", "/custom"),
+            ("APPDATA", "/appdata"),
+            ("XDG_DATA_HOME", "/xdg"),
+        ]));
+        assert_eq!(dir, PathBuf::from("/custom"));
+    }
+
+    #[test]
+    fn xdg_then_home_are_used_off_windows() {
+        let xdg = data_dir_from(env(&[("XDG_DATA_HOME", "/xdg"), ("HOME", "/home/a")]));
+        assert_eq!(xdg, PathBuf::from("/xdg").join("rencord"));
+        let home = data_dir_from(env(&[("HOME", "/home/a")]));
+        assert_eq!(
+            home,
+            PathBuf::from("/home/a")
+                .join(".local")
+                .join("share")
+                .join("rencord")
+        );
+    }
+
+    /// On Windows neither XDG_DATA_HOME nor HOME is set. This used to return a
+    /// path relative to the working directory.
+    #[cfg(windows)]
+    #[test]
+    fn windows_uses_appdata_not_the_working_directory() {
+        let dir = data_dir_from(env(&[("APPDATA", r"C:\Users\ada\AppData\Roaming")]));
+        assert_eq!(
+            dir,
+            PathBuf::from(r"C:\Users\ada\AppData\Roaming").join("rencord")
+        );
+        assert!(dir.is_absolute());
+    }
 
     #[test]
     fn a_legacy_token_file_is_read_then_cleared() {

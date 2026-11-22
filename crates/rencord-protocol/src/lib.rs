@@ -4,8 +4,11 @@
 //! browser fingerprint.
 
 use base64::Engine;
-use rencord_model::{ChannelKind, Message, Snowflake, User};
-use serde::{Deserialize, Serialize};
+use rencord_model::{
+    Attachment, ChannelKind, Embed, Member, Message, MessageReaction, PresenceStatus, Reply, Role,
+    Snowflake, User,
+};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 
 pub const GATEWAY_VERSION: u8 = 10;
@@ -259,6 +262,9 @@ pub struct ReadyData {
     pub user: User,
     #[serde(default)]
     pub guilds: Vec<ReadyGuild>,
+    /// Presences of friends and the people you have DMs with.
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub presences: Vec<WirePresence>,
     /// Legacy JSON settings. Newer clients send a protobuf instead. When this
     /// object is present, Rencord may use it once as a local starting theme.
     #[serde(default)]
@@ -280,6 +286,15 @@ pub struct ReadyGuild {
     pub name: Option<String>,
     #[serde(default)]
     pub icon: Option<String>,
+    #[serde(default)]
+    pub banner: Option<String>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub roles: Vec<Role>,
+    /// Limited for a user account: people you share a relationship or a voice call with.
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub members: Vec<WireGuildMember>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub presences: Vec<WirePresence>,
     #[serde(default)]
     pub unavailable: bool,
     #[serde(default)]
@@ -349,10 +364,109 @@ impl WireChannel {
             guild_id: self.guild_id,
             parent_id: self.parent_id,
             position: self.position,
-            recipient_ids: self.recipients.into_iter().map(|user| user.id).collect(),
+            recipient_ids: self.recipients.iter().map(|user| user.id).collect(),
             avatar,
         }
     }
+}
+
+/// A list where an element that does not decode is dropped. One odd attachment
+/// or embed must not cost the whole message, and nothing from another user may
+/// stop a page of history from loading.
+fn lenient_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let values: Option<Vec<Value>> = Option::deserialize(deserializer)?;
+    Ok(values
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect())
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct WireUserId {
+    #[serde(default)]
+    pub id: Snowflake,
+}
+
+/// A server member as READY, GUILD_CREATE and the member events carry it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct WireGuildMember {
+    #[serde(default)]
+    pub user: Option<WireUserId>,
+    #[serde(default)]
+    pub nick: Option<String>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub roles: Vec<Snowflake>,
+}
+
+impl WireGuildMember {
+    /// The user's id and what the server knows about them. `None` when the
+    /// entry does not say whose it is.
+    pub fn into_entry(self) -> Option<(Snowflake, Member)> {
+        let id = self.user?.id;
+        (id.get() != 0).then_some((
+            id,
+            Member {
+                nick: self.nick,
+                roles: self.roles,
+            },
+        ))
+    }
+}
+
+/// A presence as READY, GUILD_CREATE and PRESENCE_UPDATE carry it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct WirePresence {
+    #[serde(default)]
+    pub user: Option<WireUserId>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+impl WirePresence {
+    pub fn into_entry(self) -> Option<(Snowflake, PresenceStatus)> {
+        let id = self.user?.id;
+        let status = self.status?;
+        (id.get() != 0).then(|| (id, PresenceStatus::from_wire(&status)))
+    }
+}
+
+/// The elements of a JSON array that decode, dropping the ones that do not.
+pub fn lenient_list<T: serde::de::DeserializeOwned>(value: Option<&Value>) -> Vec<T> {
+    value
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| serde_json::from_value(item.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Members from a list, dropping any entry that does not say whose it is.
+pub fn member_entries(members: Vec<WireGuildMember>) -> Vec<(Snowflake, Member)> {
+    members
+        .into_iter()
+        .filter_map(WireGuildMember::into_entry)
+        .collect()
+}
+
+pub fn presence_entries(presences: Vec<WirePresence>) -> Vec<(Snowflake, PresenceStatus)> {
+    presences
+        .into_iter()
+        .filter_map(WirePresence::into_entry)
+        .collect()
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct WireReference {
+    #[serde(default)]
+    pub message_id: Option<Snowflake>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -365,207 +479,131 @@ pub struct WireMessage {
     #[serde(default)]
     pub timestamp: String,
     #[serde(default, rename = "type")]
-    pub kind: u8,
-    #[serde(default)]
-    pub mentions: Vec<User>,
-    #[serde(default)]
-    pub mention_channels: Vec<MentionChannel>,
+    pub kind: u64,
     #[serde(default)]
     pub edited_timestamp: Option<String>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub attachments: Vec<Attachment>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub embeds: Vec<Embed>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub reactions: Vec<MessageReaction>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub mentions: Vec<User>,
     #[serde(default)]
-    pub attachments: Vec<WireFile>,
+    pub message_reference: Option<WireReference>,
+    /// Kept raw: it is the replied-to message, and it may be null, deleted,
+    /// or missing an author. Only its author and text are read.
     #[serde(default)]
-    pub embeds: Vec<WireEmbed>,
+    pub referenced_message: Option<Value>,
+    /// The author's server nickname and roles. Kept raw so an odd one cannot cost the message.
     #[serde(default)]
-    pub sticker_items: Vec<WireSticker>,
-    #[serde(default)]
-    pub message_reference: Option<WireRef>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MentionChannel {
-    pub id: Snowflake,
-    #[serde(default)]
-    pub name: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireFile {
-    #[serde(default)]
-    pub url: String,
-    #[serde(default)]
-    pub proxy_url: String,
-    #[serde(default)]
-    pub content_type: Option<String>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireEmbed {
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub image: Option<WireMedia>,
-    #[serde(default)]
-    pub thumbnail: Option<WireMedia>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireMedia {
-    #[serde(default)]
-    pub url: String,
-    #[serde(default)]
-    pub proxy_url: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireSticker {
-    #[serde(default)]
-    pub name: String,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireRef {
-    #[serde(default)]
-    pub message_id: Option<Snowflake>,
-}
-
-fn custom_emoji_at(content: &str) -> Option<usize> {
-    match (content.find("<:"), content.find("<a:")) {
-        (Some(plain), Some(animated)) => Some(plain.min(animated)),
-        (Some(plain), None) => Some(plain),
-        (None, Some(animated)) => Some(animated),
-        (None, None) => None,
-    }
-}
-
-fn strip_custom_emoji(content: &str) -> String {
-    let mut out = String::new();
-    let mut rest = content;
-    while let Some(start) = custom_emoji_at(rest) {
-        out.push_str(&rest[..start]);
-        let token = &rest[start..];
-        let Some(end) = token.find('>') else {
-            out.push_str(rest);
-            return out;
-        };
-        rest = &rest[start + end + 1..];
-    }
-    out.push_str(rest);
-    out
-}
-
-fn custom_emoji_ids(content: &str) -> Vec<u64> {
-    let mut ids = Vec::new();
-    let mut rest = content;
-    while let Some(start) = custom_emoji_at(rest) {
-        let token = &rest[start..];
-        let Some(end) = token.find('>') else { break };
-        let body = &token[1..end];
-        if let Some(id) = body.rsplit(':').next().and_then(|id| id.parse().ok()) {
-            ids.push(id);
-        }
-        rest = &rest[start + end + 1..];
-    }
-    ids
-}
-
-fn media_url(media: &WireMedia) -> String {
-    if media.proxy_url.is_empty() {
-        media.url.clone()
-    } else {
-        media.proxy_url.clone()
-    }
+    pub member: Option<Value>,
 }
 
 impl From<WireMessage> for Message {
     fn from(value: WireMessage) -> Self {
-        let mut content = value.content;
-        for user in &value.mentions {
-            let name = user.display_name();
-            let id = user.id.get();
-            content = content.replace(&format!("<@{id}>"), &format!("@{name}"));
-            content = content.replace(&format!("<@!{id}>"), &format!("@{name}"));
-        }
-        for channel in &value.mention_channels {
-            if !channel.name.is_empty() {
-                content = content.replace(
-                    &format!("<#{}>", channel.id.get()),
-                    &format!("#{}", channel.name),
-                );
-            }
-        }
-        let mut extras = Vec::new();
-        for file in &value.attachments {
-            let url = media_url(&WireMedia {
-                url: file.url.clone(),
-                proxy_url: file.proxy_url.clone(),
+        let reply_to = value
+            .message_reference
+            .and_then(|reference| reference.message_id)
+            .map(|message_id| {
+                let original = value.referenced_message.as_ref();
+                Reply {
+                    message_id,
+                    author: original
+                        .and_then(|message| message.get("author"))
+                        .and_then(|author| serde_json::from_value(author.clone()).ok()),
+                    content: original
+                        .and_then(|message| message.get("content"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                }
             });
-            if url.is_empty() {
-                continue;
-            }
-            let image = file
-                .content_type
-                .as_deref()
-                .is_none_or(|kind| kind.starts_with("image/"));
-            if image {
-                extras.push(format!("attachment:{url}"));
-            } else {
-                extras.push(url);
-            }
-        }
-        for embed in &value.embeds {
-            for text in [embed.title.as_deref(), embed.description.as_deref()]
-                .into_iter()
-                .flatten()
-            {
-                if !content.contains(text) {
-                    if !content.is_empty() && !content.ends_with('\n') {
-                        content.push('\n');
-                    }
-                    content.push_str(text);
-                }
-            }
-            if let Some(media) = embed.image.as_ref().or(embed.thumbnail.as_ref()) {
-                let url = media_url(media);
-                if !url.is_empty() {
-                    extras.push(format!("attachment:{url}"));
-                }
-            }
-        }
-        if value.edited_timestamp.is_some() && !content.contains("(edited)") {
-            content.push_str(" (edited)");
-        }
-        if let Some(reference) = value.message_reference.as_ref().and_then(|r| r.message_id) {
-            if !content.starts_with("replying to ") {
-                content = format!("replying to {}: {content}", reference.get());
-            }
-        }
-        for sticker in &value.sticker_items {
-            if !sticker.name.is_empty() {
-                extras.push(sticker.name.clone());
-            }
-        }
-        let emoji_ids = custom_emoji_ids(&content);
-        content = strip_custom_emoji(&content);
-        for id in emoji_ids {
-            extras.push(format!("emoji:{id}"));
-        }
-        if content.trim().is_empty() && !extras.is_empty() {
-            content = extras.join("\n");
-        } else if !extras.is_empty() {
-            content.push('\n');
-            content.push_str(&extras.join("\n"));
-        }
         Message {
             id: value.id,
             channel_id: value.channel_id,
             author: value.author,
-            content,
+            content: value.content,
             timestamp: value.timestamp,
-            kind: value.kind,
+            kind: u8::try_from(value.kind).unwrap_or(u8::MAX),
+            edited_timestamp: value.edited_timestamp,
+            attachments: value.attachments,
+            embeds: value.embeds,
+            reactions: value.reactions,
+            mentions: value.mentions,
+            reply_to,
+            member: value
+                .member
+                .and_then(|member| serde_json::from_value(member).ok()),
         }
+    }
+}
+
+/// What a `MESSAGE_UPDATE` changed. Discord often sends only the changed
+/// fields, such as the embeds once a link has been fetched, with no author.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MessagePatch {
+    pub id: Snowflake,
+    pub channel_id: Snowflake,
+    pub content: Option<String>,
+    pub edited_timestamp: Option<String>,
+    pub embeds: Option<Vec<Embed>>,
+    pub attachments: Option<Vec<Attachment>>,
+    pub mentions: Option<Vec<User>>,
+    /// True when the payload had `message_reference`, including an explicit null.
+    pub reply_in_payload: bool,
+    /// Set when the update carried an author. Fields the payload omitted stay
+    /// on the stored message; this is not a replacement by itself.
+    pub full: Option<Message>,
+}
+
+impl MessagePatch {
+    pub fn from_value(data: &Value) -> Result<Self, serde_json::Error> {
+        let id: Snowflake = serde_json::from_value(data.get("id").cloned().unwrap_or(Value::Null))?;
+        let channel_id: Snowflake =
+            serde_json::from_value(data.get("channel_id").cloned().unwrap_or(Value::Null))?;
+        let list = |key: &str| -> Option<Value> { data.get(key).filter(|v| v.is_array()).cloned() };
+        let decode = |key: &str| -> Option<Vec<Value>> {
+            list(key).and_then(|value| serde_json::from_value(value).ok())
+        };
+        Ok(Self {
+            id,
+            channel_id,
+            content: data
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            edited_timestamp: data
+                .get("edited_timestamp")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            embeds: decode("embeds").map(|items| {
+                items
+                    .into_iter()
+                    .filter_map(|item| serde_json::from_value(item).ok())
+                    .collect()
+            }),
+            attachments: decode("attachments").map(|items| {
+                items
+                    .into_iter()
+                    .filter_map(|item| serde_json::from_value(item).ok())
+                    .collect()
+            }),
+            mentions: decode("mentions").map(|items| {
+                items
+                    .into_iter()
+                    .filter_map(|item| serde_json::from_value(item).ok())
+                    .collect()
+            }),
+            reply_in_payload: data.get("message_reference").is_some(),
+            full: if data.get("author").is_some() {
+                serde_json::from_value::<WireMessage>(data.clone())
+                    .ok()
+                    .map(Message::from)
+            } else {
+                None
+            },
+        })
     }
 }
 
@@ -788,6 +826,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_presence_without_a_status_is_not_offline() {
+        let wire: WirePresence = serde_json::from_str(r#"{"user":{"id":"42"}}"#).unwrap();
+        assert!(wire.into_entry().is_none());
+    }
+
+    #[test]
     fn a_message_keeps_mentions_edits_replies_and_attachments() {
         let raw = r#"{
             "id":"9","channel_id":"100","timestamp":"t","type":0,
@@ -795,60 +839,27 @@ mod tests {
             "edited_timestamp":"later",
             "author":{"id":"1","username":"a"},
             "mentions":[{"id":"2","username":"munch","global_name":"Munch"}],
-            "mention_channels":[{"id":"100","name":"welcome"}],
-            "attachments":[{"url":"https://cdn.example/a.png","proxy_url":"https://media.example/a.png"}],
+            "attachments":[{"id":"5","url":"https://cdn.example/a.png","proxy_url":"https://media.example/a.png","content_type":"image/png"}],
             "message_reference":{"message_id":"8"}
         }"#;
         let message = Message::from(serde_json::from_str::<WireMessage>(raw).unwrap());
-        assert!(message.content.contains("@Munch"), "{}", message.content);
-        assert!(message.content.contains("#welcome"), "{}", message.content);
-        assert!(message.content.contains("(edited)"), "{}", message.content);
-        assert!(
-            message
-                .content
-                .contains("attachment:https://media.example/a.png"),
-            "{}",
-            message.content
-        );
-        assert!(
-            message.content.starts_with("replying to 8:"),
-            "{}",
-            message.content
-        );
-        assert!(!message.content.contains("<@"), "{}", message.content);
+        // The text stays as sent; the UI turns mentions into names.
+        assert_eq!(message.content, "hello <@2> in <#100>");
+        assert_eq!(message.edited_timestamp.as_deref(), Some("later"));
+        assert_eq!(message.mentions[0].display_name(), "Munch");
+        assert_eq!(message.attachments[0].url, "https://cdn.example/a.png");
+        assert!(message.attachments[0].is_image());
+        assert_eq!(message.reply_to.unwrap().message_id.get(), 8);
 
         let embed = r#"{"id":"1","channel_id":"1","content":"","author":{"id":"1","username":"a"},"embeds":[{"title":"Welcome card"}]}"#;
         let message = Message::from(serde_json::from_str::<WireMessage>(embed).unwrap());
-        assert_eq!(message.content, "Welcome card");
+        assert_eq!(message.embeds[0].title.as_deref(), Some("Welcome card"));
+        assert_eq!(message.content, "");
 
-        let both = r#"{"id":"1","channel_id":"1","content":"<a:wave:11> <:smile:22>","edited_timestamp":"t","author":{"id":"1","username":"a"},"embeds":[{"title":"Report","description":"Results"}]}"#;
+        let both = r#"{"id":"1","channel_id":"1","content":"<a:wave:11> <:smile:22>","author":{"id":"1","username":"a"}}"#;
         let message = Message::from(serde_json::from_str::<WireMessage>(both).unwrap());
-        assert!(
-            message.content.contains("emoji:11\nemoji:22")
-                || (message.content.find("emoji:11") < message.content.find("emoji:22")),
-            "{}",
-            message.content
-        );
-        assert!(message.content.contains("Report"), "{}", message.content);
-        assert!(message.content.contains("Results"), "{}", message.content);
-        assert!(message.content.contains("(edited)"), "{}", message.content);
-        assert!(!message.content.contains("<a:"), "{}", message.content);
-        assert!(!message.content.contains("<:"), "{}", message.content);
-
-        let file = r#"{"id":"1","channel_id":"1","content":"notes","author":{"id":"1","username":"a"},"attachments":[{"url":"https://cdn.example/a.pdf","content_type":"application/pdf"}]}"#;
-        let message = Message::from(serde_json::from_str::<WireMessage>(file).unwrap());
-        assert!(
-            message.content.contains("https://cdn.example/a.pdf"),
-            "{}",
-            message.content
-        );
-        assert!(
-            !message.content.contains("attachment:"),
-            "{}",
-            message.content
-        );
+        assert_eq!(message.content, "<a:wave:11> <:smile:22>");
     }
-
     #[test]
     fn identify_names_rencord() {
         let payload = identify_payload("token-value");
@@ -935,5 +946,183 @@ mod tests {
         let beat = voice_heartbeat(1_700_000_000_000, 12);
         assert_eq!(beat["d"]["t"], 1_700_000_000_000u64);
         assert_eq!(beat["d"]["seq_ack"], 12);
+    }
+
+    fn wire(value: serde_json::Value) -> Message {
+        Message::from(serde_json::from_value::<WireMessage>(value).unwrap())
+    }
+
+    fn author() -> serde_json::Value {
+        json!({ "id": "42", "username": "ada", "global_name": "Ada", "avatar": "abc123", "bot": false })
+    }
+
+    #[test]
+    fn a_join_message_has_a_type_and_no_text() {
+        let message = wire(json!({
+            "id": "100", "channel_id": "7", "type": 7, "content": "",
+            "timestamp": "2026-11-07T10:00:00.000000+00:00", "author": author(),
+        }));
+        assert_eq!(message.kind, 7);
+        assert!(message.is_system());
+        assert!(message.content.is_empty());
+        let ordinary = wire(json!({
+            "id": "101", "channel_id": "7", "type": 0, "content": "hi", "author": author(),
+        }));
+        assert!(!ordinary.is_system());
+        let reply = wire(json!({
+            "id": "102", "channel_id": "7", "type": 19, "content": "yes", "author": author(),
+        }));
+        assert!(!reply.is_system());
+    }
+
+    #[test]
+    fn a_message_carries_files_embeds_reactions_mentions_a_reply_and_an_edit() {
+        let message = wire(json!({
+            "id": "200", "channel_id": "7", "type": 19, "content": "look <@43>",
+            "timestamp": "2026-11-19T12:00:00.000000+00:00",
+            "edited_timestamp": "2026-11-19T12:05:00.000000+00:00",
+            "author": author(),
+            "mentions": [{ "id": "43", "username": "charles", "global_name": "Charles" }],
+            "attachments": [{
+                "id": "300", "filename": "clip.png", "size": 2048,
+                "url": "https://cdn.discordapp.com/attachments/1/300/clip.png?ex=1&is=2&hm=3&",
+                "proxy_url": "https://media.discordapp.net/attachments/1/300/clip.png?ex=1&is=2&hm=3&",
+                "content_type": "image/png", "width": 640, "height": 360
+            }],
+            "embeds": [{
+                "type": "link", "title": "Release notes", "description": "What changed",
+                "url": "https://example.test/notes", "color": 5198940,
+                "provider": { "name": "Example" },
+                "thumbnail": { "url": "https://example.test/t.png",
+                               "proxy_url": "https://images-ext-1.discordapp.net/external/t.png",
+                               "width": 100, "height": 50 }
+            }],
+            "reactions": [
+                { "count": 2, "me": true, "emoji": { "id": null, "name": "\u{1F44D}" } },
+                { "count": 1, "me": false, "emoji": { "id": "900", "name": "pepe" } }
+            ],
+            "message_reference": { "message_id": "150", "channel_id": "7" },
+            "referenced_message": { "id": "150", "content": "any news?", "author": author() },
+        }));
+        assert_eq!(
+            message.edited_timestamp.as_deref(),
+            Some("2026-11-19T12:05:00.000000+00:00")
+        );
+        assert_eq!(message.mentions.len(), 1);
+        assert!(message.mentions_user(Snowflake::new(43)));
+        assert!(!message.mentions_user(Snowflake::new(99)));
+        let file = &message.attachments[0];
+        assert_eq!(
+            (file.filename.as_str(), file.size, file.width, file.height),
+            ("clip.png", 2048, Some(640), Some(360))
+        );
+        assert!(file.is_image() && !file.is_video());
+        let embed = &message.embeds[0];
+        assert_eq!(embed.kind.as_deref(), Some("link"));
+        assert_eq!(embed.title.as_deref(), Some("Release notes"));
+        assert_eq!(
+            embed.provider.as_ref().and_then(|p| p.name.as_deref()),
+            Some("Example")
+        );
+        assert_eq!(embed.color, Some(5198940));
+        assert_eq!(
+            embed.thumbnail.as_ref().map(|t| t.best_url()),
+            Some("https://images-ext-1.discordapp.net/external/t.png")
+        );
+        assert_eq!(message.reactions.len(), 2);
+        assert!(message.reactions[0].me);
+        assert_eq!(message.reactions[1].emoji.id, Some(Snowflake::new(900)));
+        let reply = message.reply_to.as_ref().unwrap();
+        assert_eq!(reply.message_id, Snowflake::new(150));
+        assert_eq!(reply.content.as_deref(), Some("any news?"));
+        assert_eq!(reply.author.as_ref().map(|u| u.display_name()), Some("Ada"));
+    }
+
+    #[test]
+    fn one_bad_attachment_or_embed_does_not_cost_the_message() {
+        let message = wire(json!({
+            "id": "1", "channel_id": "2", "content": "x", "author": author(),
+            "attachments": [
+                { "id": "5", "filename": "ok.png", "url": "https://cdn.discordapp.com/a/ok.png", "size": 3 },
+                { "id": { "nested": true }, "filename": 4 },
+                7
+            ],
+            "embeds": [ "not an object", { "title": "kept" } ],
+            "reactions": null,
+            "mentions": [ { "no_id_here": true } ],
+        }));
+        assert_eq!(message.attachments.len(), 1);
+        assert_eq!(message.attachments[0].filename, "ok.png");
+        assert_eq!(message.embeds.len(), 1);
+        assert_eq!(message.embeds[0].title.as_deref(), Some("kept"));
+        assert!(message.reactions.is_empty());
+        assert!(message.mentions.is_empty());
+        assert_eq!(message.content, "x");
+    }
+
+    #[test]
+    fn null_sizes_and_a_deleted_reply_decode() {
+        let message = wire(json!({
+            "id": "1", "channel_id": "2", "content": "", "author": author(),
+            "attachments": [{ "id": "5", "filename": "f.bin", "url": "u", "width": null, "height": null, "content_type": null }],
+            "message_reference": { "message_id": "9" },
+            "referenced_message": null,
+        }));
+        assert_eq!(message.attachments[0].width, None);
+        assert!(!message.attachments[0].is_image());
+        let reply = message.reply_to.unwrap();
+        assert_eq!(reply.message_id, Snowflake::new(9));
+        assert!(reply.author.is_none() && reply.content.is_none());
+        // A type larger than a byte maps to a system message, not a crash.
+        let odd = wire(json!({ "id": "1", "channel_id": "2", "type": 4000, "author": author() }));
+        assert!(odd.is_system());
+    }
+
+    #[test]
+    fn a_partial_update_carries_only_what_changed() {
+        let patch = MessagePatch::from_value(&json!({
+            "id": "10", "channel_id": "2",
+            "embeds": [{ "type": "link", "title": "Resolved", "url": "https://example.test" }],
+        }))
+        .unwrap();
+        assert_eq!(patch.id, Snowflake::new(10));
+        assert_eq!(patch.embeds.as_ref().map(|e| e.len()), Some(1));
+        assert_eq!(patch.content, None);
+        assert_eq!(patch.attachments, None);
+        assert!(patch.full.is_none());
+        let full = MessagePatch::from_value(&json!({
+            "id": "10", "channel_id": "2", "content": "edited", "author": author(),
+            "edited_timestamp": "2026-11-20T01:00:00.000000+00:00",
+        }))
+        .unwrap();
+        assert_eq!(full.content.as_deref(), Some("edited"));
+        assert_eq!(
+            full.full.as_ref().map(|m| m.content.as_str()),
+            Some("edited")
+        );
+        assert!(MessagePatch::from_value(&json!({ "embeds": [] })).is_err());
+    }
+
+    #[test]
+    fn a_message_carries_its_authors_server_profile() {
+        let message = wire(json!({
+            "id": "1", "channel_id": "2", "content": "hi", "author": author(),
+            "member": { "nick": "The Boss", "roles": ["900", "901"], "joined_at": "2026-01-01T00:00:00Z" },
+        }));
+        let member = message.member.unwrap();
+        assert_eq!(member.nickname(), Some("The Boss"));
+        assert_eq!(member.roles, vec![Snowflake::new(900), Snowflake::new(901)]);
+        // A member that is not an object cannot cost the message.
+        let odd = wire(json!({
+            "id": "1", "channel_id": "2", "content": "hi", "author": author(), "member": 7,
+        }));
+        assert!(odd.member.is_none());
+        assert_eq!(odd.content, "hi");
+        // An empty nickname is not a nickname.
+        let blank = wire(json!({
+            "id": "1", "channel_id": "2", "content": "hi", "author": author(),
+            "member": { "nick": "", "roles": [] },
+        }));
+        assert_eq!(blank.member.unwrap().nickname(), None);
     }
 }
