@@ -4,6 +4,8 @@
 //! still compress, and is covered by a unit test. Live Discord traffic is not
 //! contacted from tests; a local websocket stands in for the gateway.
 
+mod shape;
+
 use flate2::{Decompress, FlushDecompress};
 use futures_util::{SinkExt, StreamExt};
 use rencord_model::{Member, Message, PresenceStatus, Role, Snowflake, User};
@@ -201,6 +203,7 @@ async fn run_socket(
     let (socket, _) = connect_async(url.as_str()).await?;
     let (mut write, mut read) = socket.split();
     let mut inflater = ZlibStream::new();
+    let mut shape_log = shape::ShapeLog::from_env();
     let mut ticker: Option<tokio::time::Interval> = None;
     let mut awaiting_ack = false;
 
@@ -280,6 +283,9 @@ async fn run_socket(
                                 .get("resume_gateway_url")
                                 .and_then(Value::as_str)
                                 .map(str::to_owned);
+                        }
+                        if let Some(log) = shape_log.as_mut() {
+                            log.record(&name, &frame.data);
                         }
                         match decode_dispatch(&name, frame.data) {
                             Ok(Some(event)) => {
